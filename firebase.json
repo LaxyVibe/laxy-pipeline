@@ -1,0 +1,52 @@
+{
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "pipeline",
+      "runtime": "python312",
+      "ignore": [
+        "venv",
+        ".pytest_cache",
+        "__pycache__",
+        "tests"
+      ]
+    }
+  ],
+  "hosting": {
+    "public": "laxy-studio/dist",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "/pipeline/start",
+        "function": "pipeline_start"
+      },
+      {
+        "source": "/pipeline/resume",
+        "function": "pipeline_resume"
+      },
+      {
+        "source": "/pipeline/status",
+        "function": "pipeline_status"
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "emulators": {
+    "functions": {
+      "port": 5001
+    },
+    "firestore": {
+      "port": 8080
+    },
+    "hosting": {
+      "port": 5000
+    },
+    "ui": {
+      "enabled": true,
+      "port": 4000
+    }
+  }
+}
