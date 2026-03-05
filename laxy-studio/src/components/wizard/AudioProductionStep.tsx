@@ -3,19 +3,8 @@
 //
 // Sub-steps:
 //   1. Configure (character + voice + director note)
-//   2. Generate Audio (trigger ADK pipeline → spinner)
+//   2. Generate Audio (calls /pipeline/audio-generate → Gemini TTS)
 //   3. Review & Approve (audio player, pronunciation markers, SRT, Human Gate 5)
-//
-// Features:
-//   S5-1  Character Selection
-//   S5-2  Voice Selection
-//   S5-3  Director Note
-//   S5-4  Audio Generation
-//   S5-5  Audio Playback & QA
-//   S5-6  Human Gate 5 — Audio Review
-//   S5-7  Pronunciation Fix markers
-//   S5-8  Generation History
-//   S5-9  SRT Generation & viewer
 // ---------------------------------------------------------------------------
 import { useState, useCallback, useMemo } from 'react';
 import {
@@ -33,7 +22,6 @@ import {
   Fade,
   alpha,
 } from '@mui/material';
-import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import SettingsVoiceIcon from '@mui/icons-material/SettingsVoice';
@@ -41,29 +29,24 @@ import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import RateReviewIcon from '@mui/icons-material/RateReview';
 import DoneAllIcon from '@mui/icons-material/DoneAll';
 import RemoveDoneIcon from '@mui/icons-material/RemoveDone';
-import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
-import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import HeadphonesIcon from '@mui/icons-material/Headphones';
 import TuneIcon from '@mui/icons-material/Tune';
+import SyncIcon from '@mui/icons-material/Sync';
 
 import { useGuidesStore } from '../../guidesStore';
 import {
-  startPipeline,
+  generateAudioForLanguage,
   sendHumanInput,
-  getExecutedNodes,
-  getStoppedNodeId,
-  getNodeOutput,
 } from '../../api';
 import type {
   AudioStatus,
   LanguageAudio,
   LanguageSRT,
   SRTEntry,
-  DirectorNote,
-  AudioGenerationRun,
 } from '../../types/entity';
 import {
   SUPPORTED_LANGUAGES,
+  langLabel,
   CHARACTER_PRESETS,
   AVAILABLE_VOICES,
 } from '../../types/entity';
@@ -76,6 +59,7 @@ import AudioPlayer from './audio/AudioPlayer';
 import PronunciationMarkerUI from './audio/PronunciationMarker';
 import GenerationHistory from './audio/GenerationHistory';
 import SRTViewer from './audio/SRTViewer';
+import { usePipelineSync } from '../../hooks/usePipelineSync';
 
 // ── Sub-step definitions ──
 
@@ -101,17 +85,17 @@ function statusToSubStep(status: AudioStatus): number {
   }
 }
 
-// ── Helper: language label lookup ──
-
-function langLabel(code: string): string {
-  return (
-    SUPPORTED_LANGUAGES.find((l) => l.code === code)?.label ?? code.toUpperCase()
-  );
-}
-
 // ── Processing overlay ──
 
-function ProcessingOverlay() {
+type LangProgressStatus = 'pending' | 'generating' | 'done' | 'error';
+
+interface ProcessingOverlayProps {
+  languages: string[];
+  perLangProgress: Record<string, { status: LangProgressStatus; error?: string }>;
+}
+
+function ProcessingOverlay({ languages, perLangProgress }: ProcessingOverlayProps) {
+  const doneCount = Object.values(perLangProgress).filter((p) => p.status === 'done').length;
   return (
     <Fade in>
       <Paper
@@ -124,27 +108,39 @@ function ProcessingOverlay() {
           gap: 3,
         }}
       >
-        <CircularProgress size={64} thickness={3} />
         <Box>
           <Typography variant="h6" gutterBottom>
             AI is generating audio…
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Creating TTS narration for selected languages. This includes voice
-            synthesis, pronunciation check, and SRT generation.
-            <br />
-            This may take a few moments.
+            Generating TTS narration for {languages.length} language{languages.length !== 1 ? 's' : ''} in parallel.
           </Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
-          <Chip label="Voice Recommendation" size="small" variant="outlined" />
-          <Chip label="→" size="small" sx={{ bgcolor: 'transparent' }} />
-          <Chip label="Director Note" size="small" variant="outlined" />
-          <Chip label="→" size="small" sx={{ bgcolor: 'transparent' }} />
-          <Chip label="Audio Generation" size="small" variant="outlined" />
-          <Chip label="→" size="small" sx={{ bgcolor: 'transparent' }} />
-          <Chip label="SRT Subtitles" size="small" variant="outlined" />
+          {languages.map((lang) => {
+            const prog = perLangProgress[lang];
+            return (
+              <Chip
+                key={lang}
+                label={langLabel(lang)}
+                icon={
+                  prog?.status === 'done' ? <CheckCircleOutlineIcon color="success" fontSize="small" /> :
+                  prog?.status === 'error' ? <RemoveDoneIcon color="error" fontSize="small" /> :
+                  <CircularProgress size={16} thickness={5} color="inherit" />
+                }
+                color={
+                  prog?.status === 'done' ? 'success' :
+                  prog?.status === 'error' ? 'error' : 'default'
+                }
+                variant={prog?.status === 'done' ? 'filled' : 'outlined'}
+                sx={{ minWidth: 120, fontWeight: 600 }}
+              />
+            );
+          })}
         </Box>
+        <Typography variant="caption" color="text.secondary">
+          {doneCount} / {languages.length} complete
+        </Typography>
       </Paper>
     </Fade>
   );
@@ -158,7 +154,6 @@ export default function AudioProductionStep() {
   const translations = useGuidesStore((s) => s.translations);
   const coreLanguage = useGuidesStore((s) => s.entityConfig.coreLanguage);
   const supportedLanguages = useGuidesStore((s) => s.entityConfig.supportedLanguages);
-  const spots = useGuidesStore((s) => s.spots);
 
   // Audio store state
   const selectedCharacterId = useGuidesStore((s) => s.selectedCharacterId);
@@ -178,17 +173,19 @@ export default function AudioProductionStep() {
   const addGenerationRun = useGuidesStore((s) => s.addGenerationRun);
   const approveAllAudio = useGuidesStore((s) => s.approveAllAudio);
   const rejectAllAudio = useGuidesStore((s) => s.rejectAllAudio);
-  const resetAudio = useGuidesStore((s) => s.resetAudio);
-  const pipelineSessionId = useGuidesStore((s) => s.pipelineSessionId);
+  const resetDownstreamFrom = useGuidesStore((s) => s.resetDownstreamFrom);
   const setPipelineIds = useGuidesStore((s) => s.setPipelineIds);
+
+  const { applyResponse } = usePipelineSync();
 
   // Local state
   const [approveLoading, setApproveLoading] = useState(false);
+  const [gateSyncFailed, setGateSyncFailed] = useState(false);
   const [selectedGenLanguages, setSelectedGenLanguages] = useState<string[]>(
     () => [...supportedLanguages],
   );
-  const [genProgress, setGenProgress] = useState(0);
   const [currentTimestamp, setCurrentTimestamp] = useState(0);
+  const [perLangProgress, setPerLangProgress] = useState<Record<string, { status: LangProgressStatus; error?: string }>>({});
 
   const activeSubStep = statusToSubStep(audioStatus);
   const approvedCount = audioFiles.filter((a) => a.approved).length;
@@ -213,135 +210,123 @@ export default function AudioProductionStep() {
   // Configuration is valid if character + voice are selected
   const configValid = !!selectedCharacterId && !!selectedVoiceId;
 
-  // ── Build question for audio generation ──
-  const buildAudioQuestion = useCallback(() => {
-    const character = CHARACTER_PRESETS.find((c) => c.id === selectedCharacterId);
-    const voice = AVAILABLE_VOICES.find((v) => v.id === selectedVoiceId);
-
-    const scriptsSummary = scripts
-      .map((s) => `Spot #${s.spotNumber} "${s.title}":\n${s.scriptText}`)
-      .join('\n\n---\n\n');
-
-    return (
-      `Generate audio narration for approved scripts.\n` +
-      `Core language: ${coreLanguage}\n` +
-      `Target languages: ${selectedGenLanguages.map(langLabel).join(', ')}\n\n` +
-      `Voice Character: ${character?.name ?? 'Default'} — ${character?.personality ?? ''}\n` +
-      `TTS Voice: ${voice?.name ?? 'Default'} (${voice?.gender ?? 'unknown'})\n\n` +
-      `Director Note:\n` +
-      `  Vocal Environment: ${directorNote.vocalEnvironment || '(none)'}\n` +
-      `  Mission: ${directorNote.mission || '(none)'}\n` +
-      `  Pacing: ${directorNote.pacing || '(none)'}\n\n` +
-      `Scripts:\n${scriptsSummary}`
-    );
-  }, [
-    scripts,
-    coreLanguage,
-    selectedGenLanguages,
-    selectedCharacterId,
-    selectedVoiceId,
-    directorNote,
-  ]);
-
-  // ── Trigger audio generation ──
+  // ── Trigger audio generation (parallel per-language) ──
   const handleGenerateAudio = useCallback(async () => {
     if (selectedGenLanguages.length === 0 || !configValid) return;
 
     setAudioStatus('generating');
     setAudioError(null);
-    setGenProgress(0);
+
+    const sessionId = `audio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Initialise per-language progress
+    const initialProgress: Record<string, { status: LangProgressStatus; error?: string }> = {};
+    selectedGenLanguages.forEach((lang) => { initialProgress[lang] = { status: 'pending' }; });
+    setPerLangProgress(initialProgress);
+
+    // Build translation lookup per language
+    const translationsByLang: Record<string, Array<{ spotId: string; translatedText: string }>> = {};
+    translations.filter((t) => t.lang !== coreLanguage).forEach((t) => {
+      translationsByLang[t.lang] = t.spots.map((sp) => ({
+        spotId: sp.spotId,
+        translatedText: sp.translatedText,
+      }));
+    });
+
+    const scriptPayload = scripts.map((s) => ({
+      spotId: s.spotId,
+      spotNumber: s.spotNumber,
+      title: s.title,
+      scriptText: s.scriptText,
+    }));
+
+    const directorNotePayload = {
+      vocalEnvironment: directorNote.vocalEnvironment || '',
+      mission: directorNote.mission || '',
+      pacing: directorNote.pacing || '',
+    };
 
     try {
-      const sessionId = `audio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const response = await startPipeline(buildAudioQuestion(), sessionId);
+      const allAudio: LanguageAudio[] = [];
+      const allSrt: LanguageSRT[] = [];
 
-      const stoppedNodeId = getStoppedNodeId(response);
-      setPipelineIds(response.sessionId, stoppedNodeId);
+      await Promise.all(
+        selectedGenLanguages.map(async (lang) => {
+          setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'generating' } }));
+          try {
+            const res = await generateAudioForLanguage({
+              sessionId,
+              scripts: scriptPayload,
+              voiceId: selectedVoiceId!,
+              language: lang,
+              directorNote: directorNotePayload,
+              translations: translationsByLang[lang],
+            });
 
-      // Parse ADK outputs from steps S7, S8, S9, S10
-      const voiceOutput = getNodeOutput(response, 'S7: Voice Recommend');
-      const directorOutput = getNodeOutput(response, 'S8: Director Note');
-      const audioOutput = getNodeOutput(response, 'S9: Audio Generation');
-      const srtOutput = getNodeOutput(response, 'S10: SRT Gen');
+            // Aggregate audio files for this language — keep ALL per-spot audio
+            const spotAudios: import('../../types/entity').SpotAudioFile[] = [];
+            let firstUrl = '';
+            let totalDuration = 0;
+            for (const af of res.audioFiles) {
+              if (af.audioUrl) {
+                if (!firstUrl) firstUrl = af.audioUrl;
+                spotAudios.push({
+                  spotId: af.spotId,
+                  spotNumber: af.spotNumber,
+                  title: af.title,
+                  audioUrl: af.audioUrl,
+                  durationMs: af.durationMs,
+                });
+              }
+              totalDuration += af.durationMs;
+            }
+            if (firstUrl) {
+              allAudio.push({
+                lang,
+                label: langLabel(lang),
+                audioUrl: firstUrl,
+                durationMs: totalDuration,
+                approved: false,
+                spots: spotAudios,
+              });
+            }
 
-      let extractedAudio: LanguageAudio[] = [];
-      let extractedSrt: LanguageSRT[] = [];
+            // Aggregate SRT files
+            const entries: SRTEntry[] = [];
+            let rawSrt = '';
+            for (const sf of res.srtFiles) {
+              const offset = entries.length;
+              for (const e of sf.entries) {
+                entries.push({ index: e.index + offset, startTime: e.startTime, endTime: e.endTime, text: e.text });
+              }
+              rawSrt += (rawSrt ? '\n' : '') + sf.rawSrt;
+            }
+            if (entries.length > 0) {
+              allSrt.push({ lang, label: langLabel(lang), entries, rawSrt });
+            }
 
-      // Parse audio output
-      if (audioOutput && typeof audioOutput === 'object') {
-        const rawAudio =
-          (audioOutput as Record<string, unknown>).audio ??
-          (audioOutput as Record<string, unknown>).files ??
-          (Array.isArray(audioOutput) ? audioOutput : null);
+            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'done' } }));
+          } catch (err: any) {
+            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'error', error: err?.message || 'Error' } }));
+          }
+        }),
+      );
 
-        if (Array.isArray(rawAudio)) {
-          extractedAudio = rawAudio.map((raw: Record<string, unknown>) => ({
-            lang: (raw.lang as string) ?? (raw.language as string) ?? coreLanguage,
-            label: langLabel(
-              (raw.lang as string) ?? (raw.language as string) ?? coreLanguage,
-            ),
-            audioUrl: (raw.audioUrl as string) ?? (raw.url as string) ?? '',
-            durationMs: (raw.durationMs as number) ?? (raw.duration as number) ?? 0,
-            approved: false,
-          }));
-        }
+      if (allAudio.length === 0) {
+        setAudioError('No audio was generated for any language.');
+        setAudioStatus('error');
+        return;
       }
 
-      // Parse SRT output
-      if (srtOutput && typeof srtOutput === 'object') {
-        const rawSrt =
-          (srtOutput as Record<string, unknown>).srt ??
-          (srtOutput as Record<string, unknown>).subtitles ??
-          (Array.isArray(srtOutput) ? srtOutput : null);
-
-        if (Array.isArray(rawSrt)) {
-          extractedSrt = rawSrt.map((raw: Record<string, unknown>) => ({
-            lang: (raw.lang as string) ?? coreLanguage,
-            label: langLabel((raw.lang as string) ?? coreLanguage),
-            entries: Array.isArray(raw.entries)
-              ? (raw.entries as SRTEntry[])
-              : [],
-            rawSrt: (raw.rawSrt as string) ?? (raw.content as string) ?? '',
-          }));
-        }
-      }
-
-      // Apply voice recommendation if available
-      if (voiceOutput && typeof voiceOutput === 'object') {
-        const rec = voiceOutput as Record<string, unknown>;
-        if (rec.characterId || rec.voiceId) {
-          // AI might suggest a different character/voice — note it but don't override
-          console.log('[AudioStep] AI voice recommendation:', rec);
-        }
-      }
-
-      // Apply director note if available from AI
-      if (directorOutput && typeof directorOutput === 'object') {
-        const dn = directorOutput as Record<string, unknown>;
-        if (dn.vocalEnvironment || dn.mission || dn.pacing) {
-          console.log('[AudioStep] AI director note suggestion:', dn);
-        }
-      }
-
-      // Fallback to sample data if no audio came from pipeline
-      if (extractedAudio.length === 0) {
-        extractedAudio = createSampleAudioFiles(selectedGenLanguages);
-      }
-
-      if (extractedSrt.length === 0) {
-        extractedSrt = createSampleSrtFiles(selectedGenLanguages, scripts);
-      }
-
-      setAudioFiles(extractedAudio);
-      setSrtFiles(extractedSrt);
+      setPipelineIds(sessionId, null);
+      setAudioFiles(allAudio);
+      setSrtFiles(allSrt);
 
       // Record generation run
       const character = CHARACTER_PRESETS.find((c) => c.id === selectedCharacterId);
       const voice = AVAILABLE_VOICES.find((v) => v.id === selectedVoiceId);
       const audioUrls: Record<string, string> = {};
-      extractedAudio.forEach((a) => {
-        audioUrls[a.lang] = a.audioUrl;
-      });
+      allAudio.forEach((a) => { audioUrls[a.lang] = a.audioUrl; });
 
       addGenerationRun({
         id: `run-${Date.now().toString(36)}`,
@@ -359,41 +344,17 @@ export default function AudioProductionStep() {
       setAudioStatus('review');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-
-      // Fallback to sample data
-      const fallbackAudio = createSampleAudioFiles(selectedGenLanguages);
-      const fallbackSrt = createSampleSrtFiles(selectedGenLanguages, scripts);
-      setAudioFiles(fallbackAudio);
-      setSrtFiles(fallbackSrt);
-
-      // Record generation run even on fallback
-      const character = CHARACTER_PRESETS.find((c) => c.id === selectedCharacterId);
-      const voice = AVAILABLE_VOICES.find((v) => v.id === selectedVoiceId);
-      const audioUrls: Record<string, string> = {};
-      fallbackAudio.forEach((a) => {
-        audioUrls[a.lang] = a.audioUrl;
-      });
-
-      addGenerationRun({
-        id: `run-${Date.now().toString(36)}`,
-        timestamp: Date.now(),
-        languages: selectedGenLanguages,
-        characterId: selectedCharacterId ?? '',
-        characterName: character?.name ?? 'Unknown',
-        voiceId: selectedVoiceId ?? '',
-        voiceName: voice?.name ?? 'Unknown',
-        directorNote: { ...directorNote },
-        tokenCount: estimatedTokens,
-        audioUrls,
-      });
-
-      setAudioError(`Pipeline unavailable — using placeholder audio. (${message})`);
-      setAudioStatus('review');
+      setAudioError(`Audio generation failed: ${message}`);
+      setAudioStatus('error');
     }
   }, [
     selectedGenLanguages,
     configValid,
-    buildAudioQuestion,
+    scripts,
+    translations,
+    coreLanguage,
+    selectedVoiceId,
+    directorNote,
     setAudioStatus,
     setAudioError,
     setAudioFiles,
@@ -401,16 +362,13 @@ export default function AudioProductionStep() {
     addGenerationRun,
     setPipelineIds,
     selectedCharacterId,
-    selectedVoiceId,
-    directorNote,
     estimatedTokens,
-    coreLanguage,
-    scripts,
   ]);
 
   // ── Approve all audio (Human Gate 5) ──
   const handleApproveGate = useCallback(async () => {
     setApproveLoading(true);
+    setGateSyncFailed(false);
     try {
       const approvalPayload = {
         approvedLanguages: audioFiles.filter((a) => a.approved).map((a) => a.lang),
@@ -421,20 +379,42 @@ export default function AudioProductionStep() {
         directorNote,
       };
 
-      if (pipelineSessionId) {
+      // Read pipeline IDs directly from the store to avoid stale closures
+      const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();
+      console.log('[AudioProductionStep] Approve clicked — sessionId:', sid, 'checkpointId:', cpId);
+
+      if (sid && cpId) {
         try {
-          const checkpointId = useGuidesStore.getState().pipelineCheckpointId;
-          if (checkpointId) {
-            await sendHumanInput(
-              pipelineSessionId,
-              'approve',
-              checkpointId,
-              JSON.stringify(approvalPayload),
+          const response = await sendHumanInput(
+            sid,
+            'approve',
+            cpId,
+            JSON.stringify(approvalPayload),
+          );
+          // Apply the response so downstream steps (publish, etc.) are pre-populated
+          applyResponse(response);
+
+          // Surface any downstream step errors as a warning
+          const stepErrors = (response.steps ?? [])
+            .filter((s) => s.status === 'ERROR' && s.output)
+            .map((s) => {
+              const out = s.output as Record<string, unknown>;
+              return `[${s.label}] ${(out.error as string) ?? (out.message as string) ?? 'Unknown error'}`;
+            });
+          if (stepErrors.length > 0) {
+            setAudioError(
+              'Audio approved, but downstream pipeline steps encountered errors:\n' +
+              stepErrors.join('\n'),
             );
           }
-        } catch {
-          // Pipeline gate call failed — continue anyway
+        } catch (gateErr: unknown) {
+          const gateMsg = gateErr instanceof Error ? gateErr.message : 'Pipeline sync failed';
+          console.warn('[AudioProductionStep] Gate approval failed:', gateMsg);
+          setAudioError(`Pipeline sync failed — you can retry from the approved view. (${gateMsg})`);
+          setGateSyncFailed(true);
         }
+      } else {
+        console.warn('[AudioProductionStep] No pipeline session/checkpoint — approval saved locally only');
       }
 
       setAudioStatus('approved');
@@ -446,44 +426,38 @@ export default function AudioProductionStep() {
     }
   }, [
     audioFiles,
-    pipelineSessionId,
     selectedCharacterId,
     selectedVoiceId,
     directorNote,
     setAudioStatus,
     setAudioError,
+    applyResponse,
   ]);
 
-  // ── Reset ──
+  // ── Reset (cascades to downstream: audio + publish) ──
   const handleReset = useCallback(() => {
-    resetAudio();
-  }, [resetAudio]);
+    resetDownstreamFrom('audio');
+  }, [resetDownstreamFrom]);
 
-  // ── Move from configure → generate ──
-  const handleProceedToGenerate = useCallback(() => {
-    setAudioStatus('configuring');
-    // We set 'configuring' first, then immediately move to idle-like generate view
-    // Actually, we'll use 'generating' only when the API is called.
-    // For the UI, configuring means the user can still tweak settings.
-    // Let's keep the status progression simple: idle → configuring → generating → review → approved
-  }, [setAudioStatus]);
-
-  // ── Pre-condition: translation or script must be approved ──
+  // ── Pre-condition: scripts must be approved, and translation must be approved (unless single-language) ──
+  const scriptStatus = useGuidesStore((s) => s.scriptStatus);
   const hasSingleLanguage = supportedLanguages.length === 1;
   const prerequisiteMet =
-    translationStatus === 'approved' ||
-    hasSingleLanguage; // Single-language guides skip translation
+    scriptStatus === 'approved' &&
+    (translationStatus === 'approved' || hasSingleLanguage);
 
   if (!prerequisiteMet) {
+    const missingScript = scriptStatus !== 'approved';
     return (
       <Paper sx={{ p: 4, textAlign: 'center' }}>
         <HeadphonesIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
         <Typography variant="h6" color="text.secondary" gutterBottom>
-          Complete Translation First
+          {missingScript ? 'Complete Script Review First' : 'Complete Translation First'}
         </Typography>
         <Typography variant="body2" color="text.disabled">
-          Approve translations in Step 4 before generating audio, or use a
-          single-language configuration.
+          {missingScript
+            ? 'Approve the scripts in Step 3 (Script Generation) before generating audio.'
+            : 'Approve translations in Step 4 before generating audio, or use a single-language configuration.'}
         </Typography>
       </Paper>
     );
@@ -514,7 +488,7 @@ export default function AudioProductionStep() {
                   icon:
                     audioStatus === 'approved' && idx <= activeSubStep ? (
                       <CheckCircleOutlineIcon color="success" />
-                    ) : undefined,
+                    ) : step.icon,
                 }}
               >
                 <Typography
@@ -558,6 +532,7 @@ export default function AudioProductionStep() {
           <Paper sx={{ p: 3, mb: 3 }}>
             <AudioGenerationPanel
               selectedLanguages={selectedGenLanguages}
+              availableLanguages={supportedLanguages}
               onToggleLanguage={handleToggleLanguage}
               onGenerate={handleGenerateAudio}
               generating={false}
@@ -581,7 +556,7 @@ export default function AudioProductionStep() {
       )}
 
       {/* ═══════════ GENERATING — Processing overlay ═══════════ */}
-      {audioStatus === 'generating' && <ProcessingOverlay />}
+      {audioStatus === 'generating' && <ProcessingOverlay languages={selectedGenLanguages} perLangProgress={perLangProgress} />}
 
       {/* ═══════════ REVIEW — Audio Player, Pronunciation, SRT, Gate ═══════════ */}
       {(audioStatus === 'review' || audioStatus === 'error') && (
@@ -697,7 +672,9 @@ export default function AudioProductionStep() {
                 color="inherit"
                 startIcon={<RestartAltIcon />}
                 onClick={() => {
-                  // Go back to configure to re-generate
+                  // Go back to configure — clear stale audio/SRT so state is consistent
+                  setAudioFiles([]);
+                  setSrtFiles([]);
                   setAudioStatus('idle');
                 }}
               >
@@ -738,6 +715,25 @@ export default function AudioProductionStep() {
               {srtFiles.length !== 1 ? 's' : ''}. Ready for publishing.
             </Typography>
             <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+              {gateSyncFailed && (
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={approveLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                  disabled={approveLoading}
+                  onClick={handleApproveGate}
+                >
+                  Retry Sync
+                </Button>
+              )}
+              <Button
+                variant="outlined"
+                color="warning"
+                startIcon={<RateReviewIcon />}
+                onClick={() => setAudioStatus('review')}
+              >
+                Redo Review
+              </Button>
               <Button
                 variant="outlined"
                 startIcon={<RestartAltIcon />}
@@ -750,77 +746,5 @@ export default function AudioProductionStep() {
         </Fade>
       )}
     </Box>
-  );
-}
-
-// ── Fallback sample audio files (Phase 1A stub data) ──
-
-function createSampleAudioFiles(languages: string[]): LanguageAudio[] {
-  return languages.map((lang) => ({
-    lang,
-    label: langLabel(lang),
-    audioUrl: '', // Placeholder — no real audio in Phase 1A
-    durationMs: 180_000 + Math.floor(Math.random() * 60_000), // 3–4 min placeholder
-    approved: false,
-  }));
-}
-
-function createSampleSrtFiles(
-  languages: string[],
-  scripts: { spotNumber: number; title: string; scriptText: string }[],
-): LanguageSRT[] {
-  return languages.map((lang) => {
-    const entries: SRTEntry[] = [];
-    let cumSec = 0;
-
-    scripts.forEach((script, idx) => {
-      // Split script into sentences for SRT entries
-      const sentences = script.scriptText
-        .split(/(?<=[.!?])\s+/)
-        .filter((s) => s.trim().length > 0);
-
-      sentences.forEach((sentence, sIdx) => {
-        const wordsCount = sentence.split(/\s+/).length;
-        const durationSec = Math.max(2, Math.round(wordsCount * 0.4)); // ~0.4s per word
-        const startSec = cumSec;
-        const endSec = cumSec + durationSec;
-        cumSec = endSec + 0.5; // 0.5s gap between entries
-
-        entries.push({
-          index: entries.length + 1,
-          startTime: formatSrtTime(startSec),
-          endTime: formatSrtTime(endSec),
-          text: sentence.trim(),
-        });
-      });
-    });
-
-    // Build raw SRT string
-    const rawSrt = entries
-      .map(
-        (e) =>
-          `${e.index}\n${e.startTime} --> ${e.endTime}\n${e.text}\n`,
-      )
-      .join('\n');
-
-    return {
-      lang,
-      label: langLabel(lang),
-      entries,
-      rawSrt,
-    };
-  });
-}
-
-function formatSrtTime(totalSec: number): string {
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = Math.floor(totalSec % 60);
-  const ms = Math.round((totalSec % 1) * 1000);
-  return (
-    `${h.toString().padStart(2, '0')}:` +
-    `${m.toString().padStart(2, '0')}:` +
-    `${s.toString().padStart(2, '0')},` +
-    `${ms.toString().padStart(3, '0')}`
   );
 }

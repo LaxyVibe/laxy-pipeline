@@ -10,7 +10,7 @@ Return JSON with this structure:
   "reason": "Brief explanation of why this voice was recommended",
   "all": [
     {"id": "Aoede", "gender": "Female", "style": "Warm, narrative"},
-    {"id": "Algeba", "gender": "Male", "style": "Clear, authoritative"}
+    {"id": "Algieba", "gender": "Female", "style": "Clear, authoritative"}
   ],
   "filters": {
     "female": ["list of female voice ids"],
@@ -20,7 +20,7 @@ Return JSON with this structure:
 
 Available voices:
 - Aoede (Female): Warm, narrative
-- Algeba (Male): Clear, authoritative
+- Algieba (Female): Clear, authoritative
 - Algenib (Male): Deep, resonant
 - Despina (Female): Bright, engaging
 - Laomedeia (Female): Calm, measured

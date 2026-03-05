@@ -1,0 +1,73 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn()
+        && request.auth.token.role == 'super-admin';
+    }
+
+    // ── pipeline_sessions ─────────────────────────────────────────────────────
+    // Written exclusively by Cloud Functions (Admin SDK, bypasses rules).
+    // Authenticated users may read — needed by the /debug session history page.
+
+    match /pipeline_sessions/{sessionId} {
+      allow read: if isSignedIn();
+      allow write: if false; // Cloud Functions (Admin SDK) bypass rules
+    }
+
+    // ── Admin / CMS collections ───────────────────────────────────────────────
+
+    match /tenants/{docId} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    match /users/{docId} {
+      allow read, write: if isSuperAdmin();
+      // Users may read their own document
+      allow read: if isSignedIn() && request.auth.uid == docId;
+    }
+
+    match /featureFlags/{docId} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    match /subscriptionPlans/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    match /promptLibrary/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    match /auditLogs/{docId} {
+      allow read: if isSignedIn();
+      allow write: if false; // written by server only
+    }
+
+    // ── Guides ───────────────────────────────────────────────────────────────
+
+    match /guides/{guideId} {
+      allow read, write: if isSignedIn();
+
+      match /{sub=**} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    // ── Deny everything else ─────────────────────────────────────────────────
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

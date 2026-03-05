@@ -7,6 +7,8 @@ import {
   Button,
   Card,
   CardContent,
+  Chip,
+  Stack,
   TextField,
   Typography,
   Alert,
@@ -14,6 +16,7 @@ import {
 } from '@mui/material';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
+import ScheduleIcon from '@mui/icons-material/Schedule';
 import { PIPELINE_STAGES, usePipelineStore } from '../store';
 
 export default function HumanGatePanel() {
@@ -69,6 +72,39 @@ export default function HumanGatePanel() {
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2, whiteSpace: 'pre-wrap' }}>
             {stage.gateText}
           </Typography>
+        )}
+
+        {/* Show what will be processed on approval */}
+        {def.approveInfo && (
+          <Alert
+            severity="warning"
+            variant="outlined"
+            icon={<ScheduleIcon />}
+            sx={{ mb: 2 }}
+          >
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
+              {def.approveInfo.summary}
+            </Typography>
+            <Stack direction="row" flexWrap="wrap" gap={0.75} mt={0.5}>
+              {def.approveInfo.steps.map((step) => (
+                <Chip
+                  key={step.name}
+                  label={`${step.name} (${step.model}) ${step.estimate}`}
+                  size="small"
+                  variant="outlined"
+                  sx={{
+                    fontSize: '0.75rem',
+                    color: step.model === 'local' || step.model === 'rule-based'
+                      ? 'text.secondary'
+                      : 'warning.dark',
+                    borderColor: step.model === 'local' || step.model === 'rule-based'
+                      ? 'divider'
+                      : 'warning.main',
+                  }}
+                />
+              ))}
+            </Stack>
+          </Alert>
         )}
 
         <TextField

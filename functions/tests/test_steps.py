@@ -28,14 +28,21 @@ _mock_firebase_admin.firestore = _mock_firestore
 sys.modules.setdefault("firebase_admin", _mock_firebase_admin)
 sys.modules.setdefault("firebase_admin.credentials", MagicMock())
 sys.modules.setdefault("firebase_admin.firestore", _mock_firestore)
-sys.modules.setdefault("google.adk", MagicMock())
-sys.modules.setdefault("google.adk.agents", MagicMock())
-sys.modules.setdefault("google.adk.runners", MagicMock())
-sys.modules.setdefault("google.adk.sessions", MagicMock())
-
+sys.modules.setdefault("firebase_admin.storage", MagicMock())
+_mock_google = MagicMock()
 _mock_genai = MagicMock()
 _mock_genai.types = MagicMock()
-sys.modules.setdefault("google.genai", _mock_genai)
+_mock_google.genai = _mock_genai
+for mod_name, mod_mock in [
+    ("google", _mock_google),
+    ("google.genai", _mock_genai),
+    ("google.genai.types", MagicMock()),
+    ("google.adk", MagicMock()),
+    ("google.adk.agents", MagicMock()),
+    ("google.adk.runners", MagicMock()),
+    ("google.adk.sessions", MagicMock()),
+]:
+    sys.modules[mod_name] = sys.modules.get(mod_name, mod_mock)
 
 from agents.pipeline_agent import (  # noqa: E402
     PipelineExecutor,
@@ -119,9 +126,12 @@ class TestUserMessageBuilder:
             uploads=[{"name": "photo.jpg"}, {"name": "scan.pdf"}],
             outputs={},
         )
-        assert "Parse this document" in msg
-        assert "photo.jpg" in msg
-        assert "scan.pdf" in msg
+        # With uploads, returns a list of parts (file placeholders + text)
+        assert isinstance(msg, list)
+        flat = " ".join(str(p) for p in msg)
+        assert "Parse this document" in flat
+        assert "photo.jpg" in flat
+        assert "scan.pdf" in flat
 
     def test_s2_ocr_parse_no_uploads(self, executor):
         msg = executor._build_user_message("s2_ocr_parse", "Parse this", None, {})
@@ -164,15 +174,18 @@ class TestUserMessageBuilder:
         msg = executor._build_user_message("s8_director_note", None, None, outputs)
         assert "alloy" in msg
 
-    def test_s9_audio_gen_uses_multiple_outputs(self, executor):
+    def test_s9_audio_gen_not_an_llm_step(self, executor):
+        """s9_audio_gen is handled as a tool step (generate_audio), not an LLM step.
+        _build_user_message returns empty since it never reaches the LLM path."""
         outputs = {
-            "s8_director_note": {"note": "Speak slowly"},
-            "s4_script_gen": {"scripts": [{"text": "Hello"}]},
-            "s7_voice_recommend": {"voiceId": "nova"},
+            "s8_director_note": {"directorNote": {"missionOfSpeech": "Speak slowly"}},
+            "s4_script_gen": {"scripts": [{"scriptText": "Hello"}]},
+            "s7_voice_recommend": {"suggested": "nova"},
         }
         msg = executor._build_user_message("s9_audio_gen", None, None, outputs)
-        assert "Speak slowly" in msg or "directorNote" in msg
-        assert "nova" in msg or "voice" in msg
+        # s9 is routed directly in _execute_step, not via _run_llm_step,
+        # so _build_user_message returns empty for it
+        assert msg == ""
 
     def test_unknown_step_returns_question(self, executor):
         msg = executor._build_user_message("unknown_step", "fallback text", None, {})
@@ -200,8 +213,8 @@ class TestModelSelection:
         assert model == MODELS[expected_model_key]
 
     def test_all_llm_steps_have_temperature(self):
-        # LLM steps are those with prompts — exclude s10 (rule-based tool)
-        tool_steps = {"s10_srt_gen"}
+        # LLM steps are those with prompts — exclude s10 (rule-based tool) and s9 (TTS tool step)
+        tool_steps = {"s10_srt_gen", "s9_audio_gen"}
         llm_steps = [s for s in PIPELINE_STEPS if s.startswith("s") and s != "pipeline_complete" and s not in tool_steps]
         for step in llm_steps:
             assert step in TEMPERATURES, f"Missing temperature for {step}"

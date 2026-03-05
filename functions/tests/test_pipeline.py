@@ -31,13 +31,22 @@ _mock_firebase_admin.firestore = _mock_firestore
 sys.modules.setdefault("firebase_admin", _mock_firebase_admin)
 sys.modules.setdefault("firebase_admin.credentials", MagicMock())
 sys.modules.setdefault("firebase_admin.firestore", _mock_firestore)
+sys.modules.setdefault("firebase_admin.storage", MagicMock())
 
 # Now also mock the genai client so we don't need real credentials
-sys.modules.setdefault("google.adk", MagicMock())
-sys.modules.setdefault("google.adk.agents", MagicMock())
-sys.modules.setdefault("google.adk.runners", MagicMock())
-sys.modules.setdefault("google.adk.sessions", MagicMock())
-sys.modules.setdefault("google.genai", MagicMock())
+_mock_google = MagicMock()
+_mock_genai = MagicMock()
+_mock_google.genai = _mock_genai
+for mod_name, mod_mock in [
+    ("google", _mock_google),
+    ("google.genai", _mock_genai),
+    ("google.genai.types", MagicMock()),
+    ("google.adk", MagicMock()),
+    ("google.adk.agents", MagicMock()),
+    ("google.adk.runners", MagicMock()),
+    ("google.adk.sessions", MagicMock()),
+]:
+    sys.modules[mod_name] = sys.modules.get(mod_name, mod_mock)
 
 # Now import the code under test
 from agents.pipeline_agent import (  # noqa: E402
@@ -427,3 +436,284 @@ class TestErrorHandling:
         assert result["steps"][0]["status"] == "ERROR"
         assert "API quota exceeded" in str(result["steps"][0]["output"])
         assert result["status"] == "error"
+
+
+# ── Structured feedback tests (Issue #10) ─────────────────────────────────
+
+
+class TestStructuredFeedback:
+    @pytest.mark.asyncio
+    async def test_approve_with_structured_feedback_parses_json(self, executor, session_store, mock_ss):
+        """Structured JSON feedback should be parsed and stored under 'structured' key."""
+        session_store["sess-sf"] = {
+            "session_id": "sess-sf",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg1_data_review",
+            "question": "describe this",
+            "uploads": None,
+            "steps": [
+                {"step_id": "s2_ocr_parse", "label": "S2", "status": "FINISHED", "output": {"_content": "text"}},
+                {"step_id": "s1_metadata_extract", "label": "S1", "status": "FINISHED", "output": {"spots": [{"id": "s1", "title": "Spot 1"}]}},
+                {"step_id": "hg1_data_review", "label": "HG1", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s2_ocr_parse": {"_content": "text"},
+                "s1_metadata_extract": {"spots": [{"id": "s1", "title": "Spot 1"}]},
+            },
+            "current_step": "hg1_data_review",
+        }
+
+        feedback_payload = json.dumps({
+            "spots": [{"id": "s1", "title": "Edited Spot 1"}],
+        })
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            mock_response = MagicMock()
+            mock_response.text = '{"scripts": []}'
+            mock_response.usage_metadata = None
+            executor._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            result = await executor.resume("sess-sf", "hg1_data_review", "approve", feedback_payload)
+
+        # Verify the gate output contains structured data
+        gate_output = session_store["sess-sf"]["outputs"].get("hg1_data_review", {})
+        assert gate_output.get("action") == "approve"
+        assert "structured" in gate_output
+        assert gate_output["structured"]["spots"][0]["title"] == "Edited Spot 1"
+
+    @pytest.mark.asyncio
+    async def test_script_edit_feedback_merges_into_s4(self, executor, session_store, mock_ss):
+        """HG3 structured feedback with editedScripts should update s4_script_gen output."""
+        session_store["sess-se"] = {
+            "session_id": "sess-se",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg3_script_review",
+            "question": "describe this",
+            "uploads": None,
+            "steps": [
+                {"step_id": "s4_script_gen", "label": "S4", "status": "FINISHED", "output": {"scripts": [
+                    {"spotId": "s1", "scriptText": "Original text", "variants": {"professional": "Original text"}},
+                ]}},
+                {"step_id": "hg3_script_review", "label": "HG3", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s4_script_gen": {"scripts": [
+                    {"spotId": "s1", "scriptText": "Original text", "variants": {"professional": "Original text"}},
+                ]},
+            },
+            "current_step": "hg3_script_review",
+        }
+
+        feedback_payload = json.dumps({
+            "editedScripts": [{"spotId": "s1", "scriptText": "Human-edited text"}],
+        })
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            mock_response = MagicMock()
+            mock_response.text = '{"translations": []}'
+            mock_response.usage_metadata = None
+            executor._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            result = await executor.resume("sess-se", "hg3_script_review", "approve", feedback_payload)
+
+        # Verify s4_script_gen was updated with human edits
+        s4_output = session_store["sess-se"]["outputs"]["s4_script_gen"]
+        assert s4_output["scripts"][0]["scriptText"] == "Human-edited text"
+        assert s4_output["scripts"][0]["variants"]["professional"] == "Human-edited text"
+
+    @pytest.mark.asyncio
+    async def test_plain_text_feedback_not_parsed(self, executor, session_store, mock_ss):
+        """Plain text feedback should be stored as-is without crashing."""
+        session_store["sess-pt"] = {
+            "session_id": "sess-pt",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg1_data_review",
+            "question": "describe this",
+            "uploads": None,
+            "steps": [
+                {"step_id": "s2_ocr_parse", "label": "S2", "status": "FINISHED", "output": {"_content": "text"}},
+                {"step_id": "s1_metadata_extract", "label": "S1", "status": "FINISHED", "output": {"spots": []}},
+                {"step_id": "hg1_data_review", "label": "HG1", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s2_ocr_parse": {"_content": "text"},
+                "s1_metadata_extract": {"spots": []},
+            },
+            "current_step": "hg1_data_review",
+        }
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            mock_response = MagicMock()
+            mock_response.text = '{"scripts": []}'
+            mock_response.usage_metadata = None
+            executor._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            # Should not raise even with plain text feedback
+            result = await executor.resume("sess-pt", "hg1_data_review", "approve", "Looks good, proceed")
+
+        gate_output = session_store["sess-pt"]["outputs"].get("hg1_data_review", {})
+        assert gate_output.get("action") == "approve"
+        assert gate_output.get("feedback") == "Looks good, proceed"
+        assert "structured" not in gate_output
+
+
+class TestCharacterPassthrough:
+    """Issue #12: Character selection should be passed from session context to n5_character_select."""
+
+    @pytest.mark.asyncio
+    async def test_character_id_from_session_context(self, executor, session_store, mock_ss):
+        """n5_character_select should use selectedCharacterId from session context."""
+        session_store["sess-ch"] = {
+            "session_id": "sess-ch",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg4_translation_review",
+            "question": "generate audio guide",
+            "uploads": None,
+            "context": {"selectedCharacterId": "char-storyteller"},
+            "steps": [
+                {"step_id": "s4_script_gen", "label": "S4", "status": "FINISHED",
+                 "output": {"scripts": [{"spotId": "s1", "scriptText": "Hello"}]}},
+                {"step_id": "s5_image_map", "label": "S5", "status": "FINISHED", "output": {}},
+                {"step_id": "hg3_script_review", "label": "HG3", "status": "FINISHED", "output": None},
+                {"step_id": "s6_translation", "label": "S6", "status": "FINISHED", "output": {"translations": []}},
+                {"step_id": "hg4_translation_review", "label": "HG4", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s1_metadata_extract": {"spots": [{"id": "s1", "title": "Spot 1"}]},
+                "s4_script_gen": {"scripts": [{"spotId": "s1", "scriptText": "Hello"}]},
+                "s6_translation": {"translations": []},
+            },
+            "current_step": "hg4_translation_review",
+        }
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            mock_response = MagicMock()
+            mock_response.text = '{"suggested": "Aoede", "all": []}'
+            mock_response.usage_metadata = None
+            executor._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            result = await executor.resume("sess-ch", "hg4_translation_review", "approve", "Fine")
+
+        # Verify n5_character_select received the character ID from context
+        n5_output = session_store["sess-ch"]["outputs"].get("n5_character_select", {})
+        assert n5_output.get("characterId") == "char-storyteller"
+
+    @pytest.mark.asyncio
+    async def test_character_id_none_when_no_context(self, executor, session_store, mock_ss):
+        """n5_character_select defaults to None when session has no context."""
+        session_store["sess-nc"] = {
+            "session_id": "sess-nc",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg4_translation_review",
+            "question": "generate audio guide",
+            "uploads": None,
+            "steps": [
+                {"step_id": "s4_script_gen", "label": "S4", "status": "FINISHED",
+                 "output": {"scripts": [{"spotId": "s1", "scriptText": "Hello"}]}},
+                {"step_id": "s5_image_map", "label": "S5", "status": "FINISHED", "output": {}},
+                {"step_id": "hg3_script_review", "label": "HG3", "status": "FINISHED", "output": None},
+                {"step_id": "s6_translation", "label": "S6", "status": "FINISHED", "output": {"translations": []}},
+                {"step_id": "hg4_translation_review", "label": "HG4", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s1_metadata_extract": {"spots": [{"id": "s1", "title": "Spot 1"}]},
+                "s4_script_gen": {"scripts": [{"spotId": "s1", "scriptText": "Hello"}]},
+                "s6_translation": {"translations": []},
+            },
+            "current_step": "hg4_translation_review",
+        }
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            mock_response = MagicMock()
+            mock_response.text = '{"suggested": "Aoede", "all": []}'
+            mock_response.usage_metadata = None
+            executor._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            result = await executor.resume("sess-nc", "hg4_translation_review", "approve", "OK")
+
+        n5_output = session_store["sess-nc"]["outputs"].get("n5_character_select", {})
+        assert n5_output.get("characterId") is None
+
+
+class TestSrtDurationConsistency:
+    """Issue #13: s10_srt_gen should use actual durations from S9 when available."""
+
+    @pytest.mark.asyncio
+    async def test_s10_uses_s9_srt_when_available(self, executor, session_store, mock_ss):
+        """When S9 produced SRT files, s10_srt_gen should use them instead of rule-based."""
+        s9_srt_entries = [
+            {"index": 1, "startTime": "00:00:00,000", "endTime": "00:00:03,500", "text": "Hello world"},
+        ]
+        session_store["sess-srt"] = {
+            "session_id": "sess-srt",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg5_audio_review",
+            "question": "generate guide",
+            "uploads": None,
+            "steps": [
+                {"step_id": "hg5_audio_review", "label": "HG5", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s4_script_gen": {"scripts": [{"spotId": "s1", "scriptText": "Hello world test text here"}]},
+                "s6_translation": {"translations": []},
+                "s9_audio_gen": {
+                    "audioFiles": [
+                        {"lang": "en", "spotId": "s1", "audioUrl": "http://a.wav", "durationMs": 3500},
+                    ],
+                    "srtFiles": [
+                        {"lang": "en", "spotId": "s1", "entries": s9_srt_entries, "rawSrt": "1\n..."},
+                    ],
+                },
+            },
+            "current_step": "hg5_audio_review",
+        }
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            result = await executor.resume("sess-srt", "hg5_audio_review", "approve", "Approved")
+
+        # s10 should have used S9's SRT files
+        s10_output = session_store["sess-srt"]["outputs"].get("s10_srt_gen", {})
+        assert s10_output.get("success") is True
+        srt_files = s10_output.get("srtFiles", [])
+        # Should contain the S9-generated SRT entry
+        en_srt = [s for s in srt_files if s.get("lang") == "en" and s.get("spotId") == "s1"]
+        assert len(en_srt) == 1
+        assert en_srt[0]["entries"] == s9_srt_entries
+
+    @pytest.mark.asyncio
+    async def test_s10_falls_back_to_rule_based_without_s9(self, executor, session_store, mock_ss):
+        """When S9 has no SRT files, s10_srt_gen should fall back to rule-based generation."""
+        session_store["sess-srt2"] = {
+            "session_id": "sess-srt2",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg5_audio_review",
+            "question": "generate guide",
+            "uploads": None,
+            "steps": [
+                {"step_id": "hg5_audio_review", "label": "HG5", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s4_script_gen": {"scripts": [{"spotId": "s1", "scriptText": "Hello world test text from the museum guide"}]},
+                "s6_translation": {"translations": []},
+                "s9_audio_gen": {"audioFiles": [], "srtFiles": []},
+            },
+            "current_step": "hg5_audio_review",
+        }
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            result = await executor.resume("sess-srt2", "hg5_audio_review", "approve", "Approved")
+
+        s10_output = session_store["sess-srt2"]["outputs"].get("s10_srt_gen", {})
+        assert s10_output.get("success") is True
+        assert s10_output.get("totalFiles", 0) > 0
+
+
+class TestAlgiebaTypo:
+    """Issue #14: Backend S7 prompt should use 'Algieba' not 'Algeba'."""
+
+    def test_s7_prompt_uses_algieba(self):
+        """The s7_voice_recommend prompt should reference 'Algieba' not 'Algeba'."""
+        from agents.pipeline_agent import load_prompt
+        prompt = load_prompt("s7_voice_recommend")
+        assert "Algieba" in prompt, "S7 prompt should use 'Algieba' (correct spelling)"
+        assert "Algeba" not in prompt, "S7 prompt should NOT contain 'Algeba' (typo)"

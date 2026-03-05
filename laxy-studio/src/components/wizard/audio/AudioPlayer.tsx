@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
 // AudioPlayer — HTML5 audio player with custom MUI controls per language
+// Supports multiple spots (scripts) per language via a playlist.
 // ---------------------------------------------------------------------------
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -13,6 +14,10 @@ import {
   Chip,
   Paper,
   Tooltip,
+  List,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
   alpha,
 } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
@@ -21,7 +26,10 @@ import Forward10Icon from '@mui/icons-material/Forward10';
 import Replay10Icon from '@mui/icons-material/Replay10';
 import DownloadIcon from '@mui/icons-material/Download';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
-import type { LanguageAudio } from '../../../types/entity';
+import SkipNextIcon from '@mui/icons-material/SkipNext';
+import SkipPreviousIcon from '@mui/icons-material/SkipPrevious';
+import GraphicEqIcon from '@mui/icons-material/GraphicEq';
+import type { LanguageAudio, SpotAudioFile } from '../../../types/entity';
 import { useGuidesStore } from '../../../guidesStore';
 
 function formatTime(sec: number): string {
@@ -41,6 +49,7 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
   const rejectAudioLang = useGuidesStore((s) => s.rejectAudioLang);
 
   const [currentTab, setCurrentTab] = useState(0);
+  const [currentSpotIdx, setCurrentSpotIdx] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -49,6 +58,34 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
   const animRef = useRef<number>(0);
 
   const currentAudio = audioFiles[currentTab];
+
+  // Derive the spots list for the current language. Falls back to a single
+  // entry built from the top-level audioUrl when no spots array is present.
+  const spots: SpotAudioFile[] = useMemo(() => {
+    if (!currentAudio) return [];
+    if (currentAudio.spots && currentAudio.spots.length > 0) return currentAudio.spots;
+    // Backwards compat: synthesize a single spot entry
+    return [
+      {
+        spotId: '__single__',
+        spotNumber: 1,
+        title: currentAudio.label,
+        audioUrl: currentAudio.audioUrl,
+        durationMs: currentAudio.durationMs,
+      },
+    ];
+  }, [currentAudio]);
+
+  const hasMultipleSpots = spots.length > 1;
+  const activeSpot = spots[currentSpotIdx] ?? spots[0];
+  const activeSpotUrl = activeSpot?.audioUrl ?? '';
+  const hasRealAudio = activeSpotUrl.length > 0;
+  const spotDurationSec = hasRealAudio ? duration : (activeSpot?.durationMs ?? 30000) / 1000;
+
+  // Reset spot index when language tab changes
+  useEffect(() => {
+    setCurrentSpotIdx(0);
+  }, [currentTab]);
 
   // Update time display
   const updateTime = useCallback(() => {
@@ -67,6 +104,16 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
     }
     return () => cancelAnimationFrame(animRef.current);
   }, [isPlaying, updateTime]);
+
+  const resetPlayback = useCallback(() => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+  }, []);
 
   const handlePlayPause = useCallback(() => {
     if (!audioRef.current) return;
@@ -97,14 +144,21 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
 
   const handleTabChange = useCallback((_: React.SyntheticEvent, v: number) => {
     setCurrentTab(v);
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
-  }, []);
+    resetPlayback();
+  }, [resetPlayback]);
+
+  const handleSpotChange = useCallback((idx: number) => {
+    setCurrentSpotIdx(idx);
+    resetPlayback();
+  }, [resetPlayback]);
+
+  const handlePrevSpot = useCallback(() => {
+    if (currentSpotIdx > 0) handleSpotChange(currentSpotIdx - 1);
+  }, [currentSpotIdx, handleSpotChange]);
+
+  const handleNextSpot = useCallback(() => {
+    if (currentSpotIdx < spots.length - 1) handleSpotChange(currentSpotIdx + 1);
+  }, [currentSpotIdx, spots.length, handleSpotChange]);
 
   const handleLoadedMetadata = useCallback(() => {
     if (audioRef.current) {
@@ -114,7 +168,19 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
 
   const handleEnded = useCallback(() => {
     setIsPlaying(false);
-  }, []);
+    // Auto-advance to next spot
+    if (currentSpotIdx < spots.length - 1) {
+      setCurrentSpotIdx((prev) => prev + 1);
+      setCurrentTime(0);
+      setDuration(0);
+      // The audio element will re-mount via key change, so we
+      // start playback after a short tick.
+      setTimeout(() => {
+        audioRef.current?.play().catch(() => {});
+        setIsPlaying(true);
+      }, 100);
+    }
+  }, [currentSpotIdx, spots.length]);
 
   if (audioFiles.length === 0) {
     return (
@@ -125,10 +191,6 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
       </Paper>
     );
   }
-
-  // For placeholder audio (Phase 1A), show simulated player
-  const hasRealAudio = currentAudio?.audioUrl && currentAudio.audioUrl.length > 0;
-  const displayDuration = hasRealAudio ? duration : (currentAudio?.durationMs ?? 30000) / 1000;
 
   return (
     <Box>
@@ -160,11 +222,51 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
         </Tabs>
       </Paper>
 
-      {/* Hidden audio element */}
+      {/* Spot playlist — shown when the language has multiple spots */}
+      {hasMultipleSpots && (
+        <Paper variant="outlined" sx={{ mb: 1, maxHeight: 200, overflow: 'auto' }}>
+          <List dense disablePadding>
+            {spots.map((spot, idx) => (
+              <ListItemButton
+                key={spot.spotId}
+                selected={idx === currentSpotIdx}
+                onClick={() => handleSpotChange(idx)}
+                sx={{
+                  py: 0.5,
+                  ...(idx === currentSpotIdx && {
+                    bgcolor: (t) => alpha(t.palette.primary.main, 0.12),
+                  }),
+                }}
+              >
+                <ListItemIcon sx={{ minWidth: 32 }}>
+                  {idx === currentSpotIdx && isPlaying ? (
+                    <GraphicEqIcon color="primary" sx={{ fontSize: 18 }} />
+                  ) : (
+                    <Chip
+                      label={spot.spotNumber}
+                      size="small"
+                      sx={{ height: 20, minWidth: 20, fontSize: 11 }}
+                    />
+                  )}
+                </ListItemIcon>
+                <ListItemText
+                  primary={spot.title || `Spot ${spot.spotNumber}`}
+                  primaryTypographyProps={{ variant: 'body2', noWrap: true }}
+                  secondary={formatTime(spot.durationMs / 1000)}
+                  secondaryTypographyProps={{ variant: 'caption' }}
+                />
+              </ListItemButton>
+            ))}
+          </List>
+        </Paper>
+      )}
+
+      {/* Hidden audio element — key forces re-mount when language/spot changes */}
       {hasRealAudio && (
         <audio
+          key={`${currentAudio.lang}-${activeSpot?.spotId}`}
           ref={audioRef}
-          src={currentAudio.audioUrl}
+          src={activeSpotUrl}
           onLoadedMetadata={handleLoadedMetadata}
           onEnded={handleEnded}
         />
@@ -182,6 +284,17 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+          {/* Prev spot (only when multi-spot) */}
+          {hasMultipleSpots && (
+            <Tooltip title="Previous spot">
+              <span>
+                <IconButton onClick={handlePrevSpot} size="small" disabled={currentSpotIdx === 0}>
+                  <SkipPreviousIcon />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
+
           <Tooltip title="Rewind 15s">
             <IconButton onClick={() => handleSkip(-15)} size="small">
               <Replay10Icon />
@@ -207,6 +320,17 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
               <Forward10Icon />
             </IconButton>
           </Tooltip>
+
+          {/* Next spot (only when multi-spot) */}
+          {hasMultipleSpots && (
+            <Tooltip title="Next spot">
+              <span>
+                <IconButton onClick={handleNextSpot} size="small" disabled={currentSpotIdx >= spots.length - 1}>
+                  <SkipNextIcon />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
         </Box>
 
         {/* Progress slider */}
@@ -216,13 +340,13 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
           </Typography>
           <Slider
             value={currentTime}
-            max={displayDuration || 1}
+            max={spotDurationSec || 1}
             onChange={handleSeek}
             size="small"
             sx={{ flex: 1 }}
           />
           <Typography variant="caption" sx={{ minWidth: 40 }}>
-            {formatTime(displayDuration)}
+            {formatTime(spotDurationSec)}
           </Typography>
         </Box>
 
@@ -235,12 +359,19 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
               color="primary"
               variant="outlined"
             />
-            {!hasRealAudio && (
+            {hasMultipleSpots && (
               <Chip
-                label="Placeholder audio (Phase 1A)"
+                label={`${currentSpotIdx + 1} / ${spots.length}`}
                 size="small"
                 variant="outlined"
-                color="warning"
+              />
+            )}
+            {!hasRealAudio && (
+              <Chip
+                label="No audio URL"
+                size="small"
+                variant="outlined"
+                color="error"
               />
             )}
           </Box>
@@ -271,7 +402,7 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
                   size="small"
                   disabled={!hasRealAudio}
                   component="a"
-                  href={currentAudio?.audioUrl || '#'}
+                  href={activeSpotUrl || '#'}
                   download
                 >
                   <DownloadIcon />

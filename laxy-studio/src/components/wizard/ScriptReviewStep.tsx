@@ -48,6 +48,7 @@ import DoneAllIcon from '@mui/icons-material/DoneAll';
 import RemoveDoneIcon from '@mui/icons-material/RemoveDone';
 import BoltIcon from '@mui/icons-material/Bolt';
 import DescriptionIcon from '@mui/icons-material/Description';
+import SyncIcon from '@mui/icons-material/Sync';
 
 import { useGuidesStore } from '../../guidesStore';
 import {
@@ -58,6 +59,7 @@ import {
   getStoppedNodeId,
   getNodeOutput,
 } from '../../api';
+import { usePipelineSync } from '../../hooks/usePipelineSync';
 import type { SpotScript, SpotImageMapping, ScriptStatus } from '../../types/entity';
 import ImageSpotMapper from './ImageSpotMapper';
 
@@ -285,13 +287,15 @@ export default function ScriptReviewStep() {
   const setImageMappings = useGuidesStore((s) => s.setImageMappings);
   const approveAllScripts = useGuidesStore((s) => s.approveAllScripts);
   const rejectAllScripts = useGuidesStore((s) => s.rejectAllScripts);
-  const resetScripts = useGuidesStore((s) => s.resetScripts);
+  const resetDownstreamFrom = useGuidesStore((s) => s.resetDownstreamFrom);
   const coreLanguage = useGuidesStore((s) => s.entityConfig.coreLanguage);
   const assets = useGuidesStore((s) => s.assets);
-  const pipelineSessionId = useGuidesStore((s) => s.pipelineSessionId);
   const setPipelineIds = useGuidesStore((s) => s.setPipelineIds);
 
+  const { applyResponse, buildGatePayload } = usePipelineSync();
+
   const [approveLoading, setApproveLoading] = useState(false);
+  const [gateSyncFailed, setGateSyncFailed] = useState(false);
 
   const activeSubStep = statusToSubStep(scriptStatus);
   const approvedCount = scripts.filter((s) => s.approved).length;
@@ -322,12 +326,41 @@ export default function ScriptReviewStep() {
   const handleGenerateScripts = useCallback(async () => {
     if (spots.length === 0) return;
 
+    // If scripts are already populated (e.g., from IngestionStep's gate approval
+    // that advanced the pipeline through S4+S5), skip the pipeline call
+    if (scripts.length > 0 && scripts.some((s) => s.scriptText)) {
+      setScriptStatus('review');
+      return;
+    }
+
     setScriptStatus('generating');
     setScriptError(null);
 
     try {
-      const sessionId = `script-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const response = await startPipeline(buildScriptQuestion(), sessionId);
+      let response;
+
+      // Try to resume from existing session instead of starting a new one.
+      // If the pipeline was advanced through HG1 approval, it may have already
+      // produced S4+S5 data and paused at HG3. In that case, data would already
+      // be in the store. Resume from any valid checkpoint on the current session.
+      const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();
+      if (sid && cpId) {
+        const gatePayload = buildGatePayload();
+        response = await sendHumanInput(
+          sid,
+          'approve',
+          cpId,
+          JSON.stringify(gatePayload),
+        );
+      } else {
+        // Fallback: start a new pipeline session
+        const sessionId = `script-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        response = await startPipeline(buildScriptQuestion(), sessionId, undefined, {
+          venueName: useGuidesStore.getState().entityConfig.venueName,
+          coreLanguage: useGuidesStore.getState().entityConfig.coreLanguage,
+          supportedLanguages: useGuidesStore.getState().entityConfig.supportedLanguages,
+        });
+      }
 
       const executedNodes = getExecutedNodes(response);
       const stoppedNodeId = getStoppedNodeId(response);
@@ -335,10 +368,13 @@ export default function ScriptReviewStep() {
       // Store pipeline IDs for human gate
       setPipelineIds(response.sessionId, stoppedNodeId);
 
+      // Apply response through the central sync mechanism
+      applyResponse(response);
+
       // Try to parse script generation output (S4: Script Gen)
-      const scriptOutput = getNodeOutput(response, 'S4: Script Generation');
+      const scriptOutput = getNodeOutput(response, 'S4: Script Gen (Gemini Pro)') ?? getNodeOutput(response, 'S4: Script Generation');
       // Also try image mapping output (S5: Image Map)
-      const imageMapOutput = getNodeOutput(response, 'S5: Image-Spot Mapping');
+      const imageMapOutput = getNodeOutput(response, 'S5: Image Map (Gemini)') ?? getNodeOutput(response, 'S5: Image-Spot Mapping');
 
       let extractedScripts: SpotScript[] = [];
       let extractedMappings: SpotImageMapping[] = [];
@@ -351,14 +387,23 @@ export default function ScriptReviewStep() {
 
         if (Array.isArray(rawScripts)) {
           extractedScripts = rawScripts.map(
-            (raw: Record<string, unknown>, idx: number) => ({
-              spotId: (raw.spotId as string) ?? (raw.id as string) ?? spots[idx]?.id ?? `spot-${idx}`,
-              spotNumber: (raw.spotNumber as number) ?? idx + 1,
-              title: (raw.title as string) ?? spots[idx]?.title ?? `Spot ${idx + 1}`,
-              scriptText: (raw.scriptText as string) ?? (raw.script as string) ?? (raw.text as string) ?? '',
-              approved: false,
-              fastTrack: false,
-            }),
+            (raw: Record<string, unknown>, idx: number) => {
+              // Backend may return variants: { kids, academic, quick, professional, brief }
+              // Pick 'professional' as the default scriptText, fallback to other fields
+              let text = (raw.scriptText as string) ?? (raw.script as string) ?? (raw.text as string) ?? '';
+              if (!text && typeof raw.variants === 'object' && raw.variants !== null) {
+                const variants = raw.variants as Record<string, string>;
+                text = variants.professional ?? variants.academic ?? variants.quick ?? variants.kids ?? variants.brief ?? '';
+              }
+              return {
+                spotId: (raw.spotId as string) ?? (raw.id as string) ?? spots[idx]?.id ?? `spot-${idx}`,
+                spotNumber: (raw.spotNumber as number) ?? idx + 1,
+                title: (raw.title as string) ?? spots[idx]?.title ?? `Spot ${idx + 1}`,
+                scriptText: text,
+                approved: false,
+                fastTrack: false,
+              };
+            },
           );
         }
       }
@@ -385,34 +430,32 @@ export default function ScriptReviewStep() {
         }
       }
 
-      // Fallback: create scripts from approved spots if nothing came from pipeline
+      // If pipeline returned no scripts, show an error instead of fake data
       if (extractedScripts.length === 0) {
-        extractedScripts = createSampleScripts(spots);
-      }
-
-      // Fallback: create round-robin image mapping if none from pipeline
-      if (extractedMappings.length === 0) {
-        extractedMappings = createRoundRobinImageMappings(spots, assets);
+        setScriptError(
+          'AI did not return any scripts. Please check the pipeline logs and try again.',
+        );
+        setScriptStatus('error');
+        return;
       }
 
       setScripts(extractedScripts);
-      setImageMappings(extractedMappings);
+      if (extractedMappings.length > 0) {
+        setImageMappings(extractedMappings);
+      }
       setScriptStatus('review');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-
-      // Fallback to sample data if pipeline is unavailable
-      const fallbackScripts = createSampleScripts(spots);
-      const fallbackMappings = createRoundRobinImageMappings(spots, assets);
-      setScripts(fallbackScripts);
-      setImageMappings(fallbackMappings);
-      setScriptError(`Pipeline unavailable — using sample scripts. (${message})`);
-      setScriptStatus('review');
+      setScriptError(message);
+      setScriptStatus('error');
     }
   }, [
     spots,
+    scripts,
     assets,
     buildScriptQuestion,
+    buildGatePayload,
+    applyResponse,
     setScripts,
     setImageMappings,
     setScriptStatus,
@@ -423,6 +466,7 @@ export default function ScriptReviewStep() {
   // ── Approve all scripts (Human Gate 3) ──
   const handleApproveGate = useCallback(async () => {
     setApproveLoading(true);
+    setGateSyncFailed(false);
     try {
       // Build the approval payload with per-spot statuses
       const approvalPayload = {
@@ -435,20 +479,63 @@ export default function ScriptReviewStep() {
         })),
       };
 
+      // Read pipeline IDs directly from the store to avoid stale closures
+      const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();
+      console.log('[ScriptReviewStep] Approve clicked — sessionId:', sid, 'checkpointId:', cpId);
+
       // Try to send human input through ADK pipeline gate
-      if (pipelineSessionId) {
+      if (sid && cpId) {
         try {
-          const checkpointId = useGuidesStore.getState().pipelineCheckpointId;
-          if (checkpointId) {
-            await sendHumanInput(
-              pipelineSessionId,
-              'approve',
-              checkpointId,
-              JSON.stringify(approvalPayload),
+          const response = await sendHumanInput(
+            sid,
+            'approve',
+            cpId,
+            JSON.stringify(approvalPayload),
+          );
+          // Apply the response so downstream steps (translations, etc.) are pre-populated
+          applyResponse(response);
+
+          // Surface any downstream step errors as a warning
+          const stepErrors = (response.steps ?? [])
+            .filter((s) => s.status === 'ERROR' && s.output)
+            .map((s) => {
+              const out = s.output as Record<string, unknown>;
+              return `[${s.label}] ${(out.error as string) ?? (out.message as string) ?? 'Unknown error'}`;
+            });
+          if (stepErrors.length > 0) {
+            setScriptError(
+              'Scripts approved, but downstream pipeline steps encountered errors:\n' +
+              stepErrors.join('\n'),
             );
           }
-        } catch {
-          // Pipeline gate call failed — continue anyway
+        } catch (gateErr: unknown) {
+          const gateMsg = gateErr instanceof Error ? gateErr.message : 'Pipeline sync failed';
+          console.warn('[ScriptReviewStep] Gate approval failed:', gateMsg);
+          setScriptError(`Pipeline sync failed — you can retry from the approved view. (${gateMsg})`);
+          setGateSyncFailed(true);
+        }
+      } else {
+        // No valid checkpoint (e.g. previous pipeline errored out mid-run).
+        // Start a new pipeline session with the approved scripts as context so
+        // downstream steps (S6 translation, etc.) can proceed.
+        console.warn('[ScriptReviewStep] No checkpoint — starting a new pipeline session');
+        try {
+          const sessionId = `hg3-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+          const response = await startPipeline(
+            buildScriptQuestion() + '\n\nUser has approved the scripts above. Continue to translation.',
+            sessionId,
+            undefined,
+            {
+              venueName: useGuidesStore.getState().entityConfig.venueName,
+              coreLanguage: useGuidesStore.getState().entityConfig.coreLanguage,
+              supportedLanguages: useGuidesStore.getState().entityConfig.supportedLanguages,
+            },
+          );
+          applyResponse(response);
+        } catch (startErr: unknown) {
+          const startMsg = startErr instanceof Error ? startErr.message : 'Pipeline start failed';
+          console.warn('[ScriptReviewStep] Fallback pipeline start failed:', startMsg);
+          setScriptError(`Could not start downstream pipeline — approval saved locally. (${startMsg})`);
         }
       }
 
@@ -459,12 +546,12 @@ export default function ScriptReviewStep() {
     } finally {
       setApproveLoading(false);
     }
-  }, [scripts, pipelineSessionId, setScriptStatus, setScriptError]);
+  }, [scripts, setScriptStatus, setScriptError, applyResponse, buildScriptQuestion]);
 
-  // ── Reset ──
+  // ── Reset (cascades to all downstream steps) ──
   const handleReset = useCallback(() => {
-    resetScripts();
-  }, [resetScripts]);
+    resetDownstreamFrom('script');
+  }, [resetDownstreamFrom]);
 
   // ── Pre-condition: ingestion must be approved ──
   if (ingestionStatus !== 'approved') {
@@ -503,7 +590,7 @@ export default function ScriptReviewStep() {
                   icon:
                     scriptStatus === 'approved' && idx <= activeSubStep ? (
                       <CheckCircleOutlineIcon color="success" />
-                    ) : undefined,
+                    ) : step.icon,
                 }}
               >
                 <Typography
@@ -518,9 +605,13 @@ export default function ScriptReviewStep() {
         </Stepper>
       </Paper>
 
-      {/* Error alert */}
+      {/* Error / warning alert */}
       {scriptError && (
-        <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setScriptError(null)}>
+        <Alert
+          severity={scriptStatus === 'approved' ? 'warning' : 'error'}
+          sx={{ mb: 2, whiteSpace: 'pre-line' }}
+          onClose={() => setScriptError(null)}
+        >
           {scriptError}
         </Alert>
       )}
@@ -677,6 +768,25 @@ export default function ScriptReviewStep() {
               translation.
             </Typography>
             <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+              {gateSyncFailed && (
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={approveLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                  disabled={approveLoading}
+                  onClick={handleApproveGate}
+                >
+                  Retry Sync
+                </Button>
+              )}
+              <Button
+                variant="outlined"
+                color="warning"
+                startIcon={<RateReviewIcon />}
+                onClick={() => setScriptStatus('review')}
+              >
+                Redo Review
+              </Button>
               <Button
                 variant="outlined"
                 startIcon={<RestartAltIcon />}
@@ -690,48 +800,4 @@ export default function ScriptReviewStep() {
       )}
     </Box>
   );
-}
-
-// ── Fallback sample scripts (Phase 1A stub data) ──
-
-function createSampleScripts(
-  spots: { id: string; spotNumber: number; title: string; artist: string; period: string; highlight: string }[],
-): SpotScript[] {
-  const sampleTexts: Record<string, string> = {
-    'spot-sample-1':
-      'Before you stands one of the most iconic images in all of art history — "The Great Wave off Kanagawa" by Katsushika Hokusai. Created during the Edo Period between 1829 and 1833, this woodblock print captures a towering wave about to crash upon three fishing boats, with Mount Fuji sitting serenely in the background. The dynamic composition, with its famous claw-like wave crests, demonstrates Hokusai\'s mastery of movement and his ability to convey both the power of nature and the vulnerability of human endeavour. This print is part of the series "Thirty-six Views of Mount Fuji" and has become one of the most recognizable works of Japanese art worldwide.',
-    'spot-sample-2':
-      'The magnificent "Wind God and Thunder God" folding screens before you are the work of Tawaraya Sōtatsu, a master of the Rinpa school from the 17th century Edo Period. These paired screens depict Fūjin, the god of wind, and Raijin, the god of thunder, rendered in bold ink with brilliant gold and silver leaf. Sōtatsu\'s dynamic brushwork brings these mythological figures to vivid life — notice how Fūjin clutches his bag of winds while Raijin hammers his ring of drums. Designated as a National Treasure, these screens represent the pinnacle of Japanese decorative painting.',
-    'spot-sample-3':
-      'Hasegawa Tōhaku\'s "Pine Trees Screen" is a masterwork of monochrome ink painting from the Azuchi–Momoyama Period. Using what scholars call the "reduction" technique, Tōhaku created an entire misty pine forest using only ink and empty space. The pine trees emerge from and dissolve into the fog with extraordinary subtlety — some barely visible, others dark and defined. This six-panel folding screen demonstrates that what is left unpainted can be as powerful as what is rendered. Designated as a National Treasure, it remains one of the most celebrated examples of ink wash painting in the world.',
-  };
-
-  return spots.map((spot) => ({
-    spotId: spot.id,
-    spotNumber: spot.spotNumber,
-    title: spot.title,
-    scriptText:
-      sampleTexts[spot.id] ??
-      `Welcome to "${spot.title}" by ${spot.artist || 'an unknown artist'}. ` +
-      `Created during ${spot.period || 'an earlier era'}, this remarkable piece ` +
-      `${spot.highlight ? `is notable for: ${spot.highlight}. ` : 'showcases exceptional artistry. '}` +
-      `Take a moment to appreciate the detail and craftsmanship on display.`,
-    approved: false,
-    fastTrack: false,
-  }));
-}
-
-function createRoundRobinImageMappings(
-  spots: { id: string }[],
-  assets: { id: string; fileType: string }[],
-): SpotImageMapping[] {
-  const imageAssets = assets.filter((a) => a.fileType === 'image');
-
-  return spots.map((spot, idx) => ({
-    spotId: spot.id,
-    assignedAssetIds: imageAssets.length > 0
-      ? [imageAssets[idx % imageAssets.length].id]
-      : [],
-    aiSuggested: true,
-  }));
 }

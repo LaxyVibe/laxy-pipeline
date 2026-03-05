@@ -2,7 +2,8 @@
 // WizardShell — main wizard layout with interactive stepper, auto-save,
 // completion tracking, PipelineStepper sidebar, and pipeline sync indicator
 // ---------------------------------------------------------------------------
-import { useMemo } from 'react';
+import { useMemo, useState, useCallback, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import {
   Box,
   Stepper,
@@ -15,7 +16,11 @@ import {
   Paper,
   Chip,
   Tooltip,
-  Drawer,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
   useMediaQuery,
   useTheme,
   Switch,
@@ -24,6 +29,7 @@ import {
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import SaveIcon from '@mui/icons-material/Save';
+import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
@@ -179,6 +185,9 @@ function LastSavedLabel() {
 // ── Main WizardShell ─────────────────────────────────────────────────────────
 
 export default function WizardShell() {
+  const { step: urlStep } = useParams<{ step: string }>();
+  const navigate = useNavigate();
+
   const currentStep = useGuidesStore((s) => s.currentStep);
   const goToStep = useGuidesStore((s) => s.goToStep);
   const nextStep = useGuidesStore((s) => s.nextStep);
@@ -186,14 +195,34 @@ export default function WizardShell() {
   const isDirty = useGuidesStore((s) => s.isDirty);
   const isValid = useGuidesStore((s) => s.isEntityConfigValid);
   const saveDraft = useGuidesStore((s) => s.saveDraft);
+  const markClean = useGuidesStore((s) => s.markClean);
   const autoSaveEnabled = useGuidesStore((s) => s.autoSaveEnabled);
   const setAutoSaveEnabled = useGuidesStore((s) => s.setAutoSaveEnabled);
   const isStepAccessible = useGuidesStore((s) => s.isStepAccessible);
   const getStepCompletionStatus = useGuidesStore((s) => s.getStepCompletionStatus);
   const guideId = useGuidesStore((s) => s.guideId);
+  const clearAll = useGuidesStore((s) => s.clearAll);
 
   const theme = useTheme();
   const isSmall = useMediaQuery(theme.breakpoints.down('md'));
+
+  // Sync URL → store: when the URL step changes, update the store
+  useEffect(() => {
+    const validStep = WIZARD_STEPS.find((s) => s.id === urlStep);
+    if (validStep && urlStep !== currentStep) {
+      goToStep(validStep.id);
+    } else if (!validStep && urlStep) {
+      // Invalid step slug in URL → redirect to the current store step
+      navigate(`/wizard/${currentStep}`, { replace: true });
+    }
+  }, [urlStep]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync store → URL: when the store step changes (e.g. via next/prev), update the URL
+  useEffect(() => {
+    if (currentStep !== urlStep) {
+      navigate(`/wizard/${currentStep}`, { replace: true });
+    }
+  }, [currentStep]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Activate auto-save hook — saves 2s after last edit
   useAutosave(2000);
@@ -202,8 +231,72 @@ export default function WizardShell() {
   const isFirst = currentIdx === 0;
   const isLast = currentIdx === WIZARD_STEPS.length - 1;
 
-  // For entity-config step, only allow next if valid
-  const canProceed = currentStep === 'entity-config' ? isValid() : true;
+  // Gate "Next" on current step's completion status.
+  // Subscribe to the actual status value so React re-renders when it changes
+  // (e.g. after uploading assets, approving ingestion, etc.).
+  const currentStepStatus = useGuidesStore(
+    useCallback((s) => s.getStepCompletionStatus(currentStep), [currentStep]),
+  );
+  const canProceed = useMemo(() => {
+    if (currentStep === 'entity-config') return isValid();
+    return currentStepStatus === 'completed';
+  }, [currentStep, currentStepStatus, isValid]);
+
+  // ── Clear All confirmation dialog ──
+  const [clearAllOpen, setClearAllOpen] = useState(false);
+
+  const handleClearAll = useCallback(() => {
+    clearAll();
+    setClearAllOpen(false);
+  }, [clearAll]);
+
+  // ── Dirty-navigation confirmation dialog ──
+  type PendingNav = { kind: 'step'; target: WizardStep } | { kind: 'next' } | { kind: 'prev' };
+  const [pendingNav, setPendingNav] = useState<PendingNav | null>(null);
+
+  const executePendingNav = useCallback(
+    (nav: PendingNav) => {
+      switch (nav.kind) {
+        case 'step':
+          goToStep(nav.target);
+          break;
+        case 'next':
+          nextStep();
+          break;
+        case 'prev':
+          prevStep();
+          break;
+      }
+    },
+    [goToStep, nextStep, prevStep],
+  );
+
+  const requestNav = useCallback(
+    (nav: PendingNav) => {
+      if (isDirty) {
+        setPendingNav(nav);
+      } else {
+        executePendingNav(nav);
+      }
+    },
+    [isDirty, executePendingNav],
+  );
+
+  const handleDirtySave = useCallback(() => {
+    saveDraft();
+    if (pendingNav) executePendingNav(pendingNav);
+    setPendingNav(null);
+  }, [saveDraft, executePendingNav, pendingNav]);
+
+  const handleDirtyDiscard = useCallback(() => {
+    markClean();
+    if (pendingNav) executePendingNav(pendingNav);
+    setPendingNav(null);
+  }, [markClean, executePendingNav, pendingNav]);
+
+  const handleDirtyCancel = useCallback(() => {
+    setPendingNav(null);
+  }, []);
 
   // Progress percentage for the overall wizard
   const completedCount = useMemo(
@@ -214,7 +307,7 @@ export default function WizardShell() {
 
   const handleStepClick = (step: WizardStep) => {
     if (isStepAccessible(step)) {
-      goToStep(step);
+      requestNav({ kind: 'step', target: step });
     }
   };
 
@@ -258,25 +351,23 @@ export default function WizardShell() {
           alternativeLabel={!isSmall}
           orientation={isSmall ? 'vertical' : 'horizontal'}
         >
-          {WIZARD_STEPS.map((step) => {
+          {WIZARD_STEPS.map((step, idx) => {
             const accessible = isStepAccessible(step.id);
             return (
               <Step key={step.id} completed={getStepCompletionStatus(step.id) === 'completed'}>
                 <StepButton
                   onClick={() => handleStepClick(step.id)}
                   disabled={!accessible}
-                  icon={
-                    <WizardStepIcon
-                      stepId={step.id}
-                      icon={WIZARD_STEPS.indexOf(step) + 1}
-                      active={step.id === currentStep}
-                      completed={getStepCompletionStatus(step.id) === 'completed'}
-                    />
-                  }
                 >
                   <StepLabel
                     error={getStepCompletionStatus(step.id) === 'error'}
-                    StepIconComponent={() => null}
+                    StepIconComponent={(iconProps) => (
+                      <WizardStepIcon
+                        {...iconProps}
+                        stepId={step.id}
+                        icon={idx + 1}
+                      />
+                    )}
                   >
                     <Typography
                       variant="caption"
@@ -319,14 +410,27 @@ export default function WizardShell() {
           zIndex: 1200,
         }}
       >
-        <Button
-          startIcon={<ArrowBackIcon />}
-          onClick={prevStep}
-          disabled={isFirst}
-          color="inherit"
-        >
-          Back
-        </Button>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          <Button
+            startIcon={<ArrowBackIcon />}
+            onClick={() => requestNav({ kind: 'prev' })}
+            disabled={isFirst}
+            color="inherit"
+          >
+            Back
+          </Button>
+          <Tooltip title="Clear all data and start a new guide">
+            <Button
+              startIcon={<DeleteSweepIcon />}
+              onClick={() => setClearAllOpen(true)}
+              color="error"
+              size="small"
+              sx={{ ml: 1 }}
+            >
+              Clear All
+            </Button>
+          </Tooltip>
+        </Box>
 
         <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
           <LastSavedLabel />
@@ -345,13 +449,55 @@ export default function WizardShell() {
           <Button
             endIcon={<ArrowForwardIcon />}
             variant="contained"
-            onClick={nextStep}
+            onClick={() => requestNav({ kind: 'next' })}
             disabled={isLast || !canProceed}
           >
             {isLast ? 'Finish' : 'Next'}
           </Button>
         </Box>
       </Paper>
+
+      {/* Clear All confirmation dialog */}
+      <Dialog open={clearAllOpen} onClose={() => setClearAllOpen(false)}>
+        <DialogTitle>Start New Guide?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This will permanently clear <strong>all</strong> data for the current
+            guide — entity setup, assets, scripts, translations, audio, and
+            publishing. This action cannot be undone.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setClearAllOpen(false)} color="inherit">
+            Cancel
+          </Button>
+          <Button onClick={handleClearAll} color="error" variant="contained">
+            Clear Everything
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Unsaved changes confirmation dialog */}
+      <Dialog open={pendingNav !== null} onClose={handleDirtyCancel}>
+        <DialogTitle>Unsaved Changes</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            You have unsaved changes on this step. Would you like to save before
+            navigating away?
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleDirtyCancel} color="inherit">
+            Cancel
+          </Button>
+          <Button onClick={handleDirtyDiscard} color="warning">
+            Discard
+          </Button>
+          <Button onClick={handleDirtySave} variant="contained">
+            Save & Continue
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

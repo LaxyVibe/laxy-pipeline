@@ -2,12 +2,12 @@
 
 ## Prerequisites
 
-| Tool | Install |
-|------|---------|
-| **Node.js** ≥ 18 | [nodejs.org](https://nodejs.org) |
-| **Python** 3.12 | `brew install python@3.12` |
-| **Firebase CLI** | `npm install -g firebase-tools` |
-| **Google Cloud SDK** | [cloud.google.com/sdk](https://cloud.google.com/sdk/docs/install) |
+| Tool | Version | Install |
+|------|---------|---------|
+| **Node.js** | >= 18 | [nodejs.org](https://nodejs.org) |
+| **Python** | 3.12 | `brew install python@3.12` |
+| **Firebase CLI** | latest | `npm install -g firebase-tools` |
+| **Google Cloud SDK** | latest | [cloud.google.com/sdk](https://cloud.google.com/sdk/docs/install) |
 
 ---
 
@@ -20,6 +20,8 @@ npm install
 
 # Backend
 cd ../functions
+python3.12 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -28,21 +30,28 @@ pip install -r requirements.txt
 ## 2. Authenticate
 
 ```bash
-# Login to Firebase
 firebase login
+```
 
-# Set up Application Default Credentials (needed for Vertex AI / Gemini)
+For LLM steps, choose **one** of:
+
+```bash
+# Option A — Gemini API key (easiest for local dev, no GCP project needed)
+echo 'GEMINI_API_KEY=your-key-here' >> functions/.env
+
+# Option B — Vertex AI via Application Default Credentials
 gcloud auth application-default login
 ```
 
+> `GEMINI_API_KEY` in `functions/.env` takes priority over ADC when both are present.
+
 ---
 
-## 3. Configure Your GCP Project
+## 3. Configure GCP (Vertex AI mode only)
 
-The pipeline calls **Vertex AI (Gemini)** and stores sessions in **Firestore**. You need a real GCP project with these APIs enabled:
+Skip this step if you're using a `GEMINI_API_KEY`.
 
 ```bash
-# Enable required APIs
 gcloud services enable \
   aiplatform.googleapis.com \
   firestore.googleapis.com \
@@ -50,26 +59,26 @@ gcloud services enable \
   --project YOUR_PROJECT_ID
 ```
 
-> **Note:** If you use `demo-laxy` (Firebase offline demo mode), Firestore works locally but Vertex AI calls will fail — a real GCP project is required for LLM steps.
-
 ---
 
 ## 4. Start the Backend (Firebase Emulators)
 
 ```bash
-cd /path/to/laxy-pipeline
-
-# Start Functions + Firestore emulators
-firebase emulators:start --only functions,firestore --project YOUR_PROJECT_ID
+# From the project root
+firebase emulators:start --project laxy-studio-dev
 ```
 
-This starts:
+All emulators defined in `firebase.json` start automatically:
 
 | Service | Port | URL |
 |---------|------|-----|
-| Functions emulator | 5001 | `http://127.0.0.1:5001` |
-| Firestore emulator | 8080 | `http://127.0.0.1:8080` |
+| Functions | 5001 | `http://127.0.0.1:5001` |
+| Firestore | 8080 | `http://127.0.0.1:8080` |
+| Storage | 9199 | `http://127.0.0.1:9199` |
+| Hosting (optional) | 5000 | `http://localhost:5000` |
 | Emulator UI | 4000 | `http://localhost:4000` |
+
+> The `--project` value must match `VITE_GCP_PROJECT` in your frontend `.env.local`.
 
 ---
 
@@ -80,41 +89,56 @@ In a **separate terminal**:
 ```bash
 cd laxy-studio
 
-# Set your GCP project ID (must match the emulator --project flag)
-export VITE_GCP_PROJECT="YOUR_PROJECT_ID"
+# Create .env.local (edit values to match your setup)
+cat > .env.local <<EOF
+VITE_GCP_PROJECT=laxy-studio-dev
+VITE_GCP_REGION=us-central1
+EOF
 
-npm run dev
+npm run dev    # -> http://localhost:5173
 ```
 
-The Vite dev server starts at **http://localhost:5173** and proxies `/pipeline/*` requests to the Functions emulator automatically.
+`vite.config.ts` sets up dedicated proxy routes for all 6 pipeline endpoints:
+
+| Frontend path | Emulator function |
+|---|---|
+| `POST /pipeline/start` | `pipeline_start` |
+| `POST /pipeline/resume` | `pipeline_resume` |
+| `GET  /pipeline/status` | `pipeline_status` |
+| `POST /pipeline/audio-generate-language` | `audio_generate_language` |
+| `POST /pipeline/audio-generate` | `audio_generate` |
+| `POST /pipeline/translate-language` | `translate_language` |
 
 ---
 
 ## 6. Verify Everything Works
 
 1. Open **http://localhost:5173** — the Laxy Studio UI should load.
-2. Open **http://localhost:4000** — the Firebase Emulator UI lets you monitor function invocations and Firestore documents.
-3. Try starting a pipeline run from the wizard — you should see:
-   - A `POST /pipeline/start` request proxied to the emulator
-   - A new document in the `pipeline_sessions` Firestore collection
-   - The pipeline executing steps until it hits the first human gate (`hg1_data_review`)
+2. Open **http://localhost:4000** — the Firebase Emulator UI shows function logs and Firestore documents.
+3. Start a guide in the wizard. You should see:
+   - `POST /pipeline/start` proxied to the emulator
+   - A new session document under `pipeline_sessions/{sessionId}` in Firestore
+   - Steps `s2_ocr_parse` and `s1_metadata_extract` complete, then the pipeline pauses at `hg1_data_review`
+   - The wizard shows the Metadata Review UI (Human Gate 1)
 
 ---
 
 ## Environment Variables
 
-### Frontend (`laxy-studio/`)
+### Frontend (`laxy-studio/.env.local`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VITE_GCP_PROJECT` | `demo-laxy` | GCP project ID (used to build emulator proxy path) |
-| `VITE_GCP_REGION` | `us-central1` | GCP region |
+| `VITE_GCP_PROJECT` | `laxy-pipeline-dev` | Must match the `--project` flag in `firebase emulators:start` |
+| `VITE_GCP_REGION` | `us-central1` | Used to build emulator proxy paths |
+| `VITE_FUNCTIONS_HOST` | *(unset)* | Set to a Cloud Run host to call functions directly (bypasses Hosting 60 s timeout in production) |
 
-### Backend (`functions/`)
+### Backend (`functions/.env`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GCP_PROJECT` / `GCLOUD_PROJECT` | *(auto-detected)* | GCP project ID |
+| `GEMINI_API_KEY` | *(unset)* | Google AI Studio key — takes priority over Vertex AI ADC |
+| `GCP_PROJECT` / `GCLOUD_PROJECT` | *(auto-detected)* | GCP project ID (Vertex AI mode) |
 | `GCP_REGION` | `us-central1` | Vertex AI region |
 
 ---
@@ -122,13 +146,14 @@ The Vite dev server starts at **http://localhost:5173** and proxies `/pipeline/*
 ## Running Tests
 
 ```bash
-# Backend tests (113 tests)
+# Backend — 100 tests (31 pipeline + 44 steps + 25 tools)
 cd functions
+source venv/bin/activate
 python -m pytest tests/ -v
 
-# Frontend tests (22 tests)
+# Frontend — 40 tests
 cd laxy-studio
-npm test
+npm run test
 ```
 
 ---
@@ -138,25 +163,29 @@ npm test
 ### `POST /pipeline/start` returns 500
 
 - **Backend not running:** Make sure `firebase emulators:start` is running in another terminal.
-- **Wrong project ID:** The `VITE_GCP_PROJECT` env var must match the `--project` flag used with the emulator.
-- **Vertex AI auth missing:** Run `gcloud auth application-default login`.
+- **Wrong project ID:** `VITE_GCP_PROJECT` in `.env.local` must match the `--project` flag used with the emulator.
+- **No credentials:** Set `GEMINI_API_KEY` in `functions/.env`, or run `gcloud auth application-default login`.
 
 ### `Could not load the default credentials`
 
 ```bash
 gcloud auth application-default login
+# or: echo 'GEMINI_API_KEY=your-key' >> functions/.env
 ```
 
 ### Firestore emulator has no data
 
-The emulator starts with an empty database — session documents are created when you start a pipeline run.
+The emulator starts empty — session documents are created the first time you start a pipeline run.
 
 ### `ModuleNotFoundError: No module named 'google.adk'`
 
 ```bash
-cd functions
-pip install -r requirements.txt
+cd functions && source venv/bin/activate && pip install -r requirements.txt
 ```
+
+### Audio URLs are broken after generation
+
+The Storage emulator must be running (it starts with `firebase emulators:start`). Generated audio uses the `http://127.0.0.1:9199/...` URL format when `FIREBASE_STORAGE_EMULATOR_HOST` is detected.
 
 ---
 
@@ -164,14 +193,16 @@ pip install -r requirements.txt
 
 ```
 Browser (localhost:5173)
-  │
-  ├── POST /pipeline/start ──► Vite proxy ──► Functions emulator (port 5001)
-  │                                              │
-  │                                              ├── PipelineExecutor
-  │                                              │     ├── Gemini (Vertex AI)
-  │                                              │     └── Firestore sessions
-  │                                              │
-  └── POST /pipeline/resume ─► Vite proxy ──► Functions emulator (port 5001)
+  |
+  +-- POST /pipeline/start
+  +-- POST /pipeline/resume        Vite proxy (vite.config.ts) -> Functions emulator :5001
+  +-- POST /audio-generate-language                                  |
+  +-- POST /translate-language                                       v
+                                                               PipelineExecutor
+                                                                 +-- Gemini API / Vertex AI
+                                                                 +-- Firestore :8080  (sessions)
+                                                                 +-- Storage  :9199  (audio WAV)
 ```
 
-The pipeline runs 17 steps sequentially (8 LLM agents, 4 tool functions, 4 human gates, 1 completion marker), pausing at each human gate for user approval before continuing.
+The pipeline runs **17 steps**: 8 LLM steps, 4 tool functions, 4 human gates, and 1 completion marker.
+Execution pauses at each human gate and resumes only after the user approves or rejects from the wizard UI.

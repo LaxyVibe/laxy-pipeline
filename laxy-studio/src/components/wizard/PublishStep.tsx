@@ -176,6 +176,11 @@ export default function PublishStep() {
 
   const [subStep, setSubStep] = useState(() => statusToSubStep(publishStatus));
 
+  // Sync subStep when publishStatus changes externally (e.g., pipeline sync, autosave restore)
+  useEffect(() => {
+    setSubStep(statusToSubStep(publishStatus));
+  }, [publishStatus]);
+
   // ── Initialize slideshows from spots on mount ──
   useEffect(() => {
     if (slideshows.length === 0 && spots.length > 0) {
@@ -299,10 +304,18 @@ export default function PublishStep() {
           }
         }
       } catch (err) {
-        console.warn('[PublishStep] Pipeline unavailable, using stub data:', err);
+        const pipelineMsg = err instanceof Error ? err.message : 'Pipeline unavailable';
+        setPublishError(pipelineMsg);
+        setPublishStatus('error');
+        return;
       }
 
-      // Fallback: generate mock URLs if pipeline didn't provide them
+      if (!guideUrl) {
+        setPublishError('Pipeline did not return a published guide URL.');
+        setPublishStatus('error');
+        return;
+      }
+
       const slugValue =
         slug ||
         customSlug ||
@@ -310,13 +323,6 @@ export default function PublishStep() {
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-|-$/g, '');
-
-      if (!guideUrl) {
-        guideUrl = `https://player.laxy.app/guides/${slugValue}`;
-      }
-      if (!shortUrl) {
-        shortUrl = `https://laxy.click/${slugValue}`;
-      }
 
       // Generate QR data URL
       const qrCanvas = document.createElement('canvas');
@@ -409,17 +415,17 @@ export default function PublishStep() {
       setPublishStatus('idle');
       setSubStep(0);
     } else if (subStep === 2 && publishStatus !== 'published') {
+      setPublishError(null); // clear stale errors on back-navigation
       setPublishStatus('previewing');
       setSubStep(1);
     }
-  }, [subStep, publishStatus, setPublishStatus]);
+  }, [subStep, publishStatus, setPublishStatus, setPublishError]);
 
-  // ── Retry ──
+  // ── Retry / Reset ──
   const handleRetry = useCallback(() => {
-    setPublishError(null);
-    setPublishStatus('idle');
+    resetPublish();
     setSubStep(0);
-  }, [setPublishError, setPublishStatus]);
+  }, [resetPublish]);
 
   // ── Sub-step content ──
   const renderSubStep = () => {

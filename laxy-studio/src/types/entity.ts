@@ -65,6 +65,15 @@ export const SUPPORTED_LANGUAGES = [
 
 export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];
 
+/** Lookup map from language code → human-readable label (derived from SUPPORTED_LANGUAGES) */
+const _langMap = new Map<string, string>(SUPPORTED_LANGUAGES.map((l) => [l.code, l.label]));
+
+/** Return the human-readable label for a language code.
+ *  Falls back to the uppercased code when the language isn't in the list. */
+export function langLabel(code: string): string {
+  return _langMap.get(code) ?? code.toUpperCase();
+}
+
 /** Available modules (Phase 1 = Guide only) */
 export const AVAILABLE_MODULES = [
   {
@@ -404,14 +413,26 @@ export interface DirectorNote {
   pacing: string;
 }
 
+/** Per-spot audio file within a language */
+export interface SpotAudioFile {
+  spotId: string;
+  spotNumber: number;
+  title: string;
+  audioUrl: string;
+  durationMs: number;
+}
+
 /** Generated audio for a single language */
 export interface LanguageAudio {
   lang: string;
   label: string;
+  /** First spot's audioUrl (backwards-compat) */
   audioUrl: string;
   durationMs: number;
   /** Per-language approval */
   approved: boolean;
+  /** Individual audio files per spot/script */
+  spots?: SpotAudioFile[];
 }
 
 /** Pronunciation issue marker on audio timeline */
@@ -558,7 +579,7 @@ export interface EntityConfig {
   enabledModules: ModuleId[];
 
   // Layout
-  selectedLayout: LayoutTemplateId;
+  selectedLayout: LayoutTemplateId | null;
 
   // Item field config
   itemFields: ItemFieldDef[];

@@ -215,3 +215,53 @@ def _build_content_summary(spots: list[dict[str, Any]], scripts: list[dict[str, 
     if len(spots) > 5:
         summary += f" (+{len(spots) - 5} more)"
     return summary
+
+
+def srt_generate_for_text(text: str, duration_sec: float) -> list[dict[str, Any]]:
+    """
+    Generate SRT entries for a piece of text given its actual audio duration.
+
+    Splits by sentences first, then by word-count within sentences if needed,
+    distributing time proportionally to word count.
+    """
+    # Split into sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return []
+
+    # Count words per sentence for proportional timing
+    word_counts = [len(s.split()) for s in sentences]
+    total_words = sum(word_counts) or 1
+
+    entries: list[dict[str, Any]] = []
+    cursor_sec = 0.0
+
+    for i, sentence in enumerate(sentences):
+        seg_duration = (word_counts[i] / total_words) * duration_sec
+        start = cursor_sec
+        end = cursor_sec + seg_duration
+        cursor_sec = end
+
+        entries.append({
+            "index": i + 1,
+            "startTime": _format_srt_time(start),
+            "endTime": _format_srt_time(end),
+            "startSeconds": round(start, 3),
+            "endSeconds": round(end, 3),
+            "text": sentence,
+        })
+
+    return entries
+
+
+def format_srt(entries: list[dict[str, Any]]) -> str:
+    """Format SRT entries into a raw SRT string."""
+    lines: list[str] = []
+    for e in entries:
+        lines.append(f"{e['index']}")
+        lines.append(f"{e['startTime']} --> {e['endTime']}")
+        lines.append(e["text"])
+        lines.append("")
+    return "\n".join(lines)

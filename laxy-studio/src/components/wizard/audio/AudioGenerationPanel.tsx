@@ -8,6 +8,8 @@ import { SUPPORTED_LANGUAGES } from '../../../types/entity';
 
 interface AudioGenerationPanelProps {
   selectedLanguages: string[];
+  /** Language codes the user configured in entity setup */
+  availableLanguages: string[];
   onToggleLanguage: (lang: string) => void;
   onGenerate: () => void;
   generating: boolean;
@@ -17,12 +19,17 @@ interface AudioGenerationPanelProps {
 
 export default function AudioGenerationPanel({
   selectedLanguages,
+  availableLanguages,
   onToggleLanguage,
   onGenerate,
   generating,
   progress,
   estimatedTokens,
 }: AudioGenerationPanelProps) {
+  // Only show languages the user configured in entity setup
+  const languages = SUPPORTED_LANGUAGES.filter((l) =>
+    availableLanguages.includes(l.code),
+  );
   return (
     <Box>
       <Typography variant="subtitle1" fontWeight={700} gutterBottom>
@@ -34,7 +41,7 @@ export default function AudioGenerationPanel({
 
       {/* Language chips */}
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
-        {SUPPORTED_LANGUAGES.map((lang) => {
+        {languages.map((lang) => {
           const isSelected = selectedLanguages.includes(lang.code);
           return (
             <Chip

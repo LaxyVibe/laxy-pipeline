@@ -6,6 +6,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import {
   EntityConfig,
   DEFAULT_ENTITY_CONFIG,
+  langLabel,
   type AssetFile,
   type SpotMetadata,
   type IngestionStatus,
@@ -176,6 +177,12 @@ export interface GuidesStore {
   setPublishedGuide: (guide: PublishedGuide | null) => void;
   resetPublish: () => void;
 
+  // Cascading reset — resets the given step AND all downstream steps
+  resetDownstreamFrom: (step: WizardStep) => void;
+
+  // Full reset — clear everything and start a new guide
+  clearAll: () => void;
+
   // Step completion
   getStepCompletionStatus: (step: WizardStep) => 'completed' | 'incomplete' | 'error';
   isStepAccessible: (step: WizardStep) => boolean;
@@ -267,10 +274,29 @@ export const useGuidesStore = create<GuidesStore>()(
   },
 
   setEntityConfig: (config) => {
-    set((s) => ({
-      entityConfig: { ...s.entityConfig, ...config },
-      isDirty: true,
-    }));
+    set((s) => {
+      const patch: Partial<GuidesStore> = {
+        entityConfig: { ...s.entityConfig, ...config },
+        isDirty: true,
+      };
+
+      // If supportedLanguages changed and we have translations, reset translation
+      // status so stale languages from a previous config don't remain "approved".
+      if (config.supportedLanguages && s.translations.length > 0) {
+        const newTarget = config.supportedLanguages.filter(
+          (l) => l !== (config.coreLanguage ?? s.entityConfig.coreLanguage),
+        );
+        const oldLangs = s.translations.map((t) => t.lang);
+        const changed =
+          newTarget.length !== oldLangs.length ||
+          !newTarget.every((l) => oldLangs.includes(l));
+        if (changed && s.translationStatus === 'approved') {
+          patch.translationStatus = 'review';
+        }
+      }
+
+      return patch;
+    });
   },
 
   resetEntityConfig: () => {
@@ -608,6 +634,106 @@ export const useGuidesStore = create<GuidesStore>()(
       publishedGuide: null,
     }),
 
+  // ── Cascading reset ──
+  // Resets the given step and ALL steps that come after it in the wizard.
+  // Also clears shared pipeline IDs since they become stale.
+  resetDownstreamFrom: (step: WizardStep) => {
+    const idx = WIZARD_STEPS.findIndex((ws) => ws.id === step);
+    if (idx < 0) return;
+
+    const resetActions: Record<string, () => void> = {
+      ingest: () =>
+        set({
+          spots: [],
+          ingestionStatus: 'idle',
+          ingestionError: null,
+          selectedAssetIds: [],
+        }),
+      script: () =>
+        set({
+          scripts: [],
+          imageMappings: [],
+          scriptStatus: 'idle',
+          scriptError: null,
+        }),
+      translation: () =>
+        set({
+          translations: [],
+          translationStatus: 'idle',
+          translationError: null,
+        }),
+      audio: () =>
+        set({
+          selectedCharacterId: null,
+          selectedVoiceId: null,
+          directorNote: { vocalEnvironment: '', mission: '', pacing: '' },
+          audioFiles: [],
+          pronunciationMarkers: [],
+          srtFiles: [],
+          audioStatus: 'idle',
+          audioError: null,
+        }),
+      publish: () =>
+        set({
+          slideshows: [],
+          publishStatus: 'idle',
+          publishError: null,
+          customSlug: '',
+          publishedGuide: null,
+        }),
+    };
+
+    // Run reset for each step from `step` onwards
+    for (let i = idx; i < WIZARD_STEPS.length; i++) {
+      const stepId = WIZARD_STEPS[i].id;
+      resetActions[stepId]?.();
+    }
+
+    // Always clear shared pipeline IDs — they're bound to the old session
+    set({ pipelineSessionId: null, pipelineCheckpointId: null, isDirty: true });
+  },
+
+  clearAll: () => {
+    set({
+      guideId: null,
+      entityConfig: { ...DEFAULT_ENTITY_CONFIG, selectedLayout: null, enabledModules: [] },
+      currentStep: 'entity-config' as WizardStep,
+      isDirty: false,
+      assets: [],
+      spots: [],
+      ingestionStatus: 'idle',
+      ingestionError: null,
+      selectedAssetIds: [],
+      pipelineSessionId: null,
+      pipelineCheckpointId: null,
+      scripts: [],
+      imageMappings: [],
+      scriptStatus: 'idle',
+      scriptError: null,
+      translations: [],
+      translationStatus: 'idle',
+      translationError: null,
+      selectedCharacterId: null,
+      selectedVoiceId: null,
+      directorNote: { vocalEnvironment: '', mission: '', pacing: '' },
+      audioFiles: [],
+      pronunciationMarkers: [],
+      generationHistory: [],
+      srtFiles: [],
+      audioStatus: 'idle',
+      audioError: null,
+      slideshows: [],
+      publishStatus: 'idle',
+      publishError: null,
+      previewDevice: 'mobile',
+      customSlug: '',
+      publishedGuide: null,
+      lastSavedAt: null,
+      syncStatus: 'synced' as const,
+      lastPipelineResponseAt: null,
+    });
+  },
+
   goToStep: (step) => set({ currentStep: step }),
 
   nextStep: () => {
@@ -687,12 +813,13 @@ export const useGuidesStore = create<GuidesStore>()(
     const s = get();
     const idx = WIZARD_STEPS.findIndex((ws) => ws.id === step);
     if (idx === 0) return true;
-    // Allow access to any step up to and including the first incomplete one + 1
+    // Allow access to any completed step, plus the first incomplete step.
+    // Once an incomplete step is found, nothing beyond it is accessible.
     for (let i = 0; i < idx; i++) {
       const prevStatus = s.getStepCompletionStatus(WIZARD_STEPS[i].id);
-      if (prevStatus === 'incomplete') {
-        // Allow clicking one step ahead of the furthest completed
-        return i === idx - 1;
+      if (prevStatus === 'incomplete' || prevStatus === 'error') {
+        // Only allow the step immediately after this incomplete one
+        return idx <= i + 1;
       }
     }
     return true;
@@ -729,15 +856,43 @@ export const useGuidesStore = create<GuidesStore>()(
       case 'S1: Metadata Extract': {
         const spots = (parsed as { spots?: SpotMetadata[] }).spots;
         if (Array.isArray(spots)) {
-          set({ spots, ingestionStatus: 'review', isDirty: true });
+          // Only move to 'review' if not already approved — avoid regressing status
+          // when a later pipeline call re-returns earlier step data.
+          const patch: Record<string, unknown> = { spots, isDirty: true };
+          if (get().ingestionStatus !== 'approved') {
+            patch.ingestionStatus = 'review';
+          }
+          set(patch as Partial<GuidesStore>);
         }
         break;
       }
       case 'S4: Script Gen (Gemini Pro)':
       case 'S4: Script Gen': {
-        const scripts = parsed as { scripts?: SpotScript[] };
-        if (Array.isArray(scripts.scripts)) {
-          set({ scripts: scripts.scripts, scriptStatus: 'review', isDirty: true });
+        const rawScripts = (parsed as { scripts?: Record<string, unknown>[] }).scripts;
+        if (Array.isArray(rawScripts)) {
+          // Backend may return variants: { kids, academic, quick, professional, brief }
+          // Transform to flat scriptText by picking 'professional' variant as default
+          const mapped: SpotScript[] = rawScripts.map((raw, idx) => {
+            let text = (raw.scriptText as string) ?? '';
+            if (!text && typeof raw.variants === 'object' && raw.variants !== null) {
+              const v = raw.variants as Record<string, string>;
+              text = v.professional ?? v.academic ?? v.quick ?? v.kids ?? v.brief ?? '';
+            }
+            return {
+              spotId: (raw.spotId as string) ?? `spot-${idx}`,
+              spotNumber: (raw.spotNumber as number) ?? idx + 1,
+              title: (raw.title as string) ?? `Spot ${idx + 1}`,
+              scriptText: text,
+              approved: false,
+              fastTrack: false,
+            };
+          });
+          // Only move to 'review' if not already approved — avoid regressing status
+          const patch: Record<string, unknown> = { scripts: mapped, isDirty: true };
+          if (get().scriptStatus !== 'approved') {
+            patch.scriptStatus = 'review';
+          }
+          set(patch as Partial<GuidesStore>);
         }
         break;
       }
@@ -751,9 +906,53 @@ export const useGuidesStore = create<GuidesStore>()(
       }
       case 'S6: Translation (Gemini Pro)':
       case 'S6: Translation': {
-        const translations = parsed as { translations?: LanguageTranslation[] };
-        if (Array.isArray(translations.translations)) {
-          set({ translations: translations.translations, translationStatus: 'review', isDirty: true });
+        const rawTranslations = (parsed as { translations?: Record<string, unknown>[] }).translations;
+        if (Array.isArray(rawTranslations)) {
+          // Backend returns per-spot: [{ spotId, translations: { en, ja, ko, ... } }]
+          // Frontend needs per-language: [{ lang, label, spots: [{ spotId, translatedText }] }]
+          const firstItem = rawTranslations[0];
+          const isSpotFirst = firstItem && typeof firstItem.translations === 'object' && !Array.isArray(firstItem.translations) && !firstItem.lang;
+          if (isSpotFirst) {
+            // Pivot from spot-first to language-first
+            // Build a lookup of original script text keyed by spotId so we can
+            // populate the "Original Script" column in the translation review table.
+            const scriptsBySpotId = new Map<string, string>(
+              get().scripts.map((sc) => [sc.spotId, sc.scriptText]),
+            );
+            const langMap = new Map<string, { spotId: string; spotNumber: number; title: string; originalText: string; translatedText: string }[]>();
+            rawTranslations.forEach((item, idx) => {
+              const spotId = (item.spotId as string) ?? `spot-${idx}`;
+              const spotNumber = (item.spotNumber as number) ?? idx + 1;
+              const title = (item.title as string) ?? `Spot ${idx + 1}`;
+              const originalText = scriptsBySpotId.get(spotId) ?? '';
+              const trans = item.translations as Record<string, string> | undefined;
+              if (trans && typeof trans === 'object') {
+                for (const [lang, text] of Object.entries(trans)) {
+                  if (!langMap.has(lang)) langMap.set(lang, []);
+                  langMap.get(lang)!.push({ spotId, spotNumber, title, originalText, translatedText: String(text) });
+                }
+              }
+            });
+            const pivoted: LanguageTranslation[] = Array.from(langMap.entries()).map(([lang, spots]) => ({
+              lang,
+              label: langLabel(lang),
+              spots,
+              approved: false,
+            }));
+            // Only move to 'review' if not already approved — avoid regressing status
+            const patch1: Record<string, unknown> = { translations: pivoted, isDirty: true };
+            if (get().translationStatus !== 'approved') {
+              patch1.translationStatus = 'review';
+            }
+            set(patch1 as Partial<GuidesStore>);
+          } else {
+            // Already in language-first format
+            const patch2: Record<string, unknown> = { translations: rawTranslations as unknown as LanguageTranslation[], isDirty: true };
+            if (get().translationStatus !== 'approved') {
+              patch2.translationStatus = 'review';
+            }
+            set(patch2 as Partial<GuidesStore>);
+          }
         }
         break;
       }
@@ -767,10 +966,19 @@ export const useGuidesStore = create<GuidesStore>()(
       }
       case 'S8: Director Note (Gemini)':
       case 'S8: Director Note': {
-        const note = parsed as Partial<DirectorNote>;
-        if (note.vocalEnvironment || note.mission || note.pacing) {
+        // Backend may wrap in { directorNote: {...} } and use different field names
+        const wrapper = parsed as { directorNote?: Record<string, unknown> };
+        const raw = (wrapper.directorNote && typeof wrapper.directorNote === 'object')
+          ? wrapper.directorNote
+          : parsed as Record<string, unknown>;
+        const mapped: Partial<DirectorNote> = {
+          vocalEnvironment: (raw.vocalEnvironment as string) ?? '',
+          mission: (raw.mission as string) ?? (raw.missionOfSpeech as string) ?? '',
+          pacing: (raw.pacing as string) ?? (raw.pacingAndEnergy as string) ?? '',
+        };
+        if (mapped.vocalEnvironment || mapped.mission || mapped.pacing) {
           set((s) => ({
-            directorNote: { ...s.directorNote, ...note },
+            directorNote: { ...s.directorNote, ...mapped },
             isDirty: true,
           }));
         }
@@ -778,9 +986,51 @@ export const useGuidesStore = create<GuidesStore>()(
       }
       case 'S9: Audio Gen (Gemini TTS)':
       case 'S9: Audio Gen': {
-        const audio = parsed as { audioFiles?: LanguageAudio[] };
+        const audio = parsed as { audioFiles?: Record<string, unknown>[] };
         if (Array.isArray(audio.audioFiles)) {
-          set({ audioFiles: audio.audioFiles, audioStatus: 'review', isDirty: true });
+          // Backend returns per-spot items: { lang, spotId, audioUrl, durationMs, voiceId, model }
+          // Frontend LanguageAudio expects per-language: { lang, label, audioUrl, durationMs, approved }
+          // Group by language, enrich with label & approved flag
+          const audioByLang = new Map<string, LanguageAudio>();
+          for (const af of audio.audioFiles) {
+            const lang = (af.lang as string) ?? '';
+            const audioUrl = (af.audioUrl as string) ?? '';
+            const durationMs = (af.durationMs as number) ?? 0;
+            if (!audioUrl) continue;
+            const spotEntry = {
+              spotId: (af.spotId as string) ?? '',
+              spotNumber: (af.spotNumber as number) ?? 0,
+              title: (af.title as string) ?? '',
+              audioUrl,
+              durationMs,
+            };
+            const existing = audioByLang.get(lang);
+            if (!existing) {
+              audioByLang.set(lang, {
+                lang,
+                label: langLabel(lang),
+                audioUrl,
+                durationMs,
+                approved: false,
+                spots: [spotEntry],
+              });
+            } else {
+              // Multi-spot: keep first URL, sum durations, collect all spots
+              existing.durationMs += durationMs;
+              existing.spots = [...(existing.spots ?? []), spotEntry];
+            }
+          }
+          const enriched: LanguageAudio[] = Array.from(audioByLang.values());
+          // Only move to 'review' if not already approved AND user has already
+          // been through the configure step (audioStatus is 'generating' or later).
+          // If audioStatus is still 'idle'/'configuring', keep it so the user
+          // starts at the Configure sub-step rather than jumping to Review.
+          const audioPatch: Record<string, unknown> = { audioFiles: enriched, isDirty: true };
+          const currentAudioStatus = get().audioStatus;
+          if (currentAudioStatus !== 'approved' && currentAudioStatus !== 'idle' && currentAudioStatus !== 'configuring') {
+            audioPatch.audioStatus = 'review';
+          }
+          set(audioPatch as Partial<GuidesStore>);
         }
         break;
       }
@@ -816,13 +1066,50 @@ export const useGuidesStore = create<GuidesStore>()(
         } as unknown as GuidesStore;
       },
       // Merge function to handle rehydration properly
-      merge: (persistedState, currentState) => ({
-        ...currentState,
-        ...(persistedState as Partial<GuidesStore>),
-        // Always reset transient state on load
-        isSaving: false,
-        syncStatus: 'synced' as const,
-      }),
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<GuidesStore>;
+
+        // Reset ALL in-flight statuses that can't survive a page reload
+        const ingestionStatus =
+          persisted.ingestionStatus === 'processing'
+            ? ('idle' as const)
+            : (persisted.ingestionStatus ?? currentState.ingestionStatus);
+        const scriptStatus =
+          persisted.scriptStatus === 'generating'
+            ? ('idle' as const)
+            : (persisted.scriptStatus ?? currentState.scriptStatus);
+        const translationStatus =
+          persisted.translationStatus === 'translating'
+            ? ('idle' as const)
+            : (persisted.translationStatus ?? currentState.translationStatus);
+        const audioStatus =
+          persisted.audioStatus === 'generating'
+            ? ('idle' as const)
+            : (persisted.audioStatus ?? currentState.audioStatus);
+        const publishStatus =
+          persisted.publishStatus === 'publishing'
+            ? ('idle' as const)
+            : (persisted.publishStatus ?? currentState.publishStatus);
+
+        return {
+          ...currentState,
+          ...persisted,
+          // Always reset transient state on load
+          isSaving: false,
+          syncStatus: 'synced' as const,
+          // Apply in-flight resets
+          ingestionStatus,
+          ingestionError: ingestionStatus !== persisted.ingestionStatus ? null : (persisted.ingestionError ?? null),
+          scriptStatus,
+          scriptError: scriptStatus !== persisted.scriptStatus ? null : (persisted.scriptError ?? null),
+          translationStatus,
+          translationError: translationStatus !== persisted.translationStatus ? null : (persisted.translationError ?? null),
+          audioStatus,
+          audioError: audioStatus !== persisted.audioStatus ? null : (persisted.audioError ?? null),
+          publishStatus,
+          publishError: publishStatus !== persisted.publishStatus ? null : (persisted.publishError ?? null),
+        };
+      },
     },
   ),
 );

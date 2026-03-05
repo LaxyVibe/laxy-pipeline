@@ -44,21 +44,20 @@ import DoneAllIcon from '@mui/icons-material/DoneAll';
 import RemoveDoneIcon from '@mui/icons-material/RemoveDone';
 import DescriptionIcon from '@mui/icons-material/Description';
 import GTranslateIcon from '@mui/icons-material/GTranslate';
+import SyncIcon from '@mui/icons-material/Sync';
 
 import { useGuidesStore } from '../../guidesStore';
 import {
-  startPipeline,
+  translateLanguage,
   sendHumanInput,
-  getExecutedNodes,
-  getStoppedNodeId,
-  getNodeOutput,
 } from '../../api';
+import { usePipelineSync } from '../../hooks/usePipelineSync';
 import type {
   LanguageTranslation,
   SpotTranslation,
   TranslationStatus,
 } from '../../types/entity';
-import { SUPPORTED_LANGUAGES } from '../../types/entity';
+import { SUPPORTED_LANGUAGES, langLabel } from '../../types/entity';
 
 // ── Sub-step definitions ──
 
@@ -81,17 +80,98 @@ function statusToSubStep(status: TranslationStatus): number {
   }
 }
 
-// ── Helper: language label lookup ──
+// ── Helper: parse markdown translation content from S2 OCR ──
+// When the pipeline returns translations as markdown in _content (not structured
+// JSON), this parser extracts per-spot, per-language description text.
+// Expected format: Spot blocks separated by `---`, with lines like:
+//   **Description (ja):** <translated text>
 
-function langLabel(code: string): string {
-  return (
-    SUPPORTED_LANGUAGES.find((l) => l.code === code)?.label ?? code.toUpperCase()
-  );
+function parseMarkdownTranslations(
+  content: string,
+  approvedScripts: { spotId: string; spotNumber: number; title: string; scriptText: string }[],
+  coreLang: string,
+): LanguageTranslation[] {
+  // Split into spot blocks (divided by --- or **Spot #N**)
+  const spotBlocks = content.split(/---|\*\*Spot\s*#\d+\*\*/).filter((b) => b.trim());
+
+  const langMap = new Map<string, SpotTranslation[]>();
+
+  spotBlocks.forEach((block, idx) => {
+    const script = approvedScripts[idx];
+    if (!script) return;
+
+    // Extract description lines: **Description (LANG):** TEXT
+    // Also match: **Description (LANG_CODE):** TEXT
+    const descRegex = /\*\*Description\s*\(([^)]+)\):\*\*\s*([\s\S]*?)(?=\*\*|$)/gi;
+    let match;
+    while ((match = descRegex.exec(block)) !== null) {
+      const langRaw = match[1].trim();
+      const text = match[2].trim();
+      if (!text) continue;
+
+      // Resolve language code — the markdown may use full name or code
+      const langCode = resolveLangCode(langRaw);
+      if (langCode === coreLang) continue; // skip core language
+
+      if (!langMap.has(langCode)) langMap.set(langCode, []);
+      langMap.get(langCode)!.push({
+        spotId: script.spotId,
+        spotNumber: script.spotNumber,
+        title: script.title,
+        originalText: script.scriptText,
+        translatedText: text,
+      });
+    }
+  });
+
+  return Array.from(langMap.entries()).map(([lang, spots]) => ({
+    lang,
+    label: langLabel(lang),
+    spots,
+    approved: false,
+  }));
+}
+
+/** Map a language name/code from markdown to our normalized code */
+function resolveLangCode(raw: string): string {
+  const lower = raw.toLowerCase();
+  // Direct code match
+  if (/^[a-z]{2}(-[a-z]{2,4})?$/i.test(raw)) return lower;
+  // Common name → code lookups
+  // Map common language names to ISO codes (must stay in sync with SUPPORTED_LANGUAGES)
+  const nameMap: Record<string, string> = {
+    english: 'en',
+    japanese: 'ja',
+    korean: 'ko',
+    french: 'fr',
+    german: 'de',
+    spanish: 'es',
+    italian: 'it',
+    portuguese: 'pt',
+    thai: 'th',
+    vietnamese: 'vi',
+    indonesian: 'id',
+    malay: 'ms',
+    arabic: 'ar',
+    russian: 'ru',
+    'traditional chinese': 'zh-TW',
+    'simplified chinese': 'zh-CN',
+    chinese: 'zh-CN',
+  };
+  return nameMap[lower] ?? raw;
 }
 
 // ── Processing overlay ──
 
-function ProcessingOverlay() {
+type LangProgressStatus = 'pending' | 'translating' | 'done' | 'error';
+
+interface ProcessingOverlayProps {
+  targetLanguages: string[];
+  perLangProgress: Record<string, { status: LangProgressStatus; error?: string }>;
+}
+
+function ProcessingOverlay({ targetLanguages, perLangProgress }: ProcessingOverlayProps) {
+  const doneCount = Object.values(perLangProgress).filter((p) => p.status === 'done').length;
   return (
     <Fade in>
       <Paper
@@ -104,28 +184,42 @@ function ProcessingOverlay() {
           gap: 3,
         }}
       >
-        <CircularProgress size={64} thickness={3} />
-        <Box>
+        <Box sx={{ mb: 2 }}>
           <Typography variant="h6" gutterBottom>
             AI is translating scripts…
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Translating approved scripts into all configured languages.
-            <br />
-            This may take a moment.
+            Translating approved scripts into {targetLanguages.length} language{targetLanguages.length !== 1 ? 's' : ''} in parallel.
           </Typography>
         </Box>
-        <Box
-          sx={{
-            display: 'flex',
-            gap: 1,
-            flexWrap: 'wrap',
-            justifyContent: 'center',
-          }}
-        >
-          <Chip label="Translation" size="small" variant="outlined" />
-          <Chip label="→" size="small" sx={{ bgcolor: 'transparent' }} />
-          <Chip label="Human Gate 4" size="small" variant="outlined" />
+        <Box sx={{ width: '100%', mb: 2 }}>
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+            {targetLanguages.map((lang) => {
+              const prog = perLangProgress[lang];
+              return (
+                <Chip
+                  key={lang}
+                  label={langLabel(lang)}
+                  icon={
+                    prog?.status === 'done' ? <CheckCircleOutlineIcon color="success" fontSize="small" /> :
+                    prog?.status === 'error' ? <RemoveDoneIcon color="error" fontSize="small" /> :
+                    <CircularProgress size={16} thickness={5} color="inherit" />
+                  }
+                  color={
+                    prog?.status === 'done' ? 'success' :
+                    prog?.status === 'error' ? 'error' : 'default'
+                  }
+                  variant={prog?.status === 'done' ? 'filled' : 'outlined'}
+                  sx={{ minWidth: 120, fontWeight: 600 }}
+                />
+              );
+            })}
+          </Box>
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              {doneCount} / {targetLanguages.length} complete
+            </Typography>
+          </Box>
         </Box>
       </Paper>
     </Fade>
@@ -244,17 +338,16 @@ export default function TranslationReviewStep() {
   const rejectLanguage = useGuidesStore((s) => s.rejectLanguage);
   const approveAllLanguages = useGuidesStore((s) => s.approveAllLanguages);
   const rejectAllLanguages = useGuidesStore((s) => s.rejectAllLanguages);
-  const resetTranslations = useGuidesStore((s) => s.resetTranslations);
-  const pipelineSessionId = useGuidesStore((s) => s.pipelineSessionId);
-  const setPipelineIds = useGuidesStore((s) => s.setPipelineIds);
+  const resetDownstreamFrom = useGuidesStore((s) => s.resetDownstreamFrom);
+
+  const { applyResponse } = usePipelineSync();
 
   const [currentTab, setCurrentTab] = useState(0);
   const [approveLoading, setApproveLoading] = useState(false);
+  const [gateSyncFailed, setGateSyncFailed] = useState(false);
+  const [perLangProgress, setPerLangProgress] = useState<Record<string, { status: 'pending' | 'translating' | 'done' | 'error'; error?: string }>>({});
 
   const activeSubStep = statusToSubStep(translationStatus);
-  const approvedCount = translations.filter((t) => t.approved).length;
-  const allApproved =
-    translations.length > 0 && approvedCount === translations.length;
 
   // Languages to translate into (all supported except core language)
   const targetLanguages = useMemo(
@@ -262,29 +355,19 @@ export default function TranslationReviewStep() {
     [supportedLanguages, coreLanguage],
   );
 
-  // ── Build question for translation ──
-  const buildTranslationQuestion = useCallback(() => {
-    const approvedScripts = scripts.filter((s) => s.approved);
-    const scriptsSummary = approvedScripts
-      .map(
-        (s) =>
-          `Spot #${s.spotNumber} "${s.title}":\n${s.scriptText}`,
-      )
-      .join('\n\n---\n\n');
+  // Filter translations to only include languages currently in targetLanguages.
+  // This handles the case where the user changes supportedLanguages after
+  // translations were already generated for a previous set of languages.
+  const filteredTranslations = useMemo(
+    () => translations.filter((t) => (targetLanguages as string[]).includes(t.lang)),
+    [translations, targetLanguages],
+  );
 
-    const targetLangLabels = targetLanguages
-      .map((l) => `${l} (${langLabel(l)})`)
-      .join(', ');
+  const approvedCount = filteredTranslations.filter((t) => t.approved).length;
+  const allApproved =
+    filteredTranslations.length > 0 && approvedCount === filteredTranslations.length;
 
-    return (
-      `Translate the following ${approvedScripts.length} approved scripts.\n` +
-      `Core language: ${coreLanguage} (${langLabel(coreLanguage)})\n` +
-      `Target languages: ${targetLangLabels}\n\n` +
-      `Scripts:\n${scriptsSummary}`
-    );
-  }, [scripts, coreLanguage, targetLanguages]);
-
-  // ── Trigger translation ──
+  // ── Parallel per-language translation generation ──
   const handleGenerateTranslations = useCallback(async () => {
     if (targetLanguages.length === 0) {
       setTranslationError(
@@ -302,123 +385,71 @@ export default function TranslationReviewStep() {
     setTranslationStatus('translating');
     setTranslationError(null);
 
+    // Per-language progress state
+    const initialProgress: Record<string, { status: 'pending' | 'translating' | 'done' | 'error'; error?: string }> = {};
+    targetLanguages.forEach((lang) => {
+      initialProgress[lang] = { status: 'pending' };
+    });
+    setPerLangProgress(initialProgress);
+
     try {
-      const sessionId = `translation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const response = await startPipeline(
-        buildTranslationQuestion(),
-        sessionId,
+      // Fire off all language translations in parallel
+      const results: LanguageTranslation[] = [];
+      await Promise.all(
+        targetLanguages.map(async (lang) => {
+          setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'translating' } }));
+          try {
+            const res = await translateLanguage({
+              scripts: approvedScripts.map((s) => ({
+                spotId: s.spotId,
+                spotNumber: s.spotNumber,
+                title: s.title,
+                scriptText: s.scriptText,
+              })),
+              targetLanguage: lang,
+              coreLanguage,
+            });
+            results.push({ ...res, approved: false });
+            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'done' } }));
+          } catch (err: any) {
+            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'error', error: err?.message || 'Error' } }));
+          }
+        })
       );
-
-      const stoppedNodeId = getStoppedNodeId(response);
-      setPipelineIds(response.sessionId, stoppedNodeId);
-
-      // Try to parse translation output (S6: Translation)
-      const translationOutput = getNodeOutput(response, 'S6: Translation');
-
-      let extractedTranslations: LanguageTranslation[] = [];
-
-      if (translationOutput && typeof translationOutput === 'object') {
-        const rawTranslations =
-          (translationOutput as Record<string, unknown>).translations ??
-          (translationOutput as Record<string, unknown>).languages ??
-          (Array.isArray(translationOutput) ? translationOutput : null);
-
-        if (Array.isArray(rawTranslations)) {
-          extractedTranslations = rawTranslations.map(
-            (raw: Record<string, unknown>) => {
-              const lang = (raw.lang as string) ?? (raw.language as string) ?? '';
-              const rawSpots =
-                (raw.spots as Record<string, unknown>[]) ??
-                (raw.translations as Record<string, unknown>[]) ??
-                [];
-
-              const spots: SpotTranslation[] = Array.isArray(rawSpots)
-                ? rawSpots.map(
-                    (sp: Record<string, unknown>, idx: number) => ({
-                      spotId:
-                        (sp.spotId as string) ??
-                        (sp.id as string) ??
-                        approvedScripts[idx]?.spotId ??
-                        `spot-${idx}`,
-                      spotNumber:
-                        (sp.spotNumber as number) ??
-                        approvedScripts[idx]?.spotNumber ??
-                        idx + 1,
-                      title:
-                        (sp.title as string) ??
-                        approvedScripts[idx]?.title ??
-                        `Spot ${idx + 1}`,
-                      originalText:
-                        (sp.original as string) ??
-                        (sp.originalText as string) ??
-                        approvedScripts[idx]?.scriptText ??
-                        '',
-                      translatedText:
-                        (sp.translated as string) ??
-                        (sp.translatedText as string) ??
-                        '',
-                    }),
-                  )
-                : [];
-
-              return {
-                lang,
-                label: langLabel(lang),
-                spots,
-                approved: false,
-              };
-            },
-          );
-        }
+      if (results.length === 0) {
+        setTranslationError('No translations returned.');
+        setTranslationStatus('error');
+        return;
       }
-
-      // Fallback: create stub translations (copy base text to all languages)
-      if (extractedTranslations.length === 0) {
-        extractedTranslations = createStubTranslations(
-          approvedScripts,
-          targetLanguages,
-        );
-      }
-
-      setTranslations(extractedTranslations);
+      setTranslations(results);
       setTranslationStatus('review');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-
-      // Fallback to stub data
-      const approvedScripts = scripts.filter((s) => s.approved);
-      const fallbackTranslations = createStubTranslations(
-        approvedScripts,
-        targetLanguages,
-      );
-      setTranslations(fallbackTranslations);
-      setTranslationError(
-        `Pipeline unavailable — using stub translations. (${message})`,
-      );
-      setTranslationStatus('review');
+      setTranslationError(message);
+      setTranslationStatus('error');
     }
   }, [
     scripts,
     targetLanguages,
-    buildTranslationQuestion,
+    coreLanguage,
     setTranslations,
     setTranslationStatus,
     setTranslationError,
-    setPipelineIds,
   ]);
 
   // ── Approve all translations (Human Gate 4) ──
   const handleApproveGate = useCallback(async () => {
     setApproveLoading(true);
+    setGateSyncFailed(false);
     try {
       const approvalPayload = {
-        approvedLanguages: translations
+        approvedLanguages: filteredTranslations
           .filter((t) => t.approved)
           .map((t) => t.lang),
-        rejectedLanguages: translations
+        rejectedLanguages: filteredTranslations
           .filter((t) => !t.approved)
           .map((t) => t.lang),
-        editedTranslations: translations.map((lt) => ({
+        editedTranslations: filteredTranslations.map((lt) => ({
           lang: lt.lang,
           spots: lt.spots.map((sp) => ({
             spotId: sp.spotId,
@@ -427,22 +458,46 @@ export default function TranslationReviewStep() {
         })),
       };
 
+      // Read pipeline IDs directly from the store to avoid stale closures
+      const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();
+      console.log('[TranslationReviewStep] Approve clicked — sessionId:', sid, 'checkpointId:', cpId);
+
       // Try to send human input through ADK pipeline gate
-      if (pipelineSessionId) {
+      let syncOk = false;
+      if (sid && cpId) {
         try {
-          const checkpointId =
-            useGuidesStore.getState().pipelineCheckpointId;
-          if (checkpointId) {
-            await sendHumanInput(
-              pipelineSessionId,
-              'approve',
-              checkpointId,
-              JSON.stringify(approvalPayload),
+          const response = await sendHumanInput(
+            sid,
+            'approve',
+            cpId,
+            JSON.stringify(approvalPayload),
+          );
+          // Apply the response so downstream steps (audio, etc.) are pre-populated
+          applyResponse(response);
+          syncOk = true;
+
+          // Surface any downstream step errors as a warning
+          const stepErrors = (response.steps ?? [])
+            .filter((s) => s.status === 'ERROR' && s.output)
+            .map((s) => {
+              const out = s.output as Record<string, unknown>;
+              return `[${s.label}] ${(out.error as string) ?? (out.message as string) ?? 'Unknown error'}`;
+            });
+          if (stepErrors.length > 0) {
+            setTranslationError(
+              'Translations approved, but downstream pipeline steps encountered errors:\n' +
+              stepErrors.join('\n'),
             );
           }
-        } catch {
-          // Pipeline gate call failed — continue anyway
+        } catch (gateErr: unknown) {
+          const gateMsg = gateErr instanceof Error ? gateErr.message : 'Pipeline sync failed';
+          console.warn('[TranslationReviewStep] Gate approval failed:', gateMsg);
+          setTranslationError(`Pipeline sync failed — you can retry from the approved view. (${gateMsg})`);
+          setGateSyncFailed(true);
         }
+      } else {
+        console.warn('[TranslationReviewStep] No pipeline session/checkpoint — approval saved locally only');
+        setGateSyncFailed(true);
       }
 
       setTranslationStatus('approved');
@@ -453,13 +508,13 @@ export default function TranslationReviewStep() {
     } finally {
       setApproveLoading(false);
     }
-  }, [translations, pipelineSessionId, setTranslationStatus, setTranslationError]);
+  }, [filteredTranslations, setTranslationStatus, setTranslationError, applyResponse]);
 
-  // ── Reset ──
+  // ── Reset (cascades to all downstream steps) ──
   const handleReset = useCallback(() => {
-    resetTranslations();
+    resetDownstreamFrom('translation');
     setCurrentTab(0);
-  }, [resetTranslations]);
+  }, [resetDownstreamFrom]);
 
   // ── Pre-condition: scripts must be approved ──
   if (scriptStatus !== 'approved') {
@@ -525,7 +580,7 @@ export default function TranslationReviewStep() {
                     translationStatus === 'approved' &&
                     idx <= activeSubStep ? (
                       <CheckCircleOutlineIcon color="success" />
-                    ) : undefined,
+                    ) : step.icon,
                 }}
               >
                 <Typography
@@ -598,7 +653,7 @@ export default function TranslationReviewStep() {
       )}
 
       {/* Translating */}
-      {translationStatus === 'translating' && <ProcessingOverlay />}
+      {translationStatus === 'translating' && <ProcessingOverlay targetLanguages={targetLanguages} perLangProgress={perLangProgress} />}
 
       {/* Review */}
       {(translationStatus === 'review' || translationStatus === 'error') && (
@@ -615,7 +670,7 @@ export default function TranslationReviewStep() {
             }}
           >
             <Typography variant="subtitle2" sx={{ mr: 'auto' }}>
-              {approvedCount} / {translations.length} languages approved
+              {approvedCount} / {filteredTranslations.length} languages approved
             </Typography>
             <Button
               size="small"
@@ -647,7 +702,7 @@ export default function TranslationReviewStep() {
               variant="scrollable"
               scrollButtons="auto"
             >
-              {translations.map((lt, idx) => (
+              {filteredTranslations.map((lt, idx) => (
                 <Tab
                   key={lt.lang}
                   label={
@@ -674,7 +729,7 @@ export default function TranslationReviewStep() {
           </Paper>
 
           {/* Active language content */}
-          {translations[currentTab] && (
+          {filteredTranslations[currentTab] && (
             <Box sx={{ mt: 1 }}>
               {/* Per-language approval header */}
               <Box
@@ -687,21 +742,21 @@ export default function TranslationReviewStep() {
                 }}
               >
                 <Typography variant="subtitle1" fontWeight={600}>
-                  {translations[currentTab].label}
+                  {filteredTranslations[currentTab].label}
                 </Typography>
                 <Chip
-                  label={`${translations[currentTab].spots.length} spots`}
+                  label={`${filteredTranslations[currentTab].spots.length} spots`}
                   size="small"
                   variant="outlined"
                 />
-                {translations[currentTab].approved ? (
+                {filteredTranslations[currentTab].approved ? (
                   <Tooltip title="Un-approve this language">
                     <Button
                       size="small"
                       color="warning"
                       variant="outlined"
                       onClick={() =>
-                        rejectLanguage(translations[currentTab].lang)
+                        rejectLanguage(filteredTranslations[currentTab].lang)
                       }
                     >
                       Un-approve
@@ -715,7 +770,7 @@ export default function TranslationReviewStep() {
                       variant="contained"
                       startIcon={<CheckCircleOutlineIcon />}
                       onClick={() =>
-                        approveLanguage(translations[currentTab].lang)
+                        approveLanguage(filteredTranslations[currentTab].lang)
                       }
                     >
                       Approve Language
@@ -724,7 +779,7 @@ export default function TranslationReviewStep() {
                 )}
               </Box>
 
-              <LanguageTabContent langTranslation={translations[currentTab]} />
+              <LanguageTabContent langTranslation={filteredTranslations[currentTab]} />
             </Box>
           )}
 
@@ -775,7 +830,7 @@ export default function TranslationReviewStep() {
                 disabled={approvedCount === 0 || approveLoading}
                 onClick={handleApproveGate}
               >
-                Approve & Continue ({approvedCount}/{translations.length})
+                Approve & Continue ({approvedCount}/{filteredTranslations.length})
               </Button>
               <Button
                 variant="outlined"
@@ -797,25 +852,33 @@ export default function TranslationReviewStep() {
             sx={{
               p: 4,
               textAlign: 'center',
-              bgcolor: (t) => alpha(t.palette.success.main, 0.08),
+              bgcolor: (t) => alpha(
+                gateSyncFailed ? t.palette.warning.main : t.palette.success.main,
+                0.08,
+              ),
               borderLeft: 4,
-              borderColor: 'success.main',
+              borderColor: gateSyncFailed ? 'warning.main' : 'success.main',
             }}
           >
-            <CheckCircleOutlineIcon
-              color="success"
-              sx={{ fontSize: 48, mb: 1 }}
-            />
+            {gateSyncFailed ? (
+              <SyncIcon color="warning" sx={{ fontSize: 48, mb: 1 }} />
+            ) : (
+              <CheckCircleOutlineIcon
+                color="success"
+                sx={{ fontSize: 48, mb: 1 }}
+              />
+            )}
             <Typography variant="h6" gutterBottom>
-              Translations Approved
+              {gateSyncFailed ? 'Translations Saved Locally' : 'Translations Approved'}
             </Typography>
             <Typography
               variant="body2"
               color="text.secondary"
               sx={{ mb: 2 }}
             >
-              {approvedCount} language{approvedCount !== 1 ? 's' : ''}{' '}
-              approved. Ready for audio production.
+              {gateSyncFailed
+                ? `${approvedCount} language${approvedCount !== 1 ? 's' : ''} saved. Pipeline sync failed — please retry.`
+                : `${approvedCount} language${approvedCount !== 1 ? 's' : ''} approved. Ready for audio production.`}
             </Typography>
             <Box
               sx={{
@@ -826,7 +889,7 @@ export default function TranslationReviewStep() {
                 mb: 2,
               }}
             >
-              {translations.map((lt) => (
+              {filteredTranslations.map((lt) => (
                 <Chip
                   key={lt.lang}
                   icon={
@@ -841,41 +904,37 @@ export default function TranslationReviewStep() {
                 />
               ))}
             </Box>
-            <Button
-              variant="outlined"
-              startIcon={<RestartAltIcon />}
-              onClick={handleReset}
-            >
-              Re-translate
-            </Button>
+            <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+              {gateSyncFailed && (
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={approveLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                  disabled={approveLoading}
+                  onClick={handleApproveGate}
+                >
+                  Retry Sync
+                </Button>
+              )}
+              <Button
+                variant="outlined"
+                color="warning"
+                startIcon={<RateReviewIcon />}
+                onClick={() => setTranslationStatus('review')}
+              >
+                Redo Review
+              </Button>
+              <Button
+                variant="outlined"
+                startIcon={<RestartAltIcon />}
+                onClick={handleReset}
+              >
+                Re-translate
+              </Button>
+            </Box>
           </Paper>
         </Fade>
       )}
     </Box>
   );
-}
-
-// ── Stub translations (Phase 1A — copies base text to all languages) ──
-
-function createStubTranslations(
-  approvedScripts: {
-    spotId: string;
-    spotNumber: number;
-    title: string;
-    scriptText: string;
-  }[],
-  targetLanguages: string[],
-): LanguageTranslation[] {
-  return targetLanguages.map((lang) => ({
-    lang,
-    label: langLabel(lang),
-    spots: approvedScripts.map((s) => ({
-      spotId: s.spotId,
-      spotNumber: s.spotNumber,
-      title: s.title,
-      originalText: s.scriptText,
-      translatedText: `[${lang.toUpperCase()}] ${s.scriptText}`,
-    })),
-    approved: false,
-  }));
 }

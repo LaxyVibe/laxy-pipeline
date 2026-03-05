@@ -13,7 +13,23 @@ function getExecutedNodes(res: PipelineResponse): string[] {
 }
 function getLastStatus(res: PipelineResponse): string {
   const steps = res.steps ?? [];
-  return steps.length ? steps[steps.length - 1].status : 'UNKNOWN';
+  if (steps.length) return steps[steps.length - 1].status;
+  return normalizeSessionStatus(res.status);
+}
+
+function normalizeSessionStatus(status?: string): string {
+  switch (status) {
+    case 'awaiting_input':
+      return 'STOPPED';
+    case 'completed':
+      return 'FINISHED';
+    case 'error':
+      return 'ERROR';
+    case 'running':
+      return 'RUNNING';
+    default:
+      return 'UNKNOWN';
+  }
 }
 function getStoppedNodeId(res: PipelineResponse): string | null {
   return res.checkpointId ?? null;
@@ -71,8 +87,13 @@ describe('getExecutedNodes', () => {
 });
 
 describe('getLastStatus', () => {
-  it('returns UNKNOWN for empty steps', () => {
-    const res = makePipelineResponse({ steps: [] });
+  it('falls back to session-level status for empty steps', () => {
+    const res = makePipelineResponse({ steps: [], status: 'running' });
+    expect(getLastStatus(res)).toBe('RUNNING');
+  });
+
+  it('returns UNKNOWN when no steps and no session status', () => {
+    const res = makePipelineResponse({ steps: [], status: undefined });
     expect(getLastStatus(res)).toBe('UNKNOWN');
   });
 
@@ -273,5 +294,212 @@ describe('Step label compatibility with PIPELINE_STAGES', () => {
 
   it('has 16 step labels (excluding Pipeline Complete)', () => {
     expect(EXPECTED_LABELS).toHaveLength(16);
+  });
+});
+// ── Issue #6: S9 LanguageAudio enrichment ──
+
+describe('S9 LanguageAudio enrichment in applyStepData', () => {
+  // Simulate the applyStepData logic for S9 inline
+  function enrichS9AudioFiles(audioFiles: Record<string, unknown>[]): { lang: string; label: string; audioUrl: string; durationMs: number; approved: boolean; spots: { spotId: string; spotNumber: number; title: string; audioUrl: string; durationMs: number }[] }[] {
+    const LANG_LABELS: Record<string, string> = { en: 'English', ja: 'Japanese', ko: 'Korean', 'zh-TW': 'Traditional Chinese' };
+    const audioByLang = new Map<string, { lang: string; label: string; audioUrl: string; durationMs: number; approved: boolean; spots: { spotId: string; spotNumber: number; title: string; audioUrl: string; durationMs: number }[] }>();
+    for (const af of audioFiles) {
+      const lang = (af.lang as string) ?? '';
+      const audioUrl = (af.audioUrl as string) ?? '';
+      const durationMs = (af.durationMs as number) ?? 0;
+      if (!audioUrl) continue;
+      const spotEntry = {
+        spotId: (af.spotId as string) ?? '',
+        spotNumber: (af.spotNumber as number) ?? 0,
+        title: (af.title as string) ?? '',
+        audioUrl,
+        durationMs,
+      };
+      const existing = audioByLang.get(lang);
+      if (!existing) {
+        audioByLang.set(lang, { lang, label: LANG_LABELS[lang] ?? lang, audioUrl, durationMs, approved: false, spots: [spotEntry] });
+      } else {
+        existing.durationMs += durationMs;
+        existing.spots = [...existing.spots, spotEntry];
+      }
+    }
+    return Array.from(audioByLang.values());
+  }
+
+  it('enriches backend per-spot audio to per-language LanguageAudio with label and approved', () => {
+    // Backend format: per-spot items without label or approved
+    const backendAudioFiles = [
+      { lang: 'en', spotId: 'spot_001', spotNumber: 1, title: 'Entrance', audioUrl: 'https://cdn/en/spot1.wav', durationMs: 12000, voiceId: 'Aoede', model: 'gemini-tts' },
+      { lang: 'en', spotId: 'spot_002', spotNumber: 2, title: 'Gallery', audioUrl: 'https://cdn/en/spot2.wav', durationMs: 8000, voiceId: 'Aoede', model: 'gemini-tts' },
+      { lang: 'ja', spotId: 'spot_001', spotNumber: 1, title: 'Entrance', audioUrl: 'https://cdn/ja/spot1.wav', durationMs: 15000, voiceId: 'Aoede', model: 'gemini-tts' },
+    ];
+
+    const result = enrichS9AudioFiles(backendAudioFiles);
+
+    expect(result).toHaveLength(2); // Grouped by language
+    const en = result.find((r) => r.lang === 'en');
+    const ja = result.find((r) => r.lang === 'ja');
+
+    expect(en).toBeDefined();
+    expect(en!.label).toBe('English');
+    expect(en!.durationMs).toBe(20000); // 12000 + 8000
+    expect(en!.approved).toBe(false);
+    expect(en!.spots).toHaveLength(2);
+    expect(en!.spots[0].spotId).toBe('spot_001');
+    expect(en!.spots[1].spotId).toBe('spot_002');
+
+    expect(ja).toBeDefined();
+    expect(ja!.label).toBe('Japanese');
+    expect(ja!.durationMs).toBe(15000);
+    expect(ja!.approved).toBe(false);
+    expect(ja!.spots).toHaveLength(1);
+  });
+
+  it('skips items without audioUrl', () => {
+    const backendAudioFiles = [
+      { lang: 'en', spotId: 'spot_001', audioUrl: '', durationMs: 0, error: 'TTS failed' },
+      { lang: 'en', spotId: 'spot_002', audioUrl: 'https://cdn/en/spot2.wav', durationMs: 8000 },
+    ];
+    const result = enrichS9AudioFiles(backendAudioFiles);
+    expect(result).toHaveLength(1);
+    expect(result[0].durationMs).toBe(8000);
+  });
+
+  it('uses lang code as fallback label for unknown languages', () => {
+    const backendAudioFiles = [
+      { lang: 'xx', spotId: 'spot_001', audioUrl: 'https://cdn/xx/spot1.wav', durationMs: 5000 },
+    ];
+    const result = enrichS9AudioFiles(backendAudioFiles);
+    expect(result[0].label).toBe('xx');
+  });
+});
+
+// ── Issue #8: fetchPipelineStatus ──
+
+describe('fetchPipelineStatus', () => {
+  it('calls the correct endpoint with sessionId', async () => {
+    const mockResponse = makePipelineResponse({
+      sessionId: 'poll-session',
+      checkpointId: 'hg3_script_review',
+      steps: [
+        makeStep({ label: 'S4: Script Gen (Gemini Pro)' }),
+      ],
+    });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockResponse),
+    });
+
+    const { fetchPipelineStatus } = await import('./api');
+    const result = await fetchPipelineStatus('poll-session');
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/pipeline/status?sessionId=poll-session',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(result.sessionId).toBe('poll-session');
+  });
+});
+
+// ── Issue #9: context field ──
+
+describe('startPipeline context parameter', () => {
+  it('sends context in request body when provided', async () => {
+    const mockResponse = makePipelineResponse({
+      sessionId: 'ctx-session',
+    });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockResponse),
+    });
+
+    const { startPipeline } = await import('./api');
+    await startPipeline('test', 'ctx-session', undefined, {
+      venueName: 'Test Museum',
+      coreLanguage: 'en',
+      supportedLanguages: ['en', 'ja'],
+    });
+
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(body.context).toBeDefined();
+    expect(body.context.venueName).toBe('Test Museum');
+    expect(body.context.coreLanguage).toBe('en');
+    expect(body.context.supportedLanguages).toEqual(['en', 'ja']);
+  });
+
+  it('omits context when not provided', async () => {
+    const mockResponse = makePipelineResponse({ sessionId: 'no-ctx' });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockResponse),
+    });
+
+    const { startPipeline } = await import('./api');
+    await startPipeline('test', 'no-ctx');
+
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(body.context).toBeUndefined();
+  });
+});
+
+// ── Issue #11: Session-level status mapping ──
+
+describe('normalizeSessionStatus', () => {
+  it('maps awaiting_input to STOPPED', () => {
+    expect(normalizeSessionStatus('awaiting_input')).toBe('STOPPED');
+  });
+
+  it('maps completed to FINISHED', () => {
+    expect(normalizeSessionStatus('completed')).toBe('FINISHED');
+  });
+
+  it('maps running to RUNNING', () => {
+    expect(normalizeSessionStatus('running')).toBe('RUNNING');
+  });
+
+  it('maps error to ERROR', () => {
+    expect(normalizeSessionStatus('error')).toBe('ERROR');
+  });
+
+  it('maps undefined to UNKNOWN', () => {
+    expect(normalizeSessionStatus(undefined)).toBe('UNKNOWN');
+  });
+});
+
+describe('getLastStatus session-level fallback', () => {
+  it('falls back to session-level status when no steps exist', () => {
+    const res = makePipelineResponse({ steps: [], status: 'awaiting_input' });
+    expect(getLastStatus(res)).toBe('STOPPED');
+  });
+
+  it('falls back to completed → FINISHED', () => {
+    const res = makePipelineResponse({ steps: [], status: 'completed' });
+    expect(getLastStatus(res)).toBe('FINISHED');
+  });
+
+  it('prefers step-level status when steps exist', () => {
+    const res = makePipelineResponse({
+      steps: [makeStep({ status: 'STOPPED' })],
+      status: 'awaiting_input',
+    });
+    expect(getLastStatus(res)).toBe('STOPPED');
+  });
+});
+
+// ── Issue #14: voice ID consistency ──
+
+describe('Voice ID consistency (Algieba)', () => {
+  it('AVAILABLE_VOICES contains Algieba with correct id', async () => {
+    const { AVAILABLE_VOICES } = await import('./types/entity');
+    const voice = AVAILABLE_VOICES.find((v) => v.id === 'Algieba');
+    expect(voice).toBeDefined();
+    expect(voice!.name).toBe('Algieba');
+    expect(voice!.gender).toBe('female');
+  });
+
+  it('no voice with the old Algeba typo exists', async () => {
+    const { AVAILABLE_VOICES } = await import('./types/entity');
+    const typo = AVAILABLE_VOICES.find((v) => v.id === 'Algeba');
+    expect(typo).toBeUndefined();
   });
 });

@@ -22,6 +22,13 @@ export const PIPELINE_STAGES = [
     nodes: ['S2: OCR Parse (Gemini)', 'S1: Metadata Extract (Gemini)'],
     gate: 'HG1: Data Review',
     gateDescription: 'Review AI-extracted metadata. Verify titles, artists, periods, materials, dimensions and cultural designations.',
+    approveInfo: {
+      summary: 'Approving will run Script Generation and Image Mapping',
+      steps: [
+        { name: 'S4: Script Gen', model: 'Gemini Pro', estimate: '~60s' },
+        { name: 'S5: Image Map', model: 'Gemini Flash', estimate: '~10s' },
+      ],
+    },
   },
   {
     id: 'script',
@@ -30,6 +37,12 @@ export const PIPELINE_STAGES = [
     nodes: ['S4: Script Gen (Gemini Pro)', 'S5: Image Map (Gemini)'],
     gate: 'HG3: Script Review',
     gateDescription: 'Review AI-generated scripts for each spot. Approve individually or in bulk.',
+    approveInfo: {
+      summary: 'Approving will run Translation',
+      steps: [
+        { name: 'S6: Translation', model: 'Gemini Pro', estimate: '~60s' },
+      ],
+    },
   },
   {
     id: 'translation',
@@ -38,6 +51,16 @@ export const PIPELINE_STAGES = [
     nodes: ['S6: Translation (Gemini Pro)'],
     gate: 'HG4: Translation Review',
     gateDescription: 'Review translated scripts per language. Export to Excel for external translators if needed.',
+    approveInfo: {
+      summary: 'Approving will run Audio Production pipeline',
+      steps: [
+        { name: 'N5: Character Select', model: 'local', estimate: '<1s' },
+        { name: 'S7: Voice Recommend', model: 'Gemini Flash', estimate: '~10s' },
+        { name: 'S8: Director Note', model: 'Gemini Flash', estimate: '~10s' },
+        { name: 'S9: Audio Gen', model: 'Gemini TTS', estimate: '~2–5 min' },
+        { name: 'N6: Audio QA', model: 'local', estimate: '<1s' },
+      ],
+    },
   },
   {
     id: 'audio',
@@ -52,6 +75,13 @@ export const PIPELINE_STAGES = [
     ],
     gate: 'HG5: Audio Review',
     gateDescription: 'Listen to generated audio per language. Mark timestamps with comments for voice issues.',
+    approveInfo: {
+      summary: 'Approving will finalise and publish',
+      steps: [
+        { name: 'N8: Generation History', model: 'local', estimate: '<1s' },
+        { name: 'S10: SRT Gen', model: 'rule-based', estimate: '<1s' },
+      ],
+    },
   },
   {
     id: 'publish',
@@ -60,6 +90,7 @@ export const PIPELINE_STAGES = [
     nodes: ['N8: Generation History', 'S10: SRT Gen (rule-based)', 'Pipeline Complete'],
     gate: null,
     gateDescription: null,
+    approveInfo: null,
   },
 ] as const;
 

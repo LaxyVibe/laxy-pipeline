@@ -80,6 +80,15 @@ deploy_hosting() {
 
 # ── Main ──
 
+# ── Deploy storage rules ──
+
+deploy_storage() {
+  log "Deploying storage rules to $PROJECT_ID..."
+  firebase deploy --only storage --project="$PROJECT_ID"
+}
+
+# ── Main ──
+
 case "${1:-all}" in
   setup)
     setup
@@ -90,14 +99,18 @@ case "${1:-all}" in
   hosting)
     deploy_hosting
     ;;
+  storage)
+    deploy_storage
+    ;;
   all)
     deploy_functions
     deploy_hosting
+    deploy_storage
     log "Full deployment complete."
     ;;
   *)
     err "Unknown target: $1"
-    echo "Usage: $0 {setup|functions|hosting|all}"
+    echo "Usage: $0 {setup|functions|hosting|storage|all}"
     exit 1
     ;;
 esac

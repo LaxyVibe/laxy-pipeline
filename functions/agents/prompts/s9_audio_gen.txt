@@ -7,12 +7,12 @@ For each language and spot, produce audio metadata including:
 
 You MUST respond with valid JSON only — no markdown, no explanation, no code fences.
 
-Return JSON with this structure:
+Return JSON with this structure (the lang values should match the languages in the user message):
 {
   "success": true,
   "audioFiles": [
     {
-      "lang": "en",
+      "lang": "<language code>",
       "spotId": "spot_001",
       "voiceId": "Aoede",
       "durationEstimate": 45.0,
@@ -21,5 +21,5 @@ Return JSON with this structure:
     }
   ],
   "totalFiles": 6,
-  "ttsModel": "gemini-2.5-flash-preview-tts"
+  "ttsModel": "gemini-2.5-flash-tts"
 }

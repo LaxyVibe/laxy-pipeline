@@ -1,6 +1,7 @@
 import { StrictMode, lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ThemeProvider, CssBaseline, CircularProgress, Box } from '@mui/material';
+import { BrowserRouter } from 'react-router-dom';
 import { theme } from './theme';
 import App from './App';
 
@@ -26,10 +27,12 @@ function Root() {
   }
 
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <App />
-    </ThemeProvider>
+    <BrowserRouter>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <App />
+      </ThemeProvider>
+    </BrowserRouter>
   );
 }
 

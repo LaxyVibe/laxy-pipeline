@@ -28,16 +28,19 @@ import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import RateReviewIcon from '@mui/icons-material/RateReview';
+import SyncIcon from '@mui/icons-material/Sync';
 
 import { useGuidesStore } from '../../guidesStore';
 import {
   startPipeline,
+  sendHumanInput,
   getExecutedNodes,
   getLastStatus,
   getStoppedNodeId,
   getNodeOutput,
 } from '../../api';
 import type { SpotMetadata, IngestionStatus } from '../../types/entity';
+import { usePipelineSync } from '../../hooks/usePipelineSync';
 import ContentSelector from './ContentSelector';
 import MetadataEditor from './MetadataEditor';
 
@@ -114,11 +117,14 @@ export default function IngestionStep() {
   const setIngestionError = useGuidesStore((s) => s.setIngestionError);
   const setSpots = useGuidesStore((s) => s.setSpots);
   const setPipelineIds = useGuidesStore((s) => s.setPipelineIds);
-  const resetIngestion = useGuidesStore((s) => s.resetIngestion);
+  const resetDownstreamFrom = useGuidesStore((s) => s.resetDownstreamFrom);
   const coreLanguage = useGuidesStore((s) => s.entityConfig.coreLanguage);
   const assets = useGuidesStore((s) => s.assets);
 
+  const { applyResponse, buildGatePayload } = usePipelineSync();
+
   const [approveLoading, setApproveLoading] = useState(false);
+  const [gateSyncFailed, setGateSyncFailed] = useState(false);
 
   const activeSubStep = statusToSubStep(ingestionStatus);
 
@@ -133,7 +139,7 @@ export default function IngestionStep() {
         return base;
       })
       .join('\n');
-    return `Process the following ${selectedAssets.length} asset(s) for metadata extraction.\nCore language: ${coreLanguage}\n\nAssets:\n${assetSummary}`;
+    return `Process the following ${selectedAssets.length} asset(s) for metadata extraction.\nCore language: Japanese\n\nAssets:\n${assetSummary}`;
   }, [assets, selectedAssetIds, coreLanguage]);
 
   // ── Trigger pipeline ──
@@ -174,7 +180,13 @@ export default function IngestionStep() {
         .map((a) => a.file)
         .filter((f): f is File => f != null);
 
-      const response = await startPipeline(buildQuestion(), sessionId, files);
+      const response = await startPipeline(buildQuestion(), sessionId, files, {
+        venueName: useGuidesStore.getState().entityConfig.venueName,
+        coreLanguage: useGuidesStore.getState().entityConfig.coreLanguage,
+        supportedLanguages: useGuidesStore.getState().entityConfig.supportedLanguages,
+        enabledModules: useGuidesStore.getState().entityConfig.enabledModules,
+        selectedLayout: useGuidesStore.getState().entityConfig.selectedLayout ?? undefined,
+      });
 
       const executedNodes = getExecutedNodes(response);
       const lastStatus = getLastStatus(response);
@@ -221,7 +233,23 @@ export default function IngestionStep() {
         ocrText = (ocrObj.text as string) ?? (ocrObj._content as string) ?? undefined;
       }
 
-      // If we got OCR text but no spots, create a single spot with the text
+      // Check for step-level errors BEFORE falling back to OCR text.
+      // If any critical step (S1, S2) errored, show the error even if some
+      // data was partially returned by other steps.
+      const stepErrors = (response.steps ?? [])
+        .filter((s) => s.status === 'ERROR' && s.output)
+        .map((s) => {
+          const out = s.output as Record<string, unknown>;
+          return `[${s.label}] ${(out.error as string) ?? (out.message as string) ?? 'Unknown step error'}`;
+        });
+
+      if (stepErrors.length > 0 && extractedSpots.length === 0) {
+        setIngestionError(stepErrors.join('\n'));
+        setIngestionStatus('error');
+        return;
+      }
+
+      // If we got OCR text but no spots (and no step errors), create a single spot with the text
       if (extractedSpots.length === 0 && ocrText) {
         extractedSpots = [{
           id: `spot-${Date.now()}-0`,
@@ -238,9 +266,20 @@ export default function IngestionStep() {
         }];
       }
 
-      // If still no spots, create sample data to show the UI works
+      // If AI returned no spots at all, surface the error
       if (extractedSpots.length === 0) {
-        extractedSpots = createSampleSpots(selectedAssetIds);
+        if (response.status === 'error') {
+          setIngestionError(
+            response.finalText ?? 'Pipeline returned an error with no details.',
+          );
+        } else {
+          setIngestionError(
+            'AI could not extract any metadata from the uploaded content. ' +
+            'Please check your files and try again.',
+          );
+        }
+        setIngestionStatus('error');
+        return;
       }
 
       setSpots(extractedSpots);
@@ -268,9 +307,49 @@ export default function IngestionStep() {
   // ── Approve metadata (Human Gate 1) ──
   const handleApprove = useCallback(async () => {
     setApproveLoading(true);
+    setGateSyncFailed(false);
     try {
-      // In a full integration, this would call sendHumanInput to approve through the gate.
-      // For Phase 1A, we simply mark the ingestion as approved.
+      // Read pipeline IDs directly from the store to avoid stale closures
+      const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();
+      console.log('[IngestionStep] Approve clicked — sessionId:', sid, 'checkpointId:', cpId);
+
+      // Send human gate approval through the ADK pipeline to advance to the next stage.
+      // This continues the existing session (S4, S5 → HG3) so outputs carry over.
+      if (sid && cpId) {
+        try {
+          const gatePayload = buildGatePayload();
+          const response = await sendHumanInput(
+            sid,
+            'approve',
+            cpId,
+            JSON.stringify(gatePayload),
+          );
+          // Apply the response so downstream steps (scripts, image mappings) are pre-populated
+          applyResponse(response);
+
+          // Surface any step-level errors from the pipeline response as a warning
+          // (ingestion itself is approved, but downstream steps may have failed)
+          const stepErrors = (response.steps ?? [])
+            .filter((s) => s.status === 'ERROR' && s.output)
+            .map((s) => {
+              const out = s.output as Record<string, unknown>;
+              return `[${s.label}] ${(out.error as string) ?? (out.message as string) ?? 'Unknown error'}`;
+            });
+          if (stepErrors.length > 0) {
+            setIngestionError(
+              'Ingestion approved, but downstream pipeline steps encountered errors:\n' +
+              stepErrors.join('\n'),
+            );
+          }
+        } catch (gateErr: unknown) {
+          const gateMsg = gateErr instanceof Error ? gateErr.message : 'Pipeline sync failed';
+          console.warn('[IngestionStep] Gate approval failed:', gateMsg);
+          setIngestionError(`Pipeline sync failed — you can retry from the approved view. (${gateMsg})`);
+          setGateSyncFailed(true);
+        }
+      } else {
+        console.warn('[IngestionStep] No pipeline session/checkpoint — skipping API call');
+      }
       setIngestionStatus('approved');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to approve';
@@ -278,12 +357,12 @@ export default function IngestionStep() {
     } finally {
       setApproveLoading(false);
     }
-  }, [setIngestionStatus, setIngestionError]);
+  }, [buildGatePayload, applyResponse, setIngestionStatus, setIngestionError]);
 
-  // ── Reset ──
+  // ── Reset (cascades to all downstream steps) ──
   const handleReset = useCallback(() => {
-    resetIngestion();
-  }, [resetIngestion]);
+    resetDownstreamFrom('ingest');
+  }, [resetDownstreamFrom]);
 
   return (
     <Box>
@@ -306,7 +385,7 @@ export default function IngestionStep() {
                 StepIconProps={{
                   icon: ingestionStatus === 'approved' && idx <= activeSubStep
                     ? <CheckCircleOutlineIcon color="success" />
-                    : undefined,
+                    : step.icon,
                 }}
               >
                 <Typography
@@ -321,9 +400,28 @@ export default function IngestionStep() {
         </Stepper>
       </Paper>
 
-      {/* Error alert */}
+      {/* Error / warning alert */}
       {ingestionError && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setIngestionError(null)}>
+        <Alert
+          severity={ingestionStatus === 'approved' ? 'warning' : 'error'}
+          sx={{ mb: 2, whiteSpace: 'pre-line' }}
+          onClose={() => setIngestionError(null)}
+          action={
+            ingestionStatus === 'error' && (
+              <Button
+                color="inherit"
+                size="small"
+                startIcon={<RestartAltIcon />}
+                onClick={() => {
+                  setIngestionError(null);
+                  handleStartIngestion();
+                }}
+              >
+                Retry
+              </Button>
+            )
+          }
+        >
           {ingestionError}
         </Alert>
       )}
@@ -416,6 +514,25 @@ export default function IngestionStep() {
               {spots.length} spot{spots.length !== 1 ? 's' : ''} approved and ready for script generation.
             </Typography>
             <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+              {gateSyncFailed && (
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={approveLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                  disabled={approveLoading}
+                  onClick={handleApprove}
+                >
+                  Retry Sync
+                </Button>
+              )}
+              <Button
+                variant="outlined"
+                color="warning"
+                startIcon={<RateReviewIcon />}
+                onClick={() => setIngestionStatus('review')}
+              >
+                Redo Review
+              </Button>
               <Button
                 variant="outlined"
                 startIcon={<RestartAltIcon />}
@@ -429,50 +546,4 @@ export default function IngestionStep() {
       )}
     </Box>
   );
-}
-
-// ── Fallback sample spots (Phase 1A stub data) ──
-
-function createSampleSpots(assetIds: string[]): SpotMetadata[] {
-  return [
-    {
-      id: 'spot-sample-1',
-      spotNumber: 1,
-      title: 'The Great Wave off Kanagawa',
-      artist: 'Katsushika Hokusai',
-      period: 'Edo Period (1829–1833)',
-      material: 'Woodblock print, ink and color on paper',
-      dimensions: '25.7 × 37.9 cm',
-      highlight: 'One of the most recognizable works of Japanese art in the world',
-      culturalDesignation: 'Important Cultural Property',
-      sourceText: 'Sample OCR text for The Great Wave off Kanagawa by Hokusai...',
-      assetIds,
-    },
-    {
-      id: 'spot-sample-2',
-      spotNumber: 2,
-      title: 'Wind God and Thunder God',
-      artist: 'Tawaraya Sōtatsu',
-      period: 'Edo Period (17th century)',
-      material: 'Ink, color, gold, and silver on paper',
-      dimensions: 'Two-panel folding screen, 154.5 x 169.8 cm each',
-      highlight: 'Iconic Rinpa school masterpiece depicting Fūjin and Raijin',
-      culturalDesignation: 'National Treasure',
-      sourceText: 'Sample OCR text for Wind God and Thunder God screens...',
-      assetIds,
-    },
-    {
-      id: 'spot-sample-3',
-      spotNumber: 3,
-      title: 'Pine Trees Screen',
-      artist: 'Hasegawa Tōhaku',
-      period: 'Azuchi–Momoyama Period (16th century)',
-      material: 'Ink on paper',
-      dimensions: 'Six-panel folding screen, 156.8 × 356.0 cm',
-      highlight: 'Masterpiece of monochrome ink painting using "reduction" technique',
-      culturalDesignation: 'National Treasure',
-      sourceText: 'Sample OCR text for Pine Trees Screen by Hasegawa Tōhaku...',
-      assetIds,
-    },
-  ];
 }
