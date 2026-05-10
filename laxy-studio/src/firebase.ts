@@ -34,9 +34,15 @@ export function initFirebase() {
     db = getFirestore(app);
     storage = getStorage(app);
 
-    // Connect to emulators when running locally
-    if (import.meta.env.DEV && import.meta.env.VITE_USE_EMULATORS === 'true') {
-      connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+    // Connect to emulators when running locally.
+    // Auth emulator is opt-in to avoid hard failures when localhost:9099 is not running.
+    const useEmulators = import.meta.env.DEV && import.meta.env.VITE_USE_EMULATORS === 'true';
+    const useAuthEmulator = useEmulators && import.meta.env.VITE_USE_AUTH_EMULATOR === 'true';
+
+    if (useEmulators) {
+      if (useAuthEmulator) {
+        connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+      }
       connectFirestoreEmulator(db, 'localhost', 8080);
       connectStorageEmulator(storage, 'localhost', 9199);
     }

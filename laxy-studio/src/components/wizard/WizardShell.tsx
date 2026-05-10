@@ -39,6 +39,8 @@ import SyncIcon from '@mui/icons-material/Sync';
 import EditNoteIcon from '@mui/icons-material/EditNote';
 import { useGuidesStore, WIZARD_STEPS, type WizardStep } from '../../guidesStore';
 import { useAutosave } from '../../hooks/useAutosave';
+import { getTraceSessionId } from '../../api';
+import { guidePath } from '../../routes';
 import EntityConfigForm from './EntityConfigForm';
 import LayoutPicker from './LayoutPicker';
 import AssetsStep from './AssetsStep';
@@ -201,7 +203,11 @@ export default function WizardShell() {
   const isStepAccessible = useGuidesStore((s) => s.isStepAccessible);
   const getStepCompletionStatus = useGuidesStore((s) => s.getStepCompletionStatus);
   const guideId = useGuidesStore((s) => s.guideId);
+  const pipelineSessionId = useGuidesStore((s) => s.pipelineSessionId);
+  const pipelineCheckpointId = useGuidesStore((s) => s.pipelineCheckpointId);
   const clearAll = useGuidesStore((s) => s.clearAll);
+  const routeGuideId = useParams<{ id?: string }>().id ?? 'new';
+  const traceSessionId = useMemo(() => getTraceSessionId(), []);
 
   const theme = useTheme();
   const isSmall = useMediaQuery(theme.breakpoints.down('md'));
@@ -213,19 +219,47 @@ export default function WizardShell() {
       goToStep(validStep.id);
     } else if (!validStep && urlStep) {
       // Invalid step slug in URL → redirect to the current store step
-      navigate(`/wizard/${currentStep}`, { replace: true });
+      navigate(guidePath(routeGuideId, currentStep), { replace: true });
     }
   }, [urlStep]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync store → URL: when the store step changes (e.g. via next/prev), update the URL
   useEffect(() => {
     if (currentStep !== urlStep) {
-      navigate(`/wizard/${currentStep}`, { replace: true });
+      navigate(guidePath(routeGuideId, currentStep), { replace: true });
     }
   }, [currentStep]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Activate auto-save hook — saves 2s after last edit
   useAutosave(2000);
+
+  useEffect(() => {
+    console.info('[WizardShell]', {
+      event: 'wizard.session.start',
+      traceSessionId,
+      guideId: guideId ?? routeGuideId,
+      pipelineSessionId,
+      pipelineCheckpointId,
+    });
+  }, [traceSessionId, guideId, routeGuideId, pipelineSessionId, pipelineCheckpointId]);
+
+  useEffect(() => {
+    console.info('[WizardShell]', {
+      event: 'wizard.step.view',
+      traceSessionId,
+      guideId: guideId ?? routeGuideId,
+      stepId: currentStep,
+      pipelineSessionId,
+      pipelineCheckpointId,
+    });
+  }, [
+    traceSessionId,
+    guideId,
+    routeGuideId,
+    currentStep,
+    pipelineSessionId,
+    pipelineCheckpointId,
+  ]);
 
   const currentIdx = WIZARD_STEPS.findIndex((s) => s.id === currentStep);
   const isFirst = currentIdx === 0;

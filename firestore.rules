@@ -9,48 +9,98 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function hasTenantClaim() {
+      return isSignedIn()
+        && request.auth.token.tenantId is string
+        && request.auth.token.tenantId.size() > 0;
+    }
+
+    function sameTenant(tenantId) {
+      return hasTenantClaim() && request.auth.token.tenantId == tenantId;
+    }
+
     function isSuperAdmin() {
       return isSignedIn()
         && request.auth.token.role == 'super-admin';
     }
 
-    // ── pipeline_sessions ─────────────────────────────────────────────────────
+    function isClientAdmin() {
+      return isSignedIn()
+        && request.auth.token.role == 'client-admin';
+    }
+
+    function isClientEditor() {
+      return isSignedIn()
+        && request.auth.token.role == 'client-editor';
+    }
+
+    function isAdminRole() {
+      return isSuperAdmin() || isClientAdmin() || isClientEditor();
+    }
+
+    function isPlatformScope(scopeId) {
+      return scopeId == 'system';
+    }
+
+    // ── pipeline sessions ─────────────────────────────────────────────────────
     // Written exclusively by Cloud Functions (Admin SDK, bypasses rules).
-    // Authenticated users may read — needed by the /debug session history page.
+    // Read access is tenant-scoped for non-Super Admins.
 
     match /pipeline_sessions/{sessionId} {
-      allow read: if isSignedIn();
+      allow read: if isSuperAdmin()
+        || (
+          hasTenantClaim()
+          && resource.data.context.tenantId is string
+          && resource.data.context.tenantId == request.auth.token.tenantId
+        );
       allow write: if false; // Cloud Functions (Admin SDK) bypass rules
     }
 
     // ── Admin / CMS collections ───────────────────────────────────────────────
 
-    match /tenants/{docId} {
-      allow read, write: if isSuperAdmin();
+    match /tenants/{tenantId} {
+      allow read: if isSuperAdmin() || (isAdminRole() && sameTenant(tenantId));
+      allow create, delete: if isSuperAdmin();
+      allow update: if isSuperAdmin() || (isClientAdmin() && sameTenant(tenantId));
     }
 
-    match /users/{docId} {
-      allow read, write: if isSuperAdmin();
-      // Users may read their own document
-      allow read: if isSignedIn() && request.auth.uid == docId;
+    // Users as tenant sub-collection (primary admin path)
+    match /tenants/{tenantId}/users/{userId} {
+      allow read: if isSuperAdmin()
+        || (sameTenant(tenantId) && (isClientAdmin() || request.auth.uid == userId));
+      allow create, update, delete: if isSuperAdmin()
+        || (isClientAdmin() && sameTenant(tenantId));
     }
 
-    match /featureFlags/{docId} {
-      allow read, write: if isSuperAdmin();
-    }
-
-    match /subscriptionPlans/{docId} {
-      allow read: if isSignedIn();
+    // Legacy top-level users collection for self-profile reads
+    match /users/{userId} {
+      allow read: if isSuperAdmin() || (isSignedIn() && request.auth.uid == userId);
       allow write: if isSuperAdmin();
     }
 
-    match /promptLibrary/{docId} {
-      allow read: if isSignedIn();
-      allow write: if isSuperAdmin();
+    match /_platform/{scopeId}/featureFlags/{docId} {
+      allow read, write: if isPlatformScope(scopeId) && isSuperAdmin();
     }
 
-    match /auditLogs/{docId} {
-      allow read: if isSignedIn();
+    match /_platform/{scopeId}/subscriptionPlans/{docId} {
+      allow read: if isPlatformScope(scopeId) && isAdminRole();
+      allow write: if isPlatformScope(scopeId) && isSuperAdmin();
+    }
+
+    match /_platform/{scopeId}/promptLibrary/{docId} {
+      allow read: if isPlatformScope(scopeId) && isAdminRole();
+      allow write: if isPlatformScope(scopeId) && isSuperAdmin();
+    }
+
+    match /_platform/{scopeId}/auditLogs/{docId} {
+      allow read: if isPlatformScope(scopeId) && (
+          isSuperAdmin()
+        || (
+          hasTenantClaim()
+          && resource.data.tenantId is string
+          && resource.data.tenantId == request.auth.token.tenantId
+        )
+      );
       allow write: if false; // written by server only
     }
 

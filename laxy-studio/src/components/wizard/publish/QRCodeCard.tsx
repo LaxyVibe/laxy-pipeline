@@ -98,13 +98,21 @@ export default function QRCodeCard({
   const guideUrl = publishedGuide?.guideUrl ?? '';
   const shortUrl = publishedGuide?.shortUrl ?? '';
 
-  // Generate QR code when guide is published
+  // Use backend QR data URL when available; fallback to local placeholder.
   useEffect(() => {
+    if (publishedGuide?.qrDataUrl) {
+      setQrDataUrl(publishedGuide.qrDataUrl);
+      return;
+    }
+
     if (guideUrl) {
       const dataUrl = generateQRPlaceholder(guideUrl, 300);
       setQrDataUrl(dataUrl);
+      return;
     }
-  }, [guideUrl]);
+
+    setQrDataUrl('');
+  }, [guideUrl, publishedGuide?.qrDataUrl]);
 
   const handleCopy = useCallback(
     async (text: string, type: 'url' | 'short') => {
@@ -131,7 +139,8 @@ export default function QRCodeCard({
     if (!qrDataUrl) return;
     const a = document.createElement('a');
     a.href = qrDataUrl;
-    a.download = `guide-qr-${customSlug || 'code'}.png`;
+    const extension = qrDataUrl.startsWith('data:image/svg+xml') ? 'svg' : 'png';
+    a.download = `guide-qr-${customSlug || 'code'}.${extension}`;
     a.click();
   }, [qrDataUrl, customSlug]);
 

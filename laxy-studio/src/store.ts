@@ -4,13 +4,20 @@
 import { create } from 'zustand';
 import {
   PipelineResponse,
-  getExecutedNodes,
+  getExecutedStepIds,
   getLastStatus,
   getStoppedNodeId,
-  getNodeOutput,
+  getNodeOutputByStepId,
   startPipeline,
   sendHumanInput,
 } from './api';
+import { PIPELINE_DEBUG_STORE_OWNERSHIP } from './store/storeOwnership';
+
+// Ownership boundary:
+// - This store is for pipeline-debug runtime state only.
+// - Wizard authoring data must live in `useGuidesStore`.
+// - Do not persist this store; history/status are intentionally transient.
+void PIPELINE_DEBUG_STORE_OWNERSHIP;
 
 // The ordered pipeline stages the UI tracks. Each one maps to one or more
 // ADK pipeline step labels that execute during that stage.
@@ -19,7 +26,9 @@ export const PIPELINE_STAGES = [
     id: 'ingest',
     title: 'Ingestion',
     description: 'Gemini OCR parse & metadata extraction',
+    nodeStepIds: ['s2_ocr_parse', 's1_metadata_extract'],
     nodes: ['S2: OCR Parse (Gemini)', 'S1: Metadata Extract (Gemini)'],
+    gateStepId: 'hg1_data_review',
     gate: 'HG1: Data Review',
     gateDescription: 'Review AI-extracted metadata. Verify titles, artists, periods, materials, dimensions and cultural designations.',
     approveInfo: {
@@ -34,7 +43,9 @@ export const PIPELINE_STAGES = [
     id: 'script',
     title: 'Script Generation',
     description: 'Gemini Pro script generation & image mapping',
+    nodeStepIds: ['s4_script_gen', 's5_image_map'],
     nodes: ['S4: Script Gen (Gemini Pro)', 'S5: Image Map (Gemini)'],
+    gateStepId: 'hg3_script_review',
     gate: 'HG3: Script Review',
     gateDescription: 'Review AI-generated scripts for each spot. Approve individually or in bulk.',
     approveInfo: {
@@ -48,7 +59,9 @@ export const PIPELINE_STAGES = [
     id: 'translation',
     title: 'Translation',
     description: 'Gemini Pro translation to all target languages',
+    nodeStepIds: ['s6_translation'],
     nodes: ['S6: Translation (Gemini Pro)'],
+    gateStepId: 'hg4_translation_review',
     gate: 'HG4: Translation Review',
     gateDescription: 'Review translated scripts per language. Export to Excel for external translators if needed.',
     approveInfo: {
@@ -66,6 +79,13 @@ export const PIPELINE_STAGES = [
     id: 'audio',
     title: 'Audio Production',
     description: 'Character & voice selection, Gemini director note, TTS audio generation, QA',
+    nodeStepIds: [
+      'n5_character_select',
+      's7_voice_recommend',
+      's8_director_note',
+      's9_audio_gen',
+      'n6_audio_qa',
+    ],
     nodes: [
       'N5: Character Select',
       'S7: Voice Recommend (Gemini)',
@@ -73,6 +93,7 @@ export const PIPELINE_STAGES = [
       'S9: Audio Gen (Gemini TTS)',
       'N6: Audio Playback QA',
     ],
+    gateStepId: 'hg5_audio_review',
     gate: 'HG5: Audio Review',
     gateDescription: 'Listen to generated audio per language. Mark timestamps with comments for voice issues.',
     approveInfo: {
@@ -87,7 +108,9 @@ export const PIPELINE_STAGES = [
     id: 'publish',
     title: 'Publishing',
     description: 'Generation history & SRT subtitle generation',
+    nodeStepIds: ['n8_generation_history', 's10_srt_gen', 'pipeline_complete'],
     nodes: ['N8: Generation History', 'S10: SRT Gen (rule-based)', 'Pipeline Complete'],
+    gateStepId: null,
     gate: null,
     gateDescription: null,
     approveInfo: null,
@@ -140,13 +163,13 @@ function generateSessionId(): string {
   return `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Determine which stage index we're at based on the executed node labels
-function resolveStageIndex(executedNodes: string[], lastStatus: string): number {
-  // Walk backwards through stages and find the last one that has nodes executed
+// Determine which stage index we're at based on canonical executed step IDs
+function resolveStageIndex(executedStepIds: string[], lastStatus: string): number {
+  // Walk backwards through stages and find the last one that has step IDs executed
   for (let i = PIPELINE_STAGES.length - 1; i >= 0; i--) {
     const stage = PIPELINE_STAGES[i];
-    const gateReached = stage.gate && executedNodes.includes(stage.gate);
-    const anyNode = stage.nodes.some((n) => executedNodes.includes(n));
+    const gateReached = stage.gateStepId && executedStepIds.includes(stage.gateStepId);
+    const anyNode = stage.nodeStepIds.some((stepId) => executedStepIds.includes(stepId));
     if (gateReached || anyNode) {
       // If we stopped at this gate, stay on this stage
       if (gateReached && lastStatus === 'STOPPED') return i;
@@ -160,29 +183,31 @@ function resolveStageIndex(executedNodes: string[], lastStatus: string): number 
   return 0;
 }
 
-function deriveStages(executedNodes: string[], lastStatus: string, response: PipelineResponse): { stages: Record<string, StageState>; currentIndex: number } {
+function deriveStages(executedStepIds: string[], lastStatus: string, response: PipelineResponse): { stages: Record<string, StageState>; currentIndex: number } {
   const stages = buildInitialStages();
-  const currentIndex = resolveStageIndex(executedNodes, lastStatus);
+  const currentIndex = resolveStageIndex(executedStepIds, lastStatus);
 
   for (let i = 0; i < PIPELINE_STAGES.length; i++) {
     const def = PIPELINE_STAGES[i];
     const stage = stages[def.id];
 
     // Collect node outputs for this stage
-    for (const nodeLabel of def.nodes) {
-      if (executedNodes.includes(nodeLabel)) {
-        stage.nodeOutputs[nodeLabel] = getNodeOutput(response, nodeLabel);
+    for (let nodeIndex = 0; nodeIndex < def.nodeStepIds.length; nodeIndex++) {
+      const stepId = def.nodeStepIds[nodeIndex];
+      const nodeLabel = def.nodes[nodeIndex] ?? stepId;
+      if (executedStepIds.includes(stepId)) {
+        stage.nodeOutputs[nodeLabel] = getNodeOutputByStepId(response, stepId);
       }
     }
 
     if (i < currentIndex) {
       stage.status = 'completed';
     } else if (i === currentIndex) {
-      const gateReached = def.gate && executedNodes.includes(def.gate);
+      const gateReached = def.gateStepId && executedStepIds.includes(def.gateStepId);
       if (gateReached && lastStatus === 'STOPPED') {
         stage.status = 'gate';
         // Get the gate's display text from the response
-        const gateStep = response.steps?.find((s) => s.label === def.gate);
+        const gateStep = response.steps?.find((s) => s.stepId === def.gateStepId);
         stage.gateText = (gateStep?.output as Record<string, unknown>)?.content as string ?? def.gateDescription ?? undefined;
       } else if (i === PIPELINE_STAGES.length - 1 && lastStatus === 'FINISHED') {
         stage.status = 'completed';
@@ -214,9 +239,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         'Process museum exhibits for audio guide generation',
         sessionId,
       );
-      const executedNodes = getExecutedNodes(response);
+      const executedStepIds = getExecutedStepIds(response);
       const lastStatus = getLastStatus(response);
-      const { stages, currentIndex } = deriveStages(executedNodes, lastStatus, response);
+      const { stages, currentIndex } = deriveStages(executedStepIds, lastStatus, response);
 
       set({
         status: lastStatus === 'STOPPED' ? 'stopped' : lastStatus === 'FINISHED' ? 'finished' : 'running',
@@ -238,9 +263,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     set({ status: 'running', error: null });
     try {
       const response = await sendHumanInput(sessionId, 'approve', checkpointId, feedback);
-      const executedNodes = getExecutedNodes(response);
+      const executedStepIds = getExecutedStepIds(response);
       const lastStatus = getLastStatus(response);
-      const { stages, currentIndex } = deriveStages(executedNodes, lastStatus, response);
+      const { stages, currentIndex } = deriveStages(executedStepIds, lastStatus, response);
 
       set((s) => ({
         status: lastStatus === 'STOPPED' ? 'stopped' : lastStatus === 'FINISHED' ? 'finished' : 'running',
@@ -262,9 +287,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     set({ status: 'running', error: null });
     try {
       const response = await sendHumanInput(sessionId, 'reject', checkpointId, feedback);
-      const executedNodes = getExecutedNodes(response);
+      const executedStepIds = getExecutedStepIds(response);
       const lastStatus = getLastStatus(response);
-      const { stages, currentIndex } = deriveStages(executedNodes, lastStatus, response);
+      const { stages, currentIndex } = deriveStages(executedStepIds, lastStatus, response);
 
       // Mark the current stage as rejected then re-derive after loop
       const stageId = PIPELINE_STAGES[currentStageIndex]?.id;

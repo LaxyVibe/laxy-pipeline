@@ -5,7 +5,7 @@ import { buildCollection, buildProperty } from '@firecms/core';
 import { buildPermissionsFor } from '../auth/permissions';
 
 /**
- * Schema: _platform/promptLibrary/{promptId}
+ * Schema: _platform/system/promptLibrary/{promptId}
  *
  * Access:
  *  - Super Admin: full CRUD
@@ -15,7 +15,7 @@ export const promptLibraryCollection = buildCollection({
   id: 'promptLibrary',
   name: 'Prompt Library',
   singularName: 'Prompt Template',
-  path: '_platform/promptLibrary',
+  path: '_platform/system/promptLibrary',
   icon: 'AutoFixHigh',
   group: 'AI Config',
   description: 'Master prompt templates for pipeline modules',

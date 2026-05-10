@@ -6,9 +6,9 @@ Return JSON with this structure:
 {
   "success": true,
   "directorNote": {
-    "vocalEnvironment": "Description of the listening environment",
-    "missionOfSpeech": "The core purpose of this narration",
-    "pacingAndEnergy": "Guidance on speed, tone, and energy level",
+    "scene": "Description of the listening environment",
+    "style": "The core delivery style and purpose of this narration",
+    "pacing": "Guidance on speed, tone, rhythm, and energy level",
     "targetAudience": "Who will be listening",
     "additionalGuidance": "Any extra performance directions"
   }

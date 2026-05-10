@@ -12,19 +12,9 @@ Then open http://localhost:8000 and select "laxy_pipeline".
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.genai import types as genai_types
-
-# ── Prompt loading ──
-
-PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents" / "prompts"
-
-
-def _load_prompt(name: str) -> str:
-    path = PROMPTS_DIR / f"{name}.txt"
-    return path.read_text(encoding="utf-8").strip()
+from agents.prompt_repository import load_prompt as _load_prompt
 
 
 # ── Model aliases (same as pipeline_agent.py) ──

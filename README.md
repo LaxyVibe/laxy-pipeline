@@ -29,7 +29,7 @@ laxy-studio (React/Vite)
 | 9 | `n5_character_select` | N5: Character Select | Tool | — |
 | 10 | `s7_voice_recommend` | S7: Voice Recommend | LLM | `gemini-2.5-flash` |
 | 11 | `s8_director_note` | S8: Director Note | LLM | `gemini-2.5-flash` |
-| 12 | `s9_audio_gen` | S9: Audio Gen | TTS | `gemini-2.5-flash-preview-tts` |
+| 12 | `s9_audio_gen` | S9: Audio Gen | TTS | `TTS_MODEL` (default `gemini-2.5-flash-preview-tts`) |
 | 13 | `n6_audio_qa` | N6: Audio Playback QA | Tool | — |
 | 14 | `hg5_audio_review` | HG5: Audio Review | **Human Gate** | — |
 | 15 | `n8_generation_history` | N8: Generation History | Tool | — |
@@ -94,6 +94,12 @@ firebase emulators:start --project laxy-studio-dev
 # Tests
 cd functions && python -m pytest tests/ -v   # 100 backend tests
 cd laxy-studio && npm run test               # 40 frontend tests
+
+# Audio MVP API E2E (requires emulators)
+PIPELINE_AUDIO_E2E_STUB=true npx --yes firebase-tools --config firebase.json emulators:exec --project laxy-studio-dev --only auth,functions,firestore,storage "cd functions && RUN_AUDIO_MVP_E2E=1 E2E_FIREBASE_PROJECT=laxy-studio-dev python -m pytest tests_e2e/test_audio_mvp_api_e2e.py -v"
+
+# Audio MVP browser smoke E2E (requires emulators)
+PIPELINE_AUDIO_E2E_STUB=true npx --yes firebase-tools --config firebase.json emulators:exec --project laxy-studio-dev --only auth,functions,firestore,storage "cd laxy-studio && E2E_FIREBASE_PROJECT=laxy-studio-dev E2E_ADMIN_EMAIL=audio-mvp-e2e-admin@example.com E2E_ADMIN_PASSWORD=Passw0rd123 E2E_ADMIN_TENANT=tenant-e2e E2E_PYTHON_CMD=python3 npm run test:e2e:smoke"
 ```
 
 See [GETTING_STARTED.md](GETTING_STARTED.md) for a full step-by-step setup guide.
@@ -122,6 +128,9 @@ All endpoints are Firebase Functions (`region=us-central1`, `memory=GB_2`, `time
 | POST | `/pipeline/start` | Start new session; runs until first gate or completion |
 | POST | `/pipeline/resume` | Resume from gate (`approve`/`reject` + optional structured feedback) |
 | GET | `/pipeline/status` | Poll current session state for reconnection |
+| POST | `/pipeline/publish` | Start/retry a publish job |
+| GET | `/pipeline/publish-status` | Poll publish job status |
+| POST | `/pipeline/audio-session-bootstrap` | Create/reuse tenant-scoped session for standalone audio generation |
 | POST | `/pipeline/audio-generate` | Batch TTS — all spots x all languages |
 | POST | `/pipeline/audio-generate-language` | TTS for a single language (called per-language by the wizard) |
 | POST | `/pipeline/translate-language` | Translate scripts into one target language |
@@ -148,8 +157,13 @@ All endpoints are Firebase Functions (`region=us-central1`, `memory=GB_2`, `time
 | `test_pipeline.py` | 31 | Pipeline orchestration, human gates, approve/reject, error handling, response building |
 | `test_steps.py` | 44 | System prompts, message builders, model selection, step ordering, retry logic |
 | `test_tools.py` | 25 | character_select, audio_playback_qa, generation_history, SRT generation |
+| `test_main_audio_session_bootstrap.py` | 4 | Bootstrap endpoint auth/tenant/session create-exists behavior |
+| `test_main_audio_generate_language_stub.py` | 2 | Deterministic audio stub mode behavior + tenant enforcement |
+| `tests_e2e/test_audio_mvp_api_e2e.py` | 2 | Emulator-based API E2E for bootstrap + per-language generation |
 | `api.test.ts` | 40 | API helpers, PipelineResponse shape, gate mapping, label compatibility |
-| **Total** | **140** | |
+| `e2e/audio-mvp.smoke.spec.ts` | 3 | Browser smoke: login, single-language generate, bilingual generate |
+| `e2e/audio-mvp.full.spec.ts` | 2 | Extended browser checks: mismatch validation + `.txt` upload flow |
+| **Total** | **153** | |
 
 ## Environment Variables
 
@@ -159,7 +173,9 @@ All endpoints are Firebase Functions (`region=us-central1`, `memory=GB_2`, `time
 |----------|-------------|---------|
 | `GEMINI_API_KEY` | Google AI Studio key — takes priority over Vertex AI ADC | *(unset -> uses ADC)* |
 | `GCP_PROJECT` / `GCLOUD_PROJECT` | GCP project ID | Auto-detected by Cloud Run |
-| `GCP_REGION` | Vertex AI / Cloud Run region | `us-central1` |
+| `GEMINI_LOCATION` / `VERTEX_LOCATION` | Gemini / Vertex AI model location | `global` |
+| `TTS_MODEL` | Gemini TTS model, e.g. `gemini-3.1-flash-tts-preview` | `gemini-2.5-flash-preview-tts` |
+| `PIPELINE_AUDIO_E2E_STUB` | Return deterministic stub audio/SRT from `audio_generate_language` for E2E reliability | `false` |
 
 ### Frontend (`laxy-studio/.env.local`)
 

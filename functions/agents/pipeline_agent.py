@@ -22,9 +22,10 @@ import io
 import json
 import logging
 import os
+import time
 import wave
-from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from google import genai
 from google.genai import types as genai_types
@@ -32,8 +33,10 @@ from google.genai import types as genai_types
 import firebase_admin
 from firebase_admin import storage as fb_storage
 
+from . import audio_alignment
 from . import session as session_service
 from . import tools
+from .prompt_repository import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -47,51 +50,187 @@ BACKOFF_FACTOR = 2.0    # exponential multiplier
 _RETRYABLE_KEYWORDS = ("429", "RESOURCE_EXHAUSTED", "rate limit", "quota", "503", "overloaded")
 
 
+def _read_timeout_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid timeout value for %s=%s; using default %.1fs", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Non-positive timeout value for %s=%s; using default %.1fs", name, raw, default)
+        return default
+    return value
+
+
+def _read_positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid integer value for %s=%s; using default %d", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Non-positive integer value for %s=%s; using default %d", name, raw, default)
+        return default
+    return value
+
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+DEFAULT_LLM_TIMEOUT_SECONDS = _read_timeout_env("PIPELINE_LLM_TIMEOUT_SECONDS", 180.0)
+DEFAULT_STEP_TIMEOUT_SECONDS = _read_timeout_env("PIPELINE_STEP_TIMEOUT_SECONDS", 300.0)
+STEP_TIMEOUT_SECONDS = {
+    "s2_ocr_parse": _read_timeout_env("PIPELINE_STEP_TIMEOUT_S2_OCR_PARSE", 300.0),
+    "s4_script_gen": _read_timeout_env("PIPELINE_STEP_TIMEOUT_S4_SCRIPT_GEN", 300.0),
+    "s6_translation": _read_timeout_env("PIPELINE_STEP_TIMEOUT_S6_TRANSLATION", 300.0),
+    "s9_audio_gen": _read_timeout_env("PIPELINE_STEP_TIMEOUT_S9_AUDIO_GEN", 900.0),
+}
+
+ALIGNMENT_TIMEOUT_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_TIMEOUT_SECONDS", 30.0)
+ALIGNMENT_MIN_CUE_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_MIN_CUE_SECONDS", 1.0)
+ALIGNMENT_MAX_CUE_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_MAX_CUE_SECONDS", 4.0)
+ALIGNMENT_MAX_CJK_CHARS = _read_positive_int_env("PIPELINE_AUDIO_ALIGNMENT_MAX_CJK_CHARS", 12)
+ALIGNMENT_MAX_LATIN_CHARS = _read_positive_int_env("PIPELINE_AUDIO_ALIGNMENT_MAX_LATIN_CHARS", 22)
+ALIGNMENT_AI_SEGMENTATION_ENABLED = _read_bool_env("PIPELINE_AUDIO_ALIGNMENT_AI_SEGMENTATION_ENABLED", True)
+RECOVERABLE_ALIGNMENT_ERROR_MARKERS = (
+    "speech-to-text returned no word timestamps",
+    "no character timings could be expanded",
+)
+
+FAILURE_HOTSPOT_THRESHOLD = _read_positive_int_env("PIPELINE_FAILURE_HOTSPOT_THRESHOLD", 3)
+
+
+def _log_telemetry(event: str, *, level: int = logging.INFO, **fields: Any) -> None:
+    payload: dict[str, Any] = {
+        "event": event,
+        "ts_ms": int(time.time() * 1000),
+    }
+    for key, value in fields.items():
+        if value is None or value == "":
+            continue
+        payload[key] = value
+    logger.log(level, "pipeline_telemetry %s", json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+
+
 def _is_retryable(exc: Exception) -> bool:
     """Check if an exception is a transient rate-limit / overload error."""
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
     msg = str(exc).lower()
     return any(kw.lower() in msg for kw in _RETRYABLE_KEYWORDS)
 
 
+def _format_retry_context(context: dict[str, Any] | None) -> str:
+    if not context:
+        return ""
+    keys = (
+        "operation",
+        "session_id",
+        "run_id",
+        "step_id",
+        "language",
+        "spot_id",
+        "correlation_id",
+        "tenant_id",
+        "actor_id",
+    )
+    parts: list[str] = []
+    for key in keys:
+        value = context.get(key)
+        if value is not None and value != "":
+            parts.append(f"{key}={value}")
+    return f" [{' '.join(parts)}]" if parts else ""
+
+
 async def _retry_generate_content(
     client: genai.Client,
+    *,
+    timeout_seconds: float | None = None,
+    retry_context: dict[str, Any] | None = None,
+    retry_tracker: dict[str, int] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Call client.aio.models.generate_content with exponential backoff on 429."""
+    effective_timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_LLM_TIMEOUT_SECONDS
+    context_suffix = _format_retry_context(retry_context)
     backoff = INITIAL_BACKOFF
     for attempt in range(1, MAX_RETRIES + 1):
+        if retry_tracker is not None:
+            retry_tracker["attempts"] = int(retry_tracker.get("attempts", 0)) + 1
+        attempt_started = time.time()
         try:
-            return await client.aio.models.generate_content(**kwargs)
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(**kwargs),
+                timeout=effective_timeout,
+            )
+            if attempt > 1:
+                elapsed_ms = int((time.time() - attempt_started) * 1000)
+                logger.info(
+                    "Gemini API call recovered on attempt %d/%d (elapsed=%dms)%s",
+                    attempt,
+                    MAX_RETRIES,
+                    elapsed_ms,
+                    context_suffix,
+                )
+            return response
+        except asyncio.CancelledError:
+            logger.warning(
+                "Gemini API call cancelled on attempt %d/%d%s",
+                attempt,
+                MAX_RETRIES,
+                context_suffix,
+            )
+            raise
         except Exception as exc:
-            if attempt < MAX_RETRIES and _is_retryable(exc):
+            elapsed_ms = int((time.time() - attempt_started) * 1000)
+            is_retryable = _is_retryable(exc)
+            if attempt < MAX_RETRIES and is_retryable:
+                if retry_tracker is not None:
+                    retry_tracker["retries"] = int(retry_tracker.get("retries", 0)) + 1
                 jitter = backoff * (0.5 + 0.5 * (hash(str(attempt)) % 100) / 100)
                 logger.warning(
-                    "Gemini API rate-limited (attempt %d/%d). "
-                    "Retrying in %.1fs… [%s]",
-                    attempt, MAX_RETRIES, jitter, exc,
+                    "Gemini API call failed on attempt %d/%d (elapsed=%dms). "
+                    "Retrying in %.1fs… [%s]%s",
+                    attempt,
+                    MAX_RETRIES,
+                    elapsed_ms,
+                    jitter,
+                    exc,
+                    context_suffix,
                 )
                 await asyncio.sleep(jitter)
                 backoff = min(backoff * BACKOFF_FACTOR, MAX_BACKOFF)
             else:
+                if retry_tracker is not None:
+                    retry_tracker["failures"] = int(retry_tracker.get("failures", 0)) + 1
+                logger.error(
+                    "Gemini API call failed permanently on attempt %d/%d "
+                    "(elapsed=%dms, retryable=%s) [%s]%s",
+                    attempt,
+                    MAX_RETRIES,
+                    elapsed_ms,
+                    is_retryable,
+                    exc,
+                    context_suffix,
+                )
                 raise
-
-# ── Prompt loading ──
-
-PROMPTS_DIR = Path(__file__).parent / "prompts"
-
-
-def load_prompt(name: str) -> str:
-    """Load a system prompt from the prompts directory."""
-    path = PROMPTS_DIR / f"{name}.txt"
-    return path.read_text(encoding="utf-8").strip()
-
 
 # ── Model configuration ──
 
 MODELS = {
     "flash": "gemini-2.5-flash",
     "pro": "gemini-2.5-pro",
-    "tts": "gemini-2.5-flash-preview-tts",
+    "tts": os.environ.get("TTS_MODEL", "gemini-2.5-flash-preview-tts"),
 }
 
 TEMPERATURES = {
@@ -102,6 +241,8 @@ TEMPERATURES = {
     "s6_translation": 0.5,
     "s7_voice_recommend": 0.5,
     "s8_director_note": 0.6,
+    "guide_script_enhance": 0.7,
+    "generate_character": 0.8,
 }
 
 # Maps step_id → display label for frontend compatibility
@@ -121,7 +262,7 @@ STEP_LABELS = {
     "n6_audio_qa": "N6: Audio Playback QA",
     "hg5_audio_review": "HG5: Audio Review",
     "n8_generation_history": "N8: Generation History",
-    "s10_srt_gen": "S10: SRT Gen (rule-based)",
+    "s10_srt_gen": "S10: SRT Gen (AI aligned)",
     "pipeline_complete": "Pipeline Complete",
 }
 
@@ -148,6 +289,18 @@ PIPELINE_STEPS = [
 
 HUMAN_GATES = {"hg1_data_review", "hg3_script_review", "hg4_translation_review", "hg5_audio_review"}
 
+
+class SessionAlreadyExistsError(ValueError):
+    """Raised when a start call tries to recreate an existing session."""
+
+
+class IdempotencyConflictError(ValueError):
+    """Raised when an idempotency key is reused with different request input."""
+
+
+class IdempotencyInProgressError(RuntimeError):
+    """Raised when the same idempotent request is already being processed."""
+
 # ── Pipeline execution engine ──
 
 
@@ -160,9 +313,9 @@ class PipelineExecutor:
     pipeline can be paused/resumed across HTTP requests.
     """
 
-    def __init__(self, project_id: str | None = None, location: str = "us-central1"):
+    def __init__(self, project_id: str | None = None, location: str | None = None):
         self.project_id = project_id or os.environ.get("GCP_PROJECT", os.environ.get("GCLOUD_PROJECT", ""))
-        self.location = location
+        self.location = location or os.environ.get("GEMINI_LOCATION", os.environ.get("VERTEX_LOCATION", "global"))
 
         # Use Gemini API key if provided; otherwise fall back to Vertex AI
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -173,26 +326,260 @@ class PipelineExecutor:
             logger.info("Using Vertex AI (project=%s, location=%s)", self.project_id, self.location)
             self._client = genai.Client(vertexai=True, project=self.project_id, location=self.location)
 
+    @staticmethod
+    def _build_idempotency_fingerprint(payload: dict[str, Any]) -> str:
+        """Build deterministic fingerprint for idempotency input comparison."""
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _get_step_timeout_seconds(step_id: str) -> float:
+        return STEP_TIMEOUT_SECONDS.get(step_id, DEFAULT_STEP_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _clean_string(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed or None
+        return str(value)
+
+    @classmethod
+    def _extract_telemetry_context(
+        cls,
+        session_context: dict[str, Any] | None,
+        request_metadata: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        sources: list[dict[str, Any]] = []
+        if isinstance(request_metadata, dict):
+            sources.append(request_metadata)
+        if isinstance(session_context, dict):
+            nested = session_context.get("_telemetry")
+            if isinstance(nested, dict):
+                sources.append(nested)
+            sources.append(session_context)
+
+        aliases = {
+            "correlation_id": ("correlation_id", "correlationId"),
+            "request_id": ("request_id", "requestId"),
+            "tenant_id": ("tenant_id", "tenantId", "tenant"),
+            "actor_id": ("actor_id", "actorId", "userId", "userUid"),
+        }
+        result: dict[str, str] = {}
+        for output_key, keys in aliases.items():
+            value: str | None = None
+            for source in sources:
+                for key in keys:
+                    candidate = cls._clean_string(source.get(key))
+                    if candidate:
+                        value = candidate
+                        break
+                if value:
+                    break
+            if value:
+                result[output_key] = value
+        return result
+
+    @classmethod
+    def _build_runtime_context(
+        cls,
+        *,
+        session_id: str,
+        run_id: str,
+        session_context: dict[str, Any] | None,
+        request_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        telemetry = cls._extract_telemetry_context(session_context, request_metadata)
+        runtime: dict[str, Any] = {
+            "sessionId": session_id,
+            "runId": run_id,
+        }
+        if telemetry.get("correlation_id"):
+            runtime["correlationId"] = telemetry["correlation_id"]
+        if telemetry.get("request_id"):
+            runtime["requestId"] = telemetry["request_id"]
+        if telemetry.get("tenant_id"):
+            runtime["tenantId"] = telemetry["tenant_id"]
+        if telemetry.get("actor_id"):
+            runtime["actorId"] = telemetry["actor_id"]
+        return runtime
+
+    def _emit_step_telemetry(
+        self,
+        *,
+        event: str,
+        runtime_context: dict[str, Any],
+        step_id: str,
+        attempt: int,
+        status: str,
+        duration_ms: int | None,
+        retries: int,
+        llm_attempts: int,
+        timeout_seconds: float | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        level = logging.INFO if status != "ERROR" else logging.WARNING
+        _log_telemetry(
+            event,
+            level=level,
+            session_id=runtime_context.get("sessionId"),
+            run_id=runtime_context.get("runId"),
+            correlation_id=runtime_context.get("correlationId"),
+            request_id=runtime_context.get("requestId"),
+            tenant_id=runtime_context.get("tenantId"),
+            actor_id=runtime_context.get("actorId"),
+            step_id=step_id,
+            attempt=attempt,
+            status=status,
+            duration_ms=duration_ms,
+            retries=retries,
+            llm_attempts=llm_attempts,
+            timeout_seconds=timeout_seconds,
+            error_code=error_code,
+        )
+
+    def _emit_failure_hotspot_if_needed(
+        self,
+        *,
+        session_id: str,
+        runtime_context: dict[str, Any],
+        step_id: str,
+        error_code: str,
+    ) -> None:
+        session = session_service.get_session(session_id) or {}
+        steps = session.get("steps", [])
+        failure_count = sum(
+            1
+            for step in steps
+            if step.get("step_id") == step_id and step.get("status") == "ERROR"
+        )
+        if failure_count < FAILURE_HOTSPOT_THRESHOLD:
+            return
+
+        _log_telemetry(
+            "pipeline.failure_hotspot",
+            level=logging.ERROR,
+            session_id=runtime_context.get("sessionId"),
+            run_id=runtime_context.get("runId"),
+            correlation_id=runtime_context.get("correlationId"),
+            request_id=runtime_context.get("requestId"),
+            tenant_id=runtime_context.get("tenantId"),
+            actor_id=runtime_context.get("actorId"),
+            step_id=step_id,
+            failure_count=failure_count,
+            threshold=FAILURE_HOTSPOT_THRESHOLD,
+            error_code=error_code,
+        )
+
     async def start(
         self,
         session_id: str,
         question: str,
         uploads: list[dict[str, Any]] | None = None,
         context: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        request_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Start a new pipeline run. Executes steps sequentially until
         hitting a human gate or completing the pipeline.
         """
-        # Create session in Firestore
-        session_data = session_service.create_session(session_id, {
+        fingerprint = self._build_idempotency_fingerprint({
+            "sessionId": session_id,
             "question": question,
             "uploads": uploads or [],
             "context": context or {},
         })
+        existing_record: dict[str, Any] | None = None
 
-        # Run from the first step
-        return await self._run_from(session_id, start_step_index=0, question=question, uploads=uploads)
+        if idempotency_key:
+            existing_record = session_service.get_idempotency_request(session_id, "start", idempotency_key)
+            if existing_record:
+                existing_fingerprint = existing_record.get("fingerprint")
+                if existing_fingerprint and existing_fingerprint != fingerprint:
+                    raise IdempotencyConflictError(
+                        f"Idempotency key conflict for session {session_id} (start)"
+                    )
+
+                status = existing_record.get("status")
+                response = existing_record.get("response")
+                if status == "completed" and isinstance(response, dict):
+                    logger.info("Returning cached idempotent start response for session %s", session_id)
+                    return response
+                if status == "in_progress":
+                    raise IdempotencyInProgressError(
+                        f"Idempotent start request already in progress for session {session_id}"
+                    )
+
+        existing_session = session_service.get_session(session_id)
+        if existing_session and not idempotency_key:
+            raise SessionAlreadyExistsError(f"Session already exists: {session_id}")
+        if existing_session and idempotency_key and not existing_record:
+            raise SessionAlreadyExistsError(
+                f"Session already exists without matching idempotency record: {session_id}"
+            )
+
+        session_context = dict(context or {})
+        telemetry_context = self._extract_telemetry_context(session_context, request_metadata)
+        if telemetry_context:
+            existing_telemetry = session_context.get("_telemetry")
+            merged_telemetry = dict(existing_telemetry) if isinstance(existing_telemetry, dict) else {}
+            merged_telemetry.update(telemetry_context)
+            session_context["_telemetry"] = merged_telemetry
+
+        if not existing_session:
+            session_service.create_session(session_id, {
+                "question": question,
+                "uploads": uploads or [],
+                "context": session_context,
+            })
+
+        run_id = f"start-{int(time.time() * 1000)}"
+        logger.info(
+            "Pipeline start requested: session=%s run_id=%s idempotency=%s",
+            session_id,
+            run_id,
+            bool(idempotency_key),
+        )
+        if idempotency_key:
+            session_service.upsert_idempotency_request(session_id, "start", idempotency_key, {
+                "status": "in_progress",
+                "fingerprint": fingerprint,
+                "run_id": run_id,
+                "started_at_ms": int(time.time() * 1000),
+                "response": None,
+                "error": None,
+            })
+
+        try:
+            result = await self._run_from(
+                session_id,
+                start_step_index=0,
+                question=question,
+                uploads=uploads,
+                run_id=run_id,
+                request_metadata=request_metadata,
+            )
+            if idempotency_key:
+                session_service.upsert_idempotency_request(session_id, "start", idempotency_key, {
+                    "status": "completed",
+                    "fingerprint": fingerprint,
+                    "run_id": run_id,
+                    "completed_at_ms": int(time.time() * 1000),
+                    "response": result,
+                    "error": None,
+                })
+            return result
+        except Exception as exc:
+            if idempotency_key:
+                session_service.upsert_idempotency_request(session_id, "start", idempotency_key, {
+                    "status": "failed",
+                    "fingerprint": fingerprint,
+                    "run_id": run_id,
+                    "completed_at_ms": int(time.time() * 1000),
+                    "error": str(exc),
+                })
+            raise
 
     async def resume(
         self,
@@ -200,6 +587,8 @@ class PipelineExecutor:
         checkpoint_id: str,
         action: str,
         feedback: str | None = None,
+        idempotency_key: str | None = None,
+        request_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Resume a pipeline from a human gate checkpoint.
@@ -214,6 +603,32 @@ class PipelineExecutor:
         session = session_service.get_session(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
+
+        fingerprint = self._build_idempotency_fingerprint({
+            "sessionId": session_id,
+            "checkpointId": checkpoint_id,
+            "action": action,
+            "feedback": feedback,
+        })
+
+        if idempotency_key:
+            existing_record = session_service.get_idempotency_request(session_id, "resume", idempotency_key)
+            if existing_record:
+                existing_fingerprint = existing_record.get("fingerprint")
+                if existing_fingerprint and existing_fingerprint != fingerprint:
+                    raise IdempotencyConflictError(
+                        f"Idempotency key conflict for session {session_id} (resume)"
+                    )
+
+                status = existing_record.get("status")
+                response = existing_record.get("response")
+                if status == "completed" and isinstance(response, dict):
+                    logger.info("Returning cached idempotent resume response for session %s", session_id)
+                    return response
+                if status == "in_progress":
+                    raise IdempotencyInProgressError(
+                        f"Idempotent resume request already in progress for session {session_id}"
+                    )
 
         stored_checkpoint = session.get("checkpoint_id")
         if stored_checkpoint != checkpoint_id:
@@ -247,44 +662,92 @@ class PipelineExecutor:
         if gate_index < 0:
             raise ValueError(f"Unknown checkpoint: {checkpoint_id}")
 
-        if action == "approve":
-            # Continue from the step after the gate
-            next_index = gate_index + 1
-
-            # Store the feedback/approval payload in session
-            gate_output: dict[str, Any] = {"action": "approve"}
-            if structured_feedback:
-                gate_output["structured"] = structured_feedback
-                # Merge human edits into upstream outputs so downstream steps use corrected data
-                self._apply_structured_feedback(session_id, checkpoint_id, structured_feedback)
-            elif feedback:
-                gate_output["feedback"] = feedback
-
-            session_service.update_session(session_id, {
-                f"outputs.{checkpoint_id}": gate_output,
+        run_id = f"resume-{int(time.time() * 1000)}"
+        logger.info(
+            "Pipeline resume requested: session=%s checkpoint=%s action=%s run_id=%s idempotency=%s",
+            session_id,
+            checkpoint_id,
+            action,
+            run_id,
+            bool(idempotency_key),
+        )
+        if idempotency_key:
+            session_service.upsert_idempotency_request(session_id, "resume", idempotency_key, {
+                "status": "in_progress",
+                "fingerprint": fingerprint,
+                "run_id": run_id,
+                "started_at_ms": int(time.time() * 1000),
+                "response": None,
+                "error": None,
             })
-        elif action == "reject":
-            # Find the start of the current stage (first step after previous gate)
-            next_index = self._find_stage_start(gate_index)
 
-            gate_output_r: dict[str, Any] = {"action": "reject"}
-            if structured_feedback:
-                gate_output_r["structured"] = structured_feedback
-            elif feedback:
-                gate_output_r["feedback"] = feedback
+        try:
+            if action == "approve":
+                # Continue from the step after the gate
+                next_index = gate_index + 1
 
-            session_service.update_session(session_id, {
-                f"outputs.{checkpoint_id}": gate_output_r,
-            })
-        else:
-            raise ValueError(f"Unknown action: {action}")
+                # Store the feedback/approval payload in session
+                gate_output: dict[str, Any] = {"action": "approve"}
+                if structured_feedback:
+                    gate_output["structured"] = structured_feedback
+                    # Merge human edits into upstream outputs so downstream steps use corrected data
+                    self._apply_structured_feedback(session_id, checkpoint_id, structured_feedback)
+                elif feedback:
+                    gate_output["feedback"] = feedback
 
-        # Reload session to get latest outputs
-        session = session_service.get_session(session_id)
-        question = session.get("question", "")
-        uploads = session.get("uploads")
+                session_service.update_session(session_id, {
+                    f"outputs.{checkpoint_id}": gate_output,
+                })
+            elif action == "reject":
+                # Find the start of the current stage (first step after previous gate)
+                next_index = self._find_stage_start(gate_index)
 
-        return await self._run_from(session_id, start_step_index=next_index, question=question, uploads=uploads)
+                gate_output_r: dict[str, Any] = {"action": "reject"}
+                if structured_feedback:
+                    gate_output_r["structured"] = structured_feedback
+                elif feedback:
+                    gate_output_r["feedback"] = feedback
+
+                session_service.update_session(session_id, {
+                    f"outputs.{checkpoint_id}": gate_output_r,
+                })
+            else:
+                raise ValueError(f"Unknown action: {action}")
+
+            # Reload session to get latest outputs
+            session = session_service.get_session(session_id)
+            question = session.get("question", "")
+            uploads = session.get("uploads")
+
+            result = await self._run_from(
+                session_id,
+                start_step_index=next_index,
+                question=question,
+                uploads=uploads,
+                run_id=run_id,
+                request_metadata=request_metadata,
+            )
+
+            if idempotency_key:
+                session_service.upsert_idempotency_request(session_id, "resume", idempotency_key, {
+                    "status": "completed",
+                    "fingerprint": fingerprint,
+                    "run_id": run_id,
+                    "completed_at_ms": int(time.time() * 1000),
+                    "response": result,
+                    "error": None,
+                })
+            return result
+        except Exception as exc:
+            if idempotency_key:
+                session_service.upsert_idempotency_request(session_id, "resume", idempotency_key, {
+                    "status": "failed",
+                    "fingerprint": fingerprint,
+                    "run_id": run_id,
+                    "completed_at_ms": int(time.time() * 1000),
+                    "error": str(exc),
+                })
+            raise
 
     async def get_status(self, session_id: str) -> dict[str, Any]:
         """Get current pipeline status for a session."""
@@ -301,6 +764,7 @@ class PipelineExecutor:
         scripts: list[dict[str, Any]],
         target_language: str,
         core_language: str,
+        retry_tracker: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """
         Translate scripts into a single target language using Gemini.
@@ -329,6 +793,13 @@ class PipelineExecutor:
 
         response = await _retry_generate_content(
             self._client,
+            timeout_seconds=self._get_step_timeout_seconds("s6_translation"),
+            retry_context={
+                "operation": "translate_language",
+                "step_id": "s6_translation",
+                "language": target_language,
+            },
+            retry_tracker=retry_tracker,
             model=model,
             contents=user_message,
             config=genai.types.GenerateContentConfig(
@@ -387,6 +858,187 @@ class PipelineExecutor:
             "approved": False,
         }
 
+    # ── Standalone director note generation ──
+
+    async def generate_director_note(
+        self,
+        script_content: str,
+        character_name: str | None = None,
+        character_role: str | None = None,
+        content_version: str | None = None,
+        context: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a director note from script content using Gemini."""
+        prompt_text = load_prompt("s8_director_note")
+        model = MODELS["flash"]
+        temperature = TEMPERATURES.get("s8_director_note", 0.6)
+
+        # Build context message
+        parts: list[str] = []
+        if context:
+            parts.append(f"Context / Creative Direction: {context}")
+        parts.append(f"Script Content:\n{script_content}")
+        if character_name:
+            parts.append(f"Character: {character_name}")
+        if character_role:
+            parts.append(f"Character Role: {character_role}")
+        if content_version:
+            parts.append(f"Content Version: {content_version}")
+
+        user_message = (
+            "Generate a director's note for the audio guide production "
+            "based on this context.\n\n" + "\n\n".join(parts)
+        )
+
+        response = await _retry_generate_content(
+            self._client,
+            timeout_seconds=self._get_step_timeout_seconds("s8_director_note"),
+            retry_context={"operation": "generate_director_note"},
+            model=model,
+            contents=user_message,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                temperature=temperature,
+            ),
+        )
+
+        text = response.text if response.text else ""
+        clean = text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+
+        try:
+            parsed = json.loads(clean)
+        except (json.JSONDecodeError, ValueError):
+            parsed = {"success": False, "raw": text}
+
+        # Normalize field names to frontend convention
+        raw = parsed.get("directorNote", parsed) if isinstance(parsed, dict) else parsed
+        if isinstance(raw, dict):
+            result = {
+                "scene": raw.get("scene") or raw.get("vocalEnvironment") or "",
+                "style": raw.get("style") or raw.get("mission") or raw.get("missionOfSpeech") or "",
+                "pacing": raw.get("pacing") or raw.get("pacingAndEnergy") or "",
+            }
+        else:
+            result = {"scene": "", "style": "", "pacing": ""}
+
+        return {"success": True, "directorNote": result}
+
+    # ── Standalone script enhancement ──
+
+    async def enhance_script(
+        self,
+        script_content: str,
+        character_name: str | None = None,
+        character_role: str | None = None,
+        context_directive: str | None = None,
+    ) -> dict[str, Any]:
+        """Enhance a script with AI-generated performance cues."""
+        prompt_text = load_prompt("guide_script_enhance")
+        model = MODELS["flash"]
+        temperature = TEMPERATURES.get("guide_script_enhance", 0.7)
+
+        parts: list[str] = []
+        if character_name:
+            char_desc = character_name
+            if character_role:
+                char_desc += f" — {character_role}"
+            parts.append(f"Character Identity: {char_desc}")
+        if context_directive:
+            parts.append(f"Contextual Venue/Goal: {context_directive}")
+        parts.append(f"Original Script:\n{script_content}")
+        parts.append(
+            "Enhance the script with natural performance tags. There is no hard "
+            "per-sentence tag cap, but keep the result readable and avoid cue clutter."
+        )
+
+        user_message = "\n\n".join(parts)
+
+        response = await _retry_generate_content(
+            self._client,
+            timeout_seconds=self._get_step_timeout_seconds("guide_script_enhance"),
+            retry_context={"operation": "enhance_script"},
+            model=model,
+            contents=user_message,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                temperature=temperature,
+            ),
+        )
+
+        text = response.text if response.text else ""
+        enhanced = text.strip()
+        # Strip markdown code fences if present
+        if enhanced.startswith("```"):
+            enhanced = enhanced.split("\n", 1)[1] if "\n" in enhanced else enhanced[3:]
+            if enhanced.endswith("```"):
+                enhanced = enhanced[:-3]
+            enhanced = enhanced.strip()
+
+        return {"success": True, "enhancedScript": enhanced}
+
+    # ── Standalone character generation ──
+
+    async def generate_character(
+        self,
+        designer_prompt: str,
+    ) -> dict[str, Any]:
+        """Generate a full character profile from a free-text designer prompt."""
+        prompt_text = load_prompt("generate_character")
+        model = MODELS["flash"]
+        temperature = TEMPERATURES.get("generate_character", 0.8)
+
+        user_message = (
+            f"Character concept:\n{designer_prompt}\n\n"
+            "Generate the character profile as a single JSON object."
+        )
+
+        response = await _retry_generate_content(
+            self._client,
+            timeout_seconds=self._get_step_timeout_seconds("generate_character"),
+            retry_context={"operation": "generate_character"},
+            model=model,
+            contents=user_message,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                temperature=temperature,
+            ),
+        )
+
+        text = response.text if response.text else ""
+        raw = text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+        import json as _json
+
+        character = _json.loads(raw)
+
+        required_fields = [
+            "name", "role", "avatar", "genderIdentity",
+            "coreTimbre", "personalityDNA", "linguisticFingerprint",
+            "brandPersona", "staticInstruction",
+        ]
+        for field in required_fields:
+            if field not in character or not character[field]:
+                raise ValueError(f"Missing required field: {field}")
+
+        if character.get("genderIdentity") not in ("masculine", "feminine", "neutral"):
+            character["genderIdentity"] = "neutral"
+
+        if "accent" not in character:
+            character["accent"] = ""
+
+        return {"success": True, "character": character}
+
     # ── Standalone audio generation (called by /pipeline/audio-generate) ──
 
     async def generate_audio_for_language(
@@ -397,6 +1049,7 @@ class PipelineExecutor:
         language: str,
         director_note: dict[str, Any] | None = None,
         translations: list[dict[str, Any]] | None = None,
+        retry_tracker: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """
         Generate TTS audio for every spot in a **single** language.
@@ -425,24 +1078,20 @@ class PipelineExecutor:
             if not text.strip():
                 continue
 
-            tts_text = text
-            if director_note:
-                env = director_note.get("vocalEnvironment", "")
-                mission = director_note.get("mission", "")
-                pacing = director_note.get("pacing", "")
-                parts = []
-                if env:
-                    parts.append(f"Environment: {env}.")
-                if mission:
-                    parts.append(f"Mission: {mission}.")
-                if pacing:
-                    parts.append(f"Pacing: {pacing}.")
-                if parts:
-                    tts_text = " ".join(parts) + "\n\n" + text
+            tts_text = self._build_tts_text(text, director_note)
 
             try:
                 response = await _retry_generate_content(
                     self._client,
+                    timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
+                    retry_context={
+                        "operation": "audio_generate_language",
+                        "step_id": "s9_audio_gen",
+                        "session_id": session_id,
+                        "language": language,
+                        "spot_id": spot_id,
+                    },
+                    retry_tracker=retry_tracker,
                     model=MODELS["tts"],
                     contents=tts_text,
                     config=genai_types.GenerateContentConfig(
@@ -457,33 +1106,60 @@ class PipelineExecutor:
                     ),
                 )
 
-                audio_data: bytes | None = None
-                mime_type = "audio/wav"
-                for part in response.candidates[0].content.parts:
-                    if part.inline_data and part.inline_data.data:
-                        audio_data = part.inline_data.data
-                        mime_type = part.inline_data.mime_type or "audio/wav"
-                        break
+                audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
+                if not audio_data and self._is_prohibited_content_block(extraction_error):
+                    logger.warning(
+                        "Gemini TTS blocked directed prompt for %s/%s; retrying with transcript-only fallback",
+                        language,
+                        spot_id,
+                    )
+                    response = await _retry_generate_content(
+                        self._client,
+                        timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
+                        retry_context={
+                            "operation": "audio_generate_language_fallback",
+                            "step_id": "s9_audio_gen",
+                            "session_id": session_id,
+                            "language": language,
+                            "spot_id": spot_id,
+                        },
+                        retry_tracker=retry_tracker,
+                        model=MODELS["tts"],
+                        contents=text,
+                        config=genai_types.GenerateContentConfig(
+                            response_modalities=["AUDIO"],
+                            speech_config=genai_types.SpeechConfig(
+                                voice_config=genai_types.VoiceConfig(
+                                    prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
+                                        voice_name=voice_id,
+                                    )
+                                )
+                            ),
+                        ),
+                    )
+                    audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
 
                 if not audio_data:
-                    logger.warning(f"No audio data returned for {language}/{spot_id}")
-                    continue
+                    raise RuntimeError(extraction_error or "No audio data returned from Gemini TTS response")
 
-                if mime_type.startswith("audio/L16") or mime_type == "audio/pcm":
-                    audio_data = self._pcm_to_wav(audio_data, sample_rate=24000)
+                if self._mime_indicates_raw_pcm(mime_type):
+                    sample_rate = self._extract_sample_rate_from_mime(mime_type, default=24000)
+                    audio_data = self._pcm_to_wav(audio_data, sample_rate=sample_rate)
                     mime_type = "audio/wav"
 
                 duration_ms = self._estimate_duration_ms(audio_data, mime_type)
 
                 storage_path = f"audio/{session_id}/{language}/{spot_id}.wav"
+                download_token = str(uuid4())
                 blob = bucket.blob(storage_path)
+                blob.metadata = {"firebaseStorageDownloadTokens": download_token}
                 blob.upload_from_string(audio_data, content_type="audio/wav")
 
                 storage_emulator = os.environ.get("FIREBASE_STORAGE_EMULATOR_HOST") or os.environ.get("STORAGE_EMULATOR_HOST")
                 if storage_emulator:
                     host = storage_emulator if storage_emulator.startswith("http") else f"http://{storage_emulator}"
                     encoded_path = storage_path.replace("/", "%2F")
-                    audio_url = f"{host}/v0/b/{bucket.name}/o/{encoded_path}?alt=media"
+                    audio_url = f"{host}/v0/b/{bucket.name}/o/{encoded_path}?alt=media&token={download_token}"
                 else:
                     blob.make_public()
                     audio_url = blob.public_url
@@ -501,7 +1177,12 @@ class PipelineExecutor:
                     "model": MODELS["tts"],
                 })
 
-                srt_entries = tools.srt_generate_for_text(text, duration_ms / 1000.0)
+                srt_entries = await self._generate_aligned_srt_entries(
+                    text=text,
+                    audio_data=audio_data,
+                    language=language,
+                    duration_ms=duration_ms,
+                )
                 raw_srt = tools.format_srt(srt_entries)
                 srt_files.append({
                     "lang": language,
@@ -510,6 +1191,15 @@ class PipelineExecutor:
                     "rawSrt": raw_srt,
                 })
 
+            except audio_alignment.AlignmentError as e:
+                logger.error(
+                    "Alignment failed for %s/%s: %s",
+                    language,
+                    spot_id,
+                    e,
+                    exc_info=True,
+                )
+                raise RuntimeError(f"ALIGNMENT_FAILED:{language}/{spot_id}:{e}") from e
             except Exception as e:
                 logger.error(f"TTS failed for {language}/{spot_id}: {e}", exc_info=True)
                 audio_files.append({
@@ -526,6 +1216,8 @@ class PipelineExecutor:
             "lang": language,
             "audioFiles": audio_files,
             "srtFiles": srt_files,
+            "alignmentRequired": True,
+            "alignmentProvider": "google-cloud-speech",
         }
 
     async def generate_audio(
@@ -536,6 +1228,7 @@ class PipelineExecutor:
         languages: list[str],
         director_note: dict[str, Any] | None = None,
         translations: dict[str, list[dict[str, Any]]] | None = None,
+        retry_tracker: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """
         Generate TTS audio for each spot × language using Gemini TTS.
@@ -570,26 +1263,22 @@ class PipelineExecutor:
                 if not text.strip():
                     continue
 
-                # Build TTS prompt with director note context
-                tts_text = text
-                if director_note:
-                    env = director_note.get("vocalEnvironment", "")
-                    mission = director_note.get("mission", "")
-                    pacing = director_note.get("pacing", "")
-                    style_prefix_parts = []
-                    if env:
-                        style_prefix_parts.append(f"Environment: {env}.")
-                    if mission:
-                        style_prefix_parts.append(f"Mission: {mission}.")
-                    if pacing:
-                        style_prefix_parts.append(f"Pacing: {pacing}.")
-                    if style_prefix_parts:
-                        tts_text = " ".join(style_prefix_parts) + "\n\n" + text
+                # Build TTS prompt with director note context.
+                tts_text = self._build_tts_text(text, director_note)
 
                 try:
                     # Call Gemini TTS (with retry for rate limits)
                     response = await _retry_generate_content(
                         self._client,
+                        timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
+                        retry_context={
+                            "operation": "audio_generate",
+                            "step_id": "s9_audio_gen",
+                            "session_id": session_id,
+                            "language": lang,
+                            "spot_id": spot_id,
+                        },
+                        retry_tracker=retry_tracker,
                         model=MODELS["tts"],
                         contents=tts_text,
                         config=genai_types.GenerateContentConfig(
@@ -605,21 +1294,46 @@ class PipelineExecutor:
                     )
 
                     # Extract audio bytes from response
-                    audio_data: bytes | None = None
-                    mime_type = "audio/wav"
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data and part.inline_data.data:
-                            audio_data = part.inline_data.data
-                            mime_type = part.inline_data.mime_type or "audio/wav"
-                            break
+                    audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
+                    if not audio_data and self._is_prohibited_content_block(extraction_error):
+                        logger.warning(
+                            "Gemini TTS blocked directed prompt for %s/%s; retrying with transcript-only fallback",
+                            lang,
+                            spot_id,
+                        )
+                        response = await _retry_generate_content(
+                            self._client,
+                            timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
+                            retry_context={
+                                "operation": "audio_generate_fallback",
+                                "step_id": "s9_audio_gen",
+                                "session_id": session_id,
+                                "language": lang,
+                                "spot_id": spot_id,
+                            },
+                            retry_tracker=retry_tracker,
+                            model=MODELS["tts"],
+                            contents=text,
+                            config=genai_types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=genai_types.SpeechConfig(
+                                    voice_config=genai_types.VoiceConfig(
+                                        prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
+                                            voice_name=voice_id,
+                                        )
+                                    )
+                                ),
+                            ),
+                        )
+                        audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
 
                     if not audio_data:
-                        logger.warning(f"No audio data returned for {lang}/{spot_id}")
-                        continue
+                        raise RuntimeError(extraction_error or "No audio data returned from Gemini TTS response")
 
                     # Convert raw PCM to WAV if needed
-                    if mime_type.startswith("audio/L16") or mime_type == "audio/pcm":
-                        audio_data = self._pcm_to_wav(audio_data, sample_rate=24000)
+                    if self._mime_indicates_raw_pcm(mime_type):
+                        sample_rate = self._extract_sample_rate_from_mime(mime_type, default=24000)
+                        audio_data = self._pcm_to_wav(audio_data, sample_rate=sample_rate)
                         mime_type = "audio/wav"
 
                     # Compute duration from audio bytes
@@ -627,18 +1341,18 @@ class PipelineExecutor:
 
                     # Upload to Firebase Storage
                     storage_path = f"audio/{session_id}/{lang}/{spot_id}.wav"
+                    download_token = str(uuid4())
                     blob = bucket.blob(storage_path)
+                    blob.metadata = {"firebaseStorageDownloadTokens": download_token}
                     blob.upload_from_string(audio_data, content_type="audio/wav")
 
                     # Build a download URL that works in both emulator and production
                     storage_emulator = os.environ.get("FIREBASE_STORAGE_EMULATOR_HOST") or os.environ.get("STORAGE_EMULATOR_HOST")
                     if storage_emulator:
-                        # Emulator: use the /v0 download endpoint
                         host = storage_emulator if storage_emulator.startswith("http") else f"http://{storage_emulator}"
                         encoded_path = storage_path.replace("/", "%2F")
-                        audio_url = f"{host}/v0/b/{bucket.name}/o/{encoded_path}?alt=media"
+                        audio_url = f"{host}/v0/b/{bucket.name}/o/{encoded_path}?alt=media&token={download_token}"
                     else:
-                        # Production: make public and use the GCS public URL
                         blob.make_public()
                         audio_url = blob.public_url
 
@@ -658,8 +1372,13 @@ class PipelineExecutor:
                         "model": MODELS["tts"],
                     })
 
-                    # Generate SRT for this spot+lang
-                    srt_entries = tools.srt_generate_for_text(text, duration_ms / 1000.0)
+                    # Generate alignment-accurate SRT for this spot+lang.
+                    srt_entries = await self._generate_aligned_srt_entries(
+                        text=text,
+                        audio_data=audio_data,
+                        language=lang,
+                        duration_ms=duration_ms,
+                    )
                     raw_srt = tools.format_srt(srt_entries)
                     srt_files.append({
                         "lang": lang,
@@ -668,6 +1387,15 @@ class PipelineExecutor:
                         "rawSrt": raw_srt,
                     })
 
+                except audio_alignment.AlignmentError as e:
+                    logger.error(
+                        "Alignment failed for %s/%s: %s",
+                        lang,
+                        spot_id,
+                        e,
+                        exc_info=True,
+                    )
+                    raise RuntimeError(f"ALIGNMENT_FAILED:{lang}/{spot_id}:{e}") from e
                 except Exception as e:
                     logger.error(f"TTS failed for {lang}/{spot_id}: {e}", exc_info=True)
                     audio_files.append({
@@ -686,7 +1414,320 @@ class PipelineExecutor:
             "srtFiles": srt_files,
             "totalAudioFiles": len([a for a in audio_files if a.get("audioUrl")]),
             "totalSrtFiles": len(srt_files),
+            "alignmentRequired": True,
+            "alignmentProvider": "google-cloud-speech",
         }
+
+    @classmethod
+    def _build_tts_text(cls, transcript: str, director_note: dict[str, Any] | None = None) -> str:
+        """Combine direction + transcript using Gemini TTS' prompt/transcript boundary."""
+        if not director_note:
+            return transcript
+
+        compiled_prompt = str(
+            director_note.get("compiledPrompt")
+            or director_note.get("stylePrompt")
+            or ""
+        ).strip()
+        if compiled_prompt:
+            prompt = cls._sanitize_compiled_tts_prompt(compiled_prompt)
+            if prompt:
+                return f"{prompt}\n\n#### TRANSCRIPT\n{transcript}"
+
+        scene = cls._first_director_note_value(director_note, "scene", "vocalEnvironment")
+        style = cls._first_director_note_value(director_note, "style", "mission", "missionOfSpeech")
+        pacing = cls._first_director_note_value(director_note, "pacing", "pacingAndEnergy")
+
+        parts: list[str] = []
+        if scene:
+            parts.extend(["## THE SCENE", scene])
+
+        director_lines = []
+        if style:
+            director_lines.append(f"Style: {style}")
+        if pacing:
+            director_lines.append(f"Pacing: {pacing}")
+        if director_lines:
+            if parts:
+                parts.append("")
+            parts.extend(["## DIRECTOR'S NOTES", *director_lines])
+
+        if not parts:
+            return transcript
+        prompt = "\n".join(parts)
+        return f"{prompt}\n\n#### TRANSCRIPT\n{transcript}"
+
+    @classmethod
+    def _sanitize_compiled_tts_prompt(cls, compiled_prompt: str) -> str:
+        """
+        Convert the UI's rich preview prompt into TTS-safe positive delivery cues.
+
+        Gemini 3.1 TTS currently returns upstream 500s for some long meta-control
+        prompt lines (for example "Do not add any bracket tags"). The preview prompt
+        is still useful as source material, but the actual TTS request should avoid
+        negative text-generation instructions and sample transcript echoes.
+        """
+        stop_headings = {"## SAMPLE CONTEXT", "#### TRANSCRIPT"}
+        skipped_prefixes = (
+            "Preferred voice model:",
+            "Do not ",
+            "Don't ",
+            "Stay in character",
+        )
+        skipped_fragments = (
+            "avoid meta commentary",
+            "ready-to-speak",
+            "Read the text naturally as written",
+        )
+        heading_map = {
+            "## AUDIO PROFILE": "Audio profile:",
+            "## THE SCENE": "Scene:",
+            "## DIRECTOR'S NOTES": "Director notes:",
+        }
+
+        lines: list[str] = []
+        for raw_line in compiled_prompt.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line in stop_headings:
+                break
+            if line.startswith("#") and line not in heading_map:
+                continue
+            if line in heading_map:
+                lines.append(heading_map[line])
+                continue
+            if line.startswith(skipped_prefixes):
+                continue
+            lowered = line.lower()
+            if any(fragment.lower() in lowered for fragment in skipped_fragments):
+                continue
+            lines.append(cls._rewrite_tts_prompt_line(line))
+
+        compact = cls._compact_tts_prompt_lines(lines)
+        return compact[:1200].rstrip()
+
+    @staticmethod
+    def _rewrite_tts_prompt_line(line: str) -> str:
+        if line.startswith("You are "):
+            return f"Character: {line.removeprefix('You are ').strip()}"
+        if line.startswith("Personality DNA:"):
+            return line.replace("Personality DNA:", "Personality:", 1)
+        if line.startswith("Linguistic fingerprint:"):
+            return line.replace("Linguistic fingerprint:", "Linguistic style:", 1)
+        return line
+
+    @staticmethod
+    def _compact_tts_prompt_lines(lines: list[str]) -> str:
+        compact: list[str] = []
+        previous_heading = False
+        for line in lines:
+            is_heading = line.endswith(":") and not line.startswith(("Style:", "Pacing:", "Scene:"))
+            if is_heading and previous_heading:
+                compact[-1] = line
+            else:
+                compact.append(line)
+            previous_heading = is_heading
+        return "\n".join(compact)
+
+    @staticmethod
+    def _first_director_note_value(director_note: dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            value = director_note.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    async def _generate_aligned_srt_entries(
+        self,
+        *,
+        text: str,
+        audio_data: bytes,
+        language: str,
+        duration_ms: int,
+    ) -> list[dict[str, Any]]:
+        alignment_text = audio_alignment.strip_performance_tags(text) or text
+        duration_sec = max(0.001, duration_ms / 1000.0)
+        timeout_seconds = min(
+            self._get_step_timeout_seconds("s9_audio_gen"),
+            ALIGNMENT_TIMEOUT_SECONDS,
+        )
+
+        forced_break_positions: set[int] | None = None
+        if ALIGNMENT_AI_SEGMENTATION_ENABLED:
+            segments = await self._segment_text_with_gemini(
+                text=alignment_text,
+                language=language,
+            )
+            if segments:
+                forced_break_positions = self._build_forced_break_positions_from_segments(
+                    reference_text=alignment_text,
+                    segments=segments,
+                )
+                if not forced_break_positions:
+                    logger.warning(
+                        "AI segmentation returned unusable segments for %s; falling back to rule-based grouping",
+                        language,
+                    )
+
+        try:
+            word_timestamps = await asyncio.to_thread(
+                audio_alignment.transcribe_audio_word_timestamps,
+                audio_data,
+                language,
+                timeout_seconds=timeout_seconds,
+            )
+            return await asyncio.to_thread(
+                audio_alignment.build_aligned_srt_entries,
+                alignment_text,
+                duration_sec,
+                word_timestamps,
+                max_cjk_chars=ALIGNMENT_MAX_CJK_CHARS,
+                max_latin_chars=ALIGNMENT_MAX_LATIN_CHARS,
+                min_cue_seconds=ALIGNMENT_MIN_CUE_SECONDS,
+                max_cue_seconds=ALIGNMENT_MAX_CUE_SECONDS,
+                forced_break_positions=forced_break_positions,
+            )
+        except audio_alignment.AlignmentError as exc:
+            lowered = str(exc).lower()
+            if any(marker in lowered for marker in RECOVERABLE_ALIGNMENT_ERROR_MARKERS):
+                logger.warning(
+                    "Recoverable alignment failure for %s; using rule-based subtitle fallback: %s",
+                    language,
+                    exc,
+                )
+                fallback = tools.srt_generate_for_text(alignment_text, duration_sec)
+                if fallback:
+                    return fallback
+            raise
+
+    async def _segment_text_with_gemini(
+        self,
+        *,
+        text: str,
+        language: str,
+    ) -> list[str] | None:
+        clean_text = (text or "").strip()
+        if not clean_text:
+            return None
+
+        user_message = self._build_ai_segmentation_prompt(
+            text=clean_text,
+            language=language,
+        )
+
+        try:
+            response = await _retry_generate_content(
+                self._client,
+                timeout_seconds=min(self._get_step_timeout_seconds("s9_audio_gen"), 20.0),
+                retry_context={
+                    "operation": "audio_alignment_segment",
+                    "step_id": "s9_audio_gen",
+                    "language": language,
+                },
+                model=MODELS["flash"],
+                contents=user_message,
+                config=genai.types.GenerateContentConfig(
+                    temperature=0.1,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("AI segmentation call failed for %s: %s", language, exc)
+            return None
+
+        raw = (response.text or "").strip()
+        if not raw:
+            return None
+
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("AI segmentation returned invalid JSON for %s", language)
+            return None
+
+        segments_raw = payload.get("segments") if isinstance(payload, dict) else None
+        if not isinstance(segments_raw, list):
+            return None
+
+        segments = [str(item).strip() for item in segments_raw if str(item).strip()]
+        if len(segments) <= 1:
+            return None
+
+        reference = "".join(char for char in clean_text if not char.isspace())
+        joined = "".join("".join(char for char in seg if not char.isspace()) for seg in segments)
+        if joined != reference:
+            logger.warning(
+                "AI segmentation text mismatch for %s; ignoring AI segments",
+                language,
+            )
+            return None
+        return segments
+
+    @staticmethod
+    def _build_ai_segmentation_prompt(*, text: str, language: str) -> str:
+        lowered = (language or "").strip().lower()
+        if lowered.startswith(("zh", "ja", "ko")):
+            language_structure_rule = (
+                "Respect CJK sentence structure: keep semantic chunks intact "
+                "(subject-topic + predicate, verb-object, modifier-noun, fixed compounds)."
+            )
+            preferred_length_rule = (
+                "Target each segment to around 6-16 CJK characters when possible; "
+                "avoid segments shorter than 3 CJK characters."
+            )
+        else:
+            language_structure_rule = (
+                "Respect sentence syntax for the target language: split mainly at clause boundaries, "
+                "and keep function words attached to their phrases."
+            )
+            preferred_length_rule = (
+                "Target each segment to around 3-12 words when possible; "
+                "avoid one- or two-word fragments unless necessary."
+            )
+
+        return (
+            f"Language: {language}\n"
+            "Task: Segment the text into subtitle-ready lines for mobile readability.\n"
+            "Rules:\n"
+            "1) Preserve original character order exactly.\n"
+            "2) Do not rewrite, add, remove, or reorder any character.\n"
+            "3) First split by punctuation boundaries; then split long spans only when necessary.\n"
+            f"4) {language_structure_rule}\n"
+            f"5) {preferred_length_rule}\n"
+            "6) Never output punctuation-only segments.\n"
+            "7) Return JSON only, format: {\"segments\":[\"...\",\"...\"]}.\n\n"
+            f"Text:\n{text}"
+        )
+
+    @staticmethod
+    def _build_forced_break_positions_from_segments(
+        *,
+        reference_text: str,
+        segments: list[str],
+    ) -> set[int] | None:
+        ref_chars = [char for char in reference_text if not char.isspace()]
+        ref_str = "".join(ref_chars)
+        segment_strs = ["".join(char for char in segment if not char.isspace()) for segment in segments]
+        if not segment_strs:
+            return None
+
+        joined = "".join(segment_strs)
+        if joined != ref_str:
+            return None
+
+        forced_break_positions: set[int] = set()
+        cursor = 0
+        for segment in segment_strs[:-1]:
+            cursor += len(segment)
+            if cursor > 0:
+                forced_break_positions.add(cursor - 1)
+        return forced_break_positions or None
 
     @staticmethod
     def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sample_width: int = 2) -> bytes:
@@ -698,6 +1739,31 @@ class PipelineExecutor:
             wf.setframerate(sample_rate)
             wf.writeframes(pcm_data)
         return buf.getvalue()
+
+    @staticmethod
+    def _extract_sample_rate_from_mime(mime_type: str, default: int = 24000) -> int:
+        """Extract sample rate (Hz) from mime strings like 'audio/L16;rate=24000'."""
+        if not mime_type:
+            return default
+        lower = mime_type.lower()
+        for token in lower.split(";"):
+            token = token.strip()
+            if token.startswith("rate="):
+                try:
+                    rate = int(token.split("=", 1)[1])
+                    if rate > 0:
+                        return rate
+                except Exception:
+                    return default
+        return default
+
+    @staticmethod
+    def _mime_indicates_raw_pcm(mime_type: str) -> bool:
+        """Return True when a mime type indicates raw PCM payload."""
+        if not mime_type:
+            return False
+        base = mime_type.split(";", 1)[0].strip().lower()
+        return base in {"audio/l16", "audio/pcm", "audio/raw", "audio/x-raw"}
 
     @staticmethod
     def _estimate_duration_ms(audio_data: bytes, mime_type: str) -> int:
@@ -714,70 +1780,373 @@ class PipelineExecutor:
         # Fallback: estimate from byte size (16-bit mono 24kHz)
         return int(len(audio_data) / (24000 * 2) * 1000)
 
+    @staticmethod
+    def _extract_audio_inline_data(response: Any) -> tuple[bytes | None, str, str | None]:
+        """Extract first inline audio payload from Gemini response candidates."""
+        candidates = getattr(response, "candidates", None) or []
+
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) if content is not None else None
+            if not parts:
+                continue
+            for part in parts:
+                inline_data = getattr(part, "inline_data", None)
+                data = getattr(inline_data, "data", None) if inline_data is not None else None
+                if not data:
+                    continue
+                mime_type = getattr(inline_data, "mime_type", None) or "audio/wav"
+                return data, mime_type, None
+
+        details: list[str] = []
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        block_reason = getattr(prompt_feedback, "block_reason", None) if prompt_feedback is not None else None
+        block_reason_message = (
+            getattr(prompt_feedback, "block_reason_message", None)
+            if prompt_feedback is not None
+            else None
+        )
+        if block_reason:
+            details.append(f"block_reason={block_reason}")
+        if block_reason_message:
+            details.append(str(block_reason_message))
+
+        response_text = getattr(response, "text", None)
+        if response_text:
+            text_preview = str(response_text).strip().replace("\n", " ")
+            if text_preview:
+                details.append(f"text={text_preview[:240]}")
+
+        for candidate in candidates:
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason:
+                details.append(f"finish_reason={finish_reason}")
+
+        suffix = f" ({'; '.join(dict.fromkeys(details))})" if details else ""
+        return None, "audio/wav", f"No audio content returned from Gemini TTS response{suffix}"
+
+    @staticmethod
+    def _is_prohibited_content_block(extraction_error: str | None) -> bool:
+        """Return True when Gemini reported a PROHIBITED_CONTENT policy block."""
+        if not extraction_error:
+            return False
+        lowered = extraction_error.lower()
+        return (
+            "block_reason=prohibited_content" in lowered
+            or "block_reason=blockedreason.prohibited_content" in lowered
+        )
+
     async def _run_from(
         self,
         session_id: str,
         start_step_index: int,
         question: str | None = None,
         uploads: list[dict[str, Any]] | None = None,
+        run_id: str | None = None,
+        request_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute pipeline steps starting from the given index."""
         session = session_service.get_session(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
+        active_run_id = run_id or f"run-{int(time.time() * 1000)}-{start_step_index}"
+        session_service.update_session(session_id, {
+            "status": "running",
+            "checkpoint_id": None,
+            "active_run_id": active_run_id,
+        })
+
         outputs = session.get("outputs", {})
+        session_context = session.get("context", {})
+        runtime_context = self._build_runtime_context(
+            session_id=session_id,
+            run_id=active_run_id,
+            session_context=session_context if isinstance(session_context, dict) else {},
+            request_metadata=request_metadata,
+        )
         # Make session context available to step executors via a reserved outputs key
-        outputs["_context"] = session.get("context", {})
+        outputs["_context"] = session_context if isinstance(session_context, dict) else {}
+        outputs["_runtime"] = runtime_context
 
         for i in range(start_step_index, len(PIPELINE_STEPS)):
             step_id = PIPELINE_STEPS[i]
+            step_attempt = session_service.next_step_attempt(session_id, step_id)
+            started_at_ms = int(time.time() * 1000)
+            step_timeout_seconds = self._get_step_timeout_seconds(step_id)
+            step_retry_stats: dict[str, int] = {"attempts": 0, "retries": 0}
+            runtime_context["activeStepId"] = step_id
+            runtime_context["stepRetryStats"] = step_retry_stats
+            logger.info(
+                "Executing step %s (session=%s run=%s attempt=%s timeout=%.1fs)",
+                step_id,
+                session_id,
+                active_run_id,
+                step_attempt,
+                step_timeout_seconds,
+            )
+            self._emit_step_telemetry(
+                event="pipeline.step.start",
+                runtime_context=runtime_context,
+                step_id=step_id,
+                attempt=step_attempt,
+                status="RUNNING",
+                duration_ms=0,
+                retries=0,
+                llm_attempts=0,
+                timeout_seconds=step_timeout_seconds,
+            )
 
             # Human gates — pause execution
             if step_id in HUMAN_GATES:
+                completed_at_ms = int(time.time() * 1000)
                 step_result = {
                     "step_id": step_id,
                     "label": STEP_LABELS[step_id],
                     "status": "STOPPED",
                     "output": None,
+                    "attempt": step_attempt,
+                    "run_id": active_run_id,
+                    "started_at_ms": started_at_ms,
+                    "completed_at_ms": completed_at_ms,
                 }
                 session_service.append_step(session_id, step_result)
                 session_service.set_checkpoint(session_id, step_id)
+                self._emit_step_telemetry(
+                    event="pipeline.step.finish",
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    attempt=step_attempt,
+                    status="STOPPED",
+                    duration_ms=completed_at_ms - started_at_ms,
+                    retries=int(step_retry_stats.get("retries", 0)),
+                    llm_attempts=int(step_retry_stats.get("attempts", 0)),
+                    timeout_seconds=step_timeout_seconds,
+                )
                 break
 
             # Pipeline complete marker
             if step_id == "pipeline_complete":
+                completed_at_ms = int(time.time() * 1000)
                 step_result = {
                     "step_id": step_id,
                     "label": STEP_LABELS[step_id],
                     "status": "FINISHED",
                     "output": {"success": True, "message": "Pipeline completed successfully"},
+                    "attempt": step_attempt,
+                    "run_id": active_run_id,
+                    "started_at_ms": started_at_ms,
+                    "completed_at_ms": completed_at_ms,
                 }
                 session_service.append_step(session_id, step_result)
                 session_service.complete_session(session_id)
+                self._emit_step_telemetry(
+                    event="pipeline.step.finish",
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    attempt=step_attempt,
+                    status="FINISHED",
+                    duration_ms=completed_at_ms - started_at_ms,
+                    retries=int(step_retry_stats.get("retries", 0)),
+                    llm_attempts=int(step_retry_stats.get("attempts", 0)),
+                    timeout_seconds=step_timeout_seconds,
+                )
                 break
 
             # Execute the step
             try:
-                output = await self._execute_step(step_id, question, uploads, outputs)
+                output = await asyncio.wait_for(
+                    self._execute_step(step_id, question, uploads, outputs),
+                    timeout=step_timeout_seconds,
+                )
+                completed_at_ms = int(time.time() * 1000)
                 step_result = {
                     "step_id": step_id,
                     "label": STEP_LABELS[step_id],
                     "status": "FINISHED",
                     "output": output,
+                    "attempt": step_attempt,
+                    "run_id": active_run_id,
+                    "started_at_ms": started_at_ms,
+                    "completed_at_ms": completed_at_ms,
                 }
                 outputs[step_id] = output
                 session_service.append_step(session_id, step_result)
-            except Exception as e:
-                logger.error(f"Step {step_id} failed: {e}", exc_info=True)
+                logger.info(
+                    "Step %s completed (session=%s run=%s attempt=%s duration_ms=%d)",
+                    step_id,
+                    session_id,
+                    active_run_id,
+                    step_attempt,
+                    completed_at_ms - started_at_ms,
+                )
+                self._emit_step_telemetry(
+                    event="pipeline.step.finish",
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    attempt=step_attempt,
+                    status="FINISHED",
+                    duration_ms=completed_at_ms - started_at_ms,
+                    retries=int(step_retry_stats.get("retries", 0)),
+                    llm_attempts=int(step_retry_stats.get("attempts", 0)),
+                    timeout_seconds=step_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                timeout_message = f"Step timed out after {step_timeout_seconds:.1f}s"
+                logger.warning(
+                    "Step %s timed out (session=%s run=%s attempt=%s timeout=%.1fs)",
+                    step_id,
+                    session_id,
+                    active_run_id,
+                    step_attempt,
+                    step_timeout_seconds,
+                )
+                completed_at_ms = int(time.time() * 1000)
                 step_result = {
                     "step_id": step_id,
                     "label": STEP_LABELS[step_id],
                     "status": "ERROR",
-                    "output": {"error": str(e)},
+                    "output": {
+                        "error": timeout_message,
+                        "error_code": "STEP_TIMEOUT",
+                        "stepId": step_id,
+                        "attempt": step_attempt,
+                    },
+                    "attempt": step_attempt,
+                    "run_id": active_run_id,
+                    "started_at_ms": started_at_ms,
+                    "completed_at_ms": completed_at_ms,
                 }
                 session_service.append_step(session_id, step_result)
-                session_service.update_session(session_id, {"status": "error"})
+                session_service.update_session(session_id, {
+                    "status": "error",
+                    "last_error": {
+                        "step_id": step_id,
+                        "attempt": step_attempt,
+                        "run_id": active_run_id,
+                        "code": "STEP_TIMEOUT",
+                        "message": timeout_message,
+                    },
+                })
+                self._emit_step_telemetry(
+                    event="pipeline.step.finish",
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    attempt=step_attempt,
+                    status="ERROR",
+                    duration_ms=completed_at_ms - started_at_ms,
+                    retries=int(step_retry_stats.get("retries", 0)),
+                    llm_attempts=int(step_retry_stats.get("attempts", 0)),
+                    timeout_seconds=step_timeout_seconds,
+                    error_code="STEP_TIMEOUT",
+                )
+                self._emit_failure_hotspot_if_needed(
+                    session_id=session_id,
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    error_code="STEP_TIMEOUT",
+                )
+                break
+            except asyncio.CancelledError as exc:
+                cancel_message = "Pipeline execution cancelled"
+                logger.warning(
+                    "Step %s cancelled (session=%s run=%s attempt=%s)",
+                    step_id,
+                    session_id,
+                    active_run_id,
+                    step_attempt,
+                )
+                completed_at_ms = int(time.time() * 1000)
+                step_result = {
+                    "step_id": step_id,
+                    "label": STEP_LABELS[step_id],
+                    "status": "ERROR",
+                    "output": {
+                        "error": cancel_message,
+                        "error_code": "PIPELINE_CANCELLED",
+                        "stepId": step_id,
+                        "attempt": step_attempt,
+                    },
+                    "attempt": step_attempt,
+                    "run_id": active_run_id,
+                    "started_at_ms": started_at_ms,
+                    "completed_at_ms": completed_at_ms,
+                }
+                session_service.append_step(session_id, step_result)
+                session_service.update_session(session_id, {
+                    "status": "error",
+                    "last_error": {
+                        "step_id": step_id,
+                        "attempt": step_attempt,
+                        "run_id": active_run_id,
+                        "code": "PIPELINE_CANCELLED",
+                        "message": cancel_message,
+                    },
+                })
+                self._emit_step_telemetry(
+                    event="pipeline.step.finish",
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    attempt=step_attempt,
+                    status="ERROR",
+                    duration_ms=completed_at_ms - started_at_ms,
+                    retries=int(step_retry_stats.get("retries", 0)),
+                    llm_attempts=int(step_retry_stats.get("attempts", 0)),
+                    timeout_seconds=step_timeout_seconds,
+                    error_code="PIPELINE_CANCELLED",
+                )
+                self._emit_failure_hotspot_if_needed(
+                    session_id=session_id,
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    error_code="PIPELINE_CANCELLED",
+                )
+                raise RuntimeError(cancel_message) from exc
+            except Exception as e:
+                logger.error(f"Step {step_id} failed: {e}", exc_info=True)
+                completed_at_ms = int(time.time() * 1000)
+                step_result = {
+                    "step_id": step_id,
+                    "label": STEP_LABELS[step_id],
+                    "status": "ERROR",
+                    "output": {
+                        "error": str(e),
+                        "stepId": step_id,
+                        "attempt": step_attempt,
+                    },
+                    "attempt": step_attempt,
+                    "run_id": active_run_id,
+                    "started_at_ms": started_at_ms,
+                    "completed_at_ms": completed_at_ms,
+                }
+                session_service.append_step(session_id, step_result)
+                session_service.update_session(session_id, {
+                    "status": "error",
+                    "last_error": {
+                        "step_id": step_id,
+                        "attempt": step_attempt,
+                        "run_id": active_run_id,
+                        "message": str(e),
+                    },
+                })
+                self._emit_step_telemetry(
+                    event="pipeline.step.finish",
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    attempt=step_attempt,
+                    status="ERROR",
+                    duration_ms=completed_at_ms - started_at_ms,
+                    retries=int(step_retry_stats.get("retries", 0)),
+                    llm_attempts=int(step_retry_stats.get("attempts", 0)),
+                    timeout_seconds=step_timeout_seconds,
+                    error_code="STEP_FAILED",
+                )
+                self._emit_failure_hotspot_if_needed(
+                    session_id=session_id,
+                    runtime_context=runtime_context,
+                    step_id=step_id,
+                    error_code="STEP_FAILED",
+                )
                 break
 
         # Reload session and build response
@@ -792,6 +2161,13 @@ class PipelineExecutor:
         outputs: dict[str, Any],
     ) -> Any:
         """Execute a single pipeline step."""
+        runtime_context = outputs.get("_runtime", {})
+        retry_tracker = None
+        if isinstance(runtime_context, dict):
+            candidate = runtime_context.get("stepRetryStats")
+            if isinstance(candidate, dict):
+                retry_tracker = candidate
+
         # Tool function steps
         if step_id == "n5_character_select":
             context = outputs.get("s4_script_gen", {})
@@ -822,10 +2198,30 @@ class PipelineExecutor:
             audio_output = outputs.get("s9_audio_gen", {})
             s9_srt_files = audio_output.get("srtFiles", [])
             s9_audio_files = audio_output.get("audioFiles", [])
+            alignment_required = bool(audio_output.get("alignmentRequired", False))
 
             if s9_srt_files:
                 # S9 produced duration-accurate SRT — build a lookup of covered (lang, spotId)
                 covered = {(s.get("lang"), s.get("spotId")) for s in s9_srt_files}
+
+                if alignment_required:
+                    expected = {
+                        (af.get("lang"), af.get("spotId"))
+                        for af in s9_audio_files
+                        if af.get("audioUrl")
+                    }
+                    missing = sorted(expected - covered)
+                    if missing:
+                        missing_labels = ", ".join(f"{lang}/{spot}" for lang, spot in missing)
+                        raise RuntimeError(
+                            f"ALIGNMENT_FAILED: missing aligned SRT for {missing_labels}"
+                        )
+                    return {
+                        "success": True,
+                        "srtFiles": list(s9_srt_files),
+                        "totalFiles": len(s9_srt_files),
+                    }
+
                 result_srt = list(s9_srt_files)  # start with S9's files
 
                 # For any script/translation NOT covered by S9, fall back to rule-based
@@ -878,6 +2274,11 @@ class PipelineExecutor:
                     "totalFiles": len(result_srt),
                 }
 
+            if alignment_required:
+                successful_audio = [af for af in s9_audio_files if af.get("audioUrl")]
+                if successful_audio:
+                    raise RuntimeError("ALIGNMENT_FAILED: no aligned SRT files were produced")
+
             # No S9 SRT available — fall back to full rule-based generation
             # S6 returns spot-first: [{spotId, translations: {en, ja, ...}}]
             # srt_generate expects language-first: [{lang, spots: [{spotId, translatedText}]}]
@@ -915,13 +2316,13 @@ class PipelineExecutor:
                     v = script["variants"]
                     script["scriptText"] = v.get("professional", v.get("academic", v.get("quick", "")))
                 scripts_list.append(script)
-            # S8 returns { directorNote: { missionOfSpeech, pacingAndEnergy, ... } }
+            # S8 now returns scene/style/pacing; keep old aliases for stored sessions.
             raw_director = outputs.get("s8_director_note", {})
             if "directorNote" in raw_director:
                 raw_director = raw_director["directorNote"]
             director_note = {
-                "vocalEnvironment": raw_director.get("vocalEnvironment", ""),
-                "mission": raw_director.get("mission", raw_director.get("missionOfSpeech", "")),
+                "scene": raw_director.get("scene", raw_director.get("vocalEnvironment", "")),
+                "style": raw_director.get("style", raw_director.get("mission", raw_director.get("missionOfSpeech", ""))),
                 "pacing": raw_director.get("pacing", raw_director.get("pacingAndEnergy", "")),
             }
             session_id = f"pipeline-tts-{os.urandom(4).hex()}"
@@ -931,10 +2332,11 @@ class PipelineExecutor:
                 voice_id=voice_id,
                 languages=["en"],
                 director_note=director_note,
+                retry_tracker=retry_tracker,
             )
 
         # Other LLM steps
-        return await self._run_llm_step(step_id, question, uploads, outputs)
+        return await self._run_llm_step(step_id, question, uploads, outputs, retry_tracker=retry_tracker)
 
     async def _run_llm_step(
         self,
@@ -942,6 +2344,7 @@ class PipelineExecutor:
         question: str | None,
         uploads: list[dict[str, Any]] | None,
         outputs: dict[str, Any],
+        retry_tracker: dict[str, int] | None = None,
     ) -> Any:
         """Run an LLM step using the Gemini API via google-genai."""
         prompt_text = load_prompt(step_id)
@@ -952,8 +2355,30 @@ class PipelineExecutor:
         user_message = self._build_user_message(step_id, question, uploads, outputs)
 
         # Call Gemini via the genai client (with retry for rate limits)
+        runtime_context = outputs.get("_runtime", {})
+        session_id = runtime_context.get("sessionId") if isinstance(runtime_context, dict) else None
+        run_id = runtime_context.get("runId") if isinstance(runtime_context, dict) else None
+        correlation_id = runtime_context.get("correlationId") if isinstance(runtime_context, dict) else None
+        tenant_id = runtime_context.get("tenantId") if isinstance(runtime_context, dict) else None
+        actor_id = runtime_context.get("actorId") if isinstance(runtime_context, dict) else None
+        tracker = retry_tracker
+        if tracker is None and isinstance(runtime_context, dict):
+            candidate = runtime_context.get("stepRetryStats")
+            if isinstance(candidate, dict):
+                tracker = candidate
         response = await _retry_generate_content(
             self._client,
+            timeout_seconds=self._get_step_timeout_seconds(step_id),
+            retry_context={
+                "operation": "pipeline_step",
+                "step_id": step_id,
+                "session_id": session_id,
+                "run_id": run_id,
+                "correlation_id": correlation_id,
+                "tenant_id": tenant_id,
+                "actor_id": actor_id,
+            },
+            retry_tracker=tracker,
             model=model,
             contents=user_message,
             config=genai.types.GenerateContentConfig(
@@ -1237,6 +2662,7 @@ class PipelineExecutor:
             })
 
         return {
+            "apiVersion": "v1",
             "sessionId": session_id,
             "checkpointId": checkpoint_id,
             "steps": response_steps,

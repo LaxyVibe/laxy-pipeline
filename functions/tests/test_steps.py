@@ -14,6 +14,7 @@ that wraps each LLM invocation.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -204,8 +205,8 @@ class TestModelSelection:
         ("s5_image_map", "flash"),
         ("s7_voice_recommend", "flash"),
         ("s8_director_note", "flash"),
-        ("s4_script_gen", "pro"),
-        ("s6_translation", "pro"),
+        ("s4_script_gen", "flash"),
+        ("s6_translation", "flash"),
         ("s9_audio_gen", "tts"),
     ])
     def test_model_assignment(self, executor, step_id: str, expected_model_key: str):
@@ -218,6 +219,101 @@ class TestModelSelection:
         llm_steps = [s for s in PIPELINE_STEPS if s.startswith("s") and s != "pipeline_complete" and s not in tool_steps]
         for step in llm_steps:
             assert step in TEMPERATURES, f"Missing temperature for {step}"
+
+
+class TestTtsAudioExtraction:
+    def test_extract_audio_inline_data_success(self, executor):
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                inline_data=SimpleNamespace(data=b"abc", mime_type="audio/mp3")
+                            )
+                        ]
+                    )
+                )
+            ],
+            prompt_feedback=None,
+            text=None,
+        )
+
+        audio_data, mime_type, error = executor._extract_audio_inline_data(response)
+        assert audio_data == b"abc"
+        assert mime_type == "audio/mp3"
+        assert error is None
+
+    def test_extract_audio_inline_data_missing_parts_returns_descriptive_error(self, executor):
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(content=None, finish_reason="SAFETY"),
+            ],
+            prompt_feedback=SimpleNamespace(
+                block_reason="SAFETY",
+                block_reason_message="Request blocked by policy",
+            ),
+            text="",
+        )
+
+        audio_data, mime_type, error = executor._extract_audio_inline_data(response)
+        assert audio_data is None
+        assert mime_type == "audio/wav"
+        assert error is not None
+        assert "No audio content returned" in error
+        assert "block_reason=SAFETY" in error
+
+
+class TestTtsPromptBuilder:
+    """Test TTS-safe prompt assembly."""
+
+    def test_compiled_prompt_is_sanitized_for_tts(self, executor):
+        compiled_prompt = "\n".join([
+            "You are Museum Manager, a calm narrator.",
+            "Preferred voice model: Sadaltager. Voice quality: Knowledgeable, warm, and mature.",
+            "## AUDIO PROFILE",
+            "Core timbre: A composed, mid-range voice.",
+            "Personality DNA: Formal and respectful.",
+            "## THE SCENE",
+            "A calm gallery.",
+            "## DIRECTOR'S NOTES",
+            "Style: Clear and grounded.",
+            "Pacing: Steady.",
+            "Do not add any bracket tags. Read the text naturally as written.",
+            "## SAMPLE CONTEXT",
+            "This sample should not be sent.",
+            "Stay in character, avoid meta commentary, and produce a natural ready-to-speak delivery.",
+        ])
+
+        result = executor._build_tts_text(
+            "Hello world.",
+            {"compiledPrompt": compiled_prompt},
+        )
+
+        assert "#### TRANSCRIPT\nHello world." in result
+        assert "Character: Museum Manager" in result
+        assert "Core timbre:" in result
+        assert "Style: Clear and grounded." in result
+        assert "Preferred voice model" not in result
+        assert "Do not add" not in result
+        assert "SAMPLE CONTEXT" not in result
+        assert "ready-to-speak" not in result
+
+    def test_legacy_director_note_fallback_uses_markdown_sections(self, executor):
+        result = executor._build_tts_text(
+            "Hello world.",
+            {
+                "vocalEnvironment": "A calm gallery.",
+                "missionOfSpeech": "Clear and grounded.",
+                "pacingAndEnergy": "Steady.",
+            },
+        )
+
+        assert "## THE SCENE\nA calm gallery." in result
+        assert "## DIRECTOR'S NOTES" in result
+        assert "Style: Clear and grounded." in result
+        assert "Pacing: Steady." in result
+        assert result.endswith("#### TRANSCRIPT\nHello world.")
 
 
 # ── LLM step execution tests ─────────────────────────────────────────────

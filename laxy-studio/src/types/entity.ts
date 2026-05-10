@@ -408,9 +408,12 @@ export const AVAILABLE_VOICES: TTSVoice[] = [
 
 /** Director note controlling TTS generation style */
 export interface DirectorNote {
-  vocalEnvironment: string;
-  mission: string;
+  scene: string;
+  style: string;
   pacing: string;
+  compiledPrompt?: string;
+  contentVersion?: string;
+  scriptEnhancementLimit?: string;
 }
 
 /** Per-spot audio file within a language */
@@ -541,13 +544,15 @@ export type PublishStatus =
 
 /** Published guide info */
 export interface PublishedGuide {
+  /** Publish job identifier */
+  publishId: string;
   /** Guide URL */
   guideUrl: string;
   /** Short URL (laxy.click/slug) */
   shortUrl: string;
   /** Custom slug */
   slug: string;
-  /** QR code data URL (generated client-side) */
+  /** QR code data URL (provided by backend) */
   qrDataUrl: string;
   /** Publish timestamp */
   publishedAt: number;

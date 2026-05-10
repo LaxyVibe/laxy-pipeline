@@ -71,10 +71,10 @@ function RunItem({ run }: RunItemProps) {
             ))}
           </Box>
           <Typography variant="caption" color="text.secondary" display="block">
-            Vocal Environment: {run.directorNote.vocalEnvironment || '—'}
+            Scene: {run.directorNote.scene || '—'}
           </Typography>
           <Typography variant="caption" color="text.secondary" display="block">
-            Mission: {run.directorNote.mission || '—'}
+            Style: {run.directorNote.style || '—'}
           </Typography>
           <Typography variant="caption" color="text.secondary" display="block">
             Pacing: {run.directorNote.pacing || '—'}

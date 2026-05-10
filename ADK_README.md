@@ -203,8 +203,8 @@ Human gates: `hg1_data_review`, `hg3_script_review`, `hg4_translation_review`, `
 | `hg4_translation_review` | Gate | — | Pause. Frontend shows `TranslationReviewStep`. Approved with `editedTranslations[]` — merged into `s6_translation` output. |
 | `n5_character_select` | Tool | — | Validates `selectedCharacterId` from session context; builds content summary for S7. |
 | `s7_voice_recommend` | LLM | `gemini-2.5-flash` (temp 0.5) | Recommends a Gemini TTS voice (`suggested` field) given character + content context. |
-| `s8_director_note` | LLM | `gemini-2.5-flash` (temp 0.6) | Generates director notes: `vocalEnvironment`, `mission`, `pacing`. Normalizes field name variants. |
-| `s9_audio_gen` | TTS | `gemini-2.5-flash-preview-tts` | Generates WAV audio for all spots (English only in pipeline). PCM (`audio/L16`) auto-converted to WAV via `wave`. Duration estimated from WAV headers. Files uploaded to `audio/{sessionId}/en/{spotId}.wav`. |
+| `s8_director_note` | LLM | `gemini-2.5-flash` (temp 0.6) | Generates director notes: `scene`, `style`, `pacing`. Normalizes legacy field name variants. |
+| `s9_audio_gen` | TTS | `TTS_MODEL` (default `gemini-2.5-flash-preview-tts`) | Generates WAV audio for all spots (English only in pipeline). PCM (`audio/L16`) auto-converted to WAV via `wave`. Duration estimated from WAV headers. Files uploaded to `audio/{sessionId}/en/{spotId}.wav`. |
 | `n6_audio_qa` | Tool | — | Validates audio files (language code, URL presence, duration). Adds `qaStatus: "pass"\|"warning"` per file. |
 | `hg5_audio_review` | Gate | — | Pause. Frontend shows `AudioProductionStep`. Approved with `characterId`, `voiceId`, `directorNote`, `pronunciationMarkers`. |
 | `n8_generation_history` | Tool | — | Compiles audit log of all completed generation steps with token usage. |
@@ -216,7 +216,7 @@ Human gates: `hg1_data_review`, `hg3_script_review`, `hg4_translation_review`, `
 MODELS = {
     "flash": "gemini-2.5-flash",
     "pro":   "gemini-2.5-pro",
-    "tts":   "gemini-2.5-flash-preview-tts",
+    "tts":   os.environ.get("TTS_MODEL", "gemini-2.5-flash-preview-tts"),
 }
 ```
 
@@ -236,7 +236,7 @@ else:
     self._client = genai.Client(vertexai=True, project=self.project_id, location=self.location)
 ```
 
-Relevant env vars: `GEMINI_API_KEY`, `GCP_PROJECT` (or `GCLOUD_PROJECT`), `GCP_REGION` (default `us-central1`).
+Relevant env vars: `GEMINI_API_KEY`, `GCP_PROJECT` (or `GCLOUD_PROJECT`), `GEMINI_LOCATION` / `VERTEX_LOCATION` (default `global`), and `TTS_MODEL` (for example `gemini-3.1-flash-tts-preview`).
 
 ---
 

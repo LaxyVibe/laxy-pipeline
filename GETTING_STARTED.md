@@ -64,7 +64,13 @@ gcloud services enable \
 ## 4. Start the Backend (Firebase Emulators)
 
 ```bash
-# From the project root
+# From the project root (recommended local flow)
+firebase emulators:start --only auth,functions,firestore,storage --project laxy-studio-dev
+```
+
+If you also need Hosting emulator:
+
+```bash
 firebase emulators:start --project laxy-studio-dev
 ```
 
@@ -75,7 +81,7 @@ All emulators defined in `firebase.json` start automatically:
 | Functions | 5001 | `http://127.0.0.1:5001` |
 | Firestore | 8080 | `http://127.0.0.1:8080` |
 | Storage | 9199 | `http://127.0.0.1:9199` |
-| Hosting (optional) | 5000 | `http://localhost:5000` |
+| Hosting (optional) | 5005 | `http://localhost:5005` |
 | Emulator UI | 4000 | `http://localhost:4000` |
 
 > The `--project` value must match `VITE_GCP_PROJECT` in your frontend `.env.local`.
@@ -98,13 +104,14 @@ EOF
 npm run dev    # -> http://localhost:5173
 ```
 
-`vite.config.ts` sets up dedicated proxy routes for all 6 pipeline endpoints:
+`vite.config.ts` sets up dedicated proxy routes for all 7 pipeline endpoints:
 
 | Frontend path | Emulator function |
 |---|---|
 | `POST /pipeline/start` | `pipeline_start` |
 | `POST /pipeline/resume` | `pipeline_resume` |
 | `GET  /pipeline/status` | `pipeline_status` |
+| `POST /pipeline/audio-session-bootstrap` | `audio_session_bootstrap` |
 | `POST /pipeline/audio-generate-language` | `audio_generate_language` |
 | `POST /pipeline/audio-generate` | `audio_generate` |
 | `POST /pipeline/translate-language` | `translate_language` |
@@ -139,7 +146,9 @@ npm run dev    # -> http://localhost:5173
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | *(unset)* | Google AI Studio key — takes priority over Vertex AI ADC |
 | `GCP_PROJECT` / `GCLOUD_PROJECT` | *(auto-detected)* | GCP project ID (Vertex AI mode) |
-| `GCP_REGION` | `us-central1` | Vertex AI region |
+| `GEMINI_LOCATION` / `VERTEX_LOCATION` | `global` | Gemini / Vertex AI model location |
+| `TTS_MODEL` | `gemini-2.5-flash-preview-tts` | Gemini TTS model, e.g. `gemini-3.1-flash-tts-preview` |
+| `PIPELINE_AUDIO_E2E_STUB` | `false` | Return deterministic per-language audio/SRT payloads for E2E stability |
 
 ---
 
@@ -154,6 +163,16 @@ python -m pytest tests/ -v
 # Frontend — 40 tests
 cd laxy-studio
 npm run test
+
+# Audio MVP E2E browser prerequisites
+npm run test:e2e:install
+
+# Audio MVP API E2E (backend endpoint flow)
+cd ..
+PIPELINE_AUDIO_E2E_STUB=true npx --yes firebase-tools --config firebase.json emulators:exec --project laxy-studio-dev --only auth,functions,firestore,storage "cd functions && RUN_AUDIO_MVP_E2E=1 E2E_FIREBASE_PROJECT=laxy-studio-dev python -m pytest tests_e2e/test_audio_mvp_api_e2e.py -v"
+
+# Audio MVP browser smoke E2E
+PIPELINE_AUDIO_E2E_STUB=true npx --yes firebase-tools --config firebase.json emulators:exec --project laxy-studio-dev --only auth,functions,firestore,storage "cd laxy-studio && E2E_FIREBASE_PROJECT=laxy-studio-dev E2E_ADMIN_EMAIL=audio-mvp-e2e-admin@example.com E2E_ADMIN_PASSWORD=Passw0rd123 E2E_ADMIN_TENANT=tenant-e2e E2E_PYTHON_CMD=python3 npm run test:e2e:smoke"
 ```
 
 ---
@@ -196,8 +215,9 @@ Browser (localhost:5173)
   |
   +-- POST /pipeline/start
   +-- POST /pipeline/resume        Vite proxy (vite.config.ts) -> Functions emulator :5001
-  +-- POST /audio-generate-language                                  |
-  +-- POST /translate-language                                       v
+  +-- POST /pipeline/audio-session-bootstrap                        |
+  +-- POST /pipeline/audio-generate-language                        |
+  +-- POST /pipeline/translate-language                             v
                                                                PipelineExecutor
                                                                  +-- Gemini API / Vertex AI
                                                                  +-- Firestore :8080  (sessions)

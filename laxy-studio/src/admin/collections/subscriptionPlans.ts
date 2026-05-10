@@ -5,7 +5,7 @@ import { buildCollection, buildProperty } from '@firecms/core';
 import { buildPermissionsFor } from '../auth/permissions';
 
 /**
- * Schema: _platform/subscriptionPlans/{planId}
+ * Schema: _platform/system/subscriptionPlans/{planId}
  *
  * Access:
  *  - Super Admin: full CRUD
@@ -16,7 +16,7 @@ export const subscriptionPlansCollection = buildCollection({
   id: 'subscriptionPlans',
   name: 'Subscription Plans',
   singularName: 'Subscription Plan',
-  path: '_platform/subscriptionPlans',
+  path: '_platform/system/subscriptionPlans',
   icon: 'CreditCard',
   group: 'Billing',
   description: 'Plan definitions — tiers, limits and pricing',

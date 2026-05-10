@@ -5,7 +5,7 @@ import { buildCollection, buildProperty } from '@firecms/core';
 import { buildPermissionsFor } from '../auth/permissions';
 
 /**
- * Schema: _platform/featureFlags/{flagId}
+ * Schema: _platform/system/featureFlags/{flagId}
  *
  * Access: Super Admin only (full CRUD)
  */
@@ -13,7 +13,7 @@ export const featureFlagsCollection = buildCollection({
   id: 'featureFlags',
   name: 'Feature Flags',
   singularName: 'Feature Flag',
-  path: '_platform/featureFlags',
+  path: '_platform/system/featureFlags',
   icon: 'Flag',
   group: 'Platform',
   description: 'Global and per-tenant feature toggles',

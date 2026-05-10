@@ -34,13 +34,15 @@ import { useGuidesStore } from '../../guidesStore';
 import {
   startPipeline,
   sendHumanInput,
-  getExecutedNodes,
-  getLastStatus,
   getStoppedNodeId,
-  getNodeOutput,
 } from '../../api';
-import type { SpotMetadata, IngestionStatus } from '../../types/entity';
+import type { IngestionStatus } from '../../types/entity';
 import { usePipelineSync } from '../../hooks/usePipelineSync';
+import {
+  buildIngestionQuestion,
+  parseIngestionPipelineResponse,
+  validateIngestionAssets,
+} from '../../workflows/ingestionWorkflow';
 import ContentSelector from './ContentSelector';
 import MetadataEditor from './MetadataEditor';
 
@@ -118,7 +120,6 @@ export default function IngestionStep() {
   const setSpots = useGuidesStore((s) => s.setSpots);
   const setPipelineIds = useGuidesStore((s) => s.setPipelineIds);
   const resetDownstreamFrom = useGuidesStore((s) => s.resetDownstreamFrom);
-  const coreLanguage = useGuidesStore((s) => s.entityConfig.coreLanguage);
   const assets = useGuidesStore((s) => s.assets);
 
   const { applyResponse, buildGatePayload } = usePipelineSync();
@@ -128,42 +129,13 @@ export default function IngestionStep() {
 
   const activeSubStep = statusToSubStep(ingestionStatus);
 
-  // Build a question string with selected asset info (includes download URLs when available)
-  const buildQuestion = useCallback(() => {
-    const selectedAssets = assets.filter((a) => selectedAssetIds.includes(a.id));
-    const assetSummary = selectedAssets
-      .map((a) => {
-        const base = `- ${a.name} (${a.mimeType})`;
-        if (a.downloadUrl) return `${base}: ${a.downloadUrl}`;
-        if (a.sourceUrl) return `${base}: ${a.sourceUrl}`;
-        return base;
-      })
-      .join('\n');
-    return `Process the following ${selectedAssets.length} asset(s) for metadata extraction.\nCore language: Japanese\n\nAssets:\n${assetSummary}`;
-  }, [assets, selectedAssetIds, coreLanguage]);
-
   // ── Trigger pipeline ──
   const handleStartIngestion = useCallback(async () => {
     if (selectedAssetIds.length === 0) return;
 
-    // Verify all selected assets have finished uploading to Firebase Storage
-    const selectedAssets = assets.filter((a) => selectedAssetIds.includes(a.id));
-    const pendingUploads = selectedAssets.filter(
-      (a) => a.source === 'file' && a.status !== 'done',
-    );
-    if (pendingUploads.length > 0) {
-      setIngestionError(
-        `${pendingUploads.length} file(s) still uploading. Please wait for uploads to finish.`,
-      );
-      return;
-    }
-    const missingUrls = selectedAssets.filter(
-      (a) => a.source === 'file' && !a.downloadUrl,
-    );
-    if (missingUrls.length > 0) {
-      setIngestionError(
-        'Some files failed to upload to storage. Please remove and re-add them.',
-      );
+    const validationError = validateIngestionAssets(assets, selectedAssetIds);
+    if (validationError) {
+      setIngestionError(validationError);
       return;
     }
 
@@ -180,116 +152,31 @@ export default function IngestionStep() {
         .map((a) => a.file)
         .filter((f): f is File => f != null);
 
-      const response = await startPipeline(buildQuestion(), sessionId, files, {
+      const response = await startPipeline(buildIngestionQuestion(assets, selectedAssetIds), sessionId, files, {
         venueName: useGuidesStore.getState().entityConfig.venueName,
         coreLanguage: useGuidesStore.getState().entityConfig.coreLanguage,
         supportedLanguages: useGuidesStore.getState().entityConfig.supportedLanguages,
         enabledModules: useGuidesStore.getState().entityConfig.enabledModules,
         selectedLayout: useGuidesStore.getState().entityConfig.selectedLayout ?? undefined,
       });
-
-      const executedNodes = getExecutedNodes(response);
-      const lastStatus = getLastStatus(response);
       const stoppedNodeId = getStoppedNodeId(response);
 
       // Store pipeline IDs for human gate interaction
       setPipelineIds(response.sessionId, stoppedNodeId);
 
-      // Try to extract spots from the S1 metadata extraction node
-      const metadataOutput = getNodeOutput(response, 'S1: Metadata Extract (Gemini)');
+      const parsed = parseIngestionPipelineResponse({
+        response,
+        selectedAssetIds,
+      });
 
-      let extractedSpots: SpotMetadata[] = [];
-
-      if (metadataOutput && typeof metadataOutput === 'object') {
-        // Expected shape: { spots: [...] } or array directly
-        const rawSpots = (metadataOutput as Record<string, unknown>).spots ??
-          (metadataOutput as Record<string, unknown>).items ??
-          (Array.isArray(metadataOutput) ? metadataOutput : null);
-
-        if (Array.isArray(rawSpots)) {
-          extractedSpots = rawSpots.map((raw: Record<string, unknown>, idx: number) => ({
-            id: (raw.id as string) ?? `spot-${Date.now()}-${idx}`,
-            spotNumber: idx + 1,
-            title: (raw.title as string) ?? '',
-            artist: (raw.artist as string) ?? '',
-            period: (raw.period as string) ?? '',
-            material: (raw.material as string) ?? '',
-            dimensions: (raw.dimensions as string) ?? '',
-            highlight: (raw.highlight as string) ?? '',
-            culturalDesignation: (raw.culturalDesignation as string) ?? (raw.cultural_designation as string) ?? '',
-            sourceText: (raw.sourceText as string) ?? undefined,
-            assetIds: selectedAssetIds,
-          }));
-        }
-      }
-
-      // Also try to get OCR text
-      const ocrOutput = getNodeOutput(response, 'S2: OCR Parse (Gemini)');
-      let ocrText: string | undefined;
-      if (typeof ocrOutput === 'string') {
-        ocrText = ocrOutput;
-      } else if (ocrOutput && typeof ocrOutput === 'object') {
-        const ocrObj = ocrOutput as Record<string, unknown>;
-        ocrText = (ocrObj.text as string) ?? (ocrObj._content as string) ?? undefined;
-      }
-
-      // Check for step-level errors BEFORE falling back to OCR text.
-      // If any critical step (S1, S2) errored, show the error even if some
-      // data was partially returned by other steps.
-      const stepErrors = (response.steps ?? [])
-        .filter((s) => s.status === 'ERROR' && s.output)
-        .map((s) => {
-          const out = s.output as Record<string, unknown>;
-          return `[${s.label}] ${(out.error as string) ?? (out.message as string) ?? 'Unknown step error'}`;
-        });
-
-      if (stepErrors.length > 0 && extractedSpots.length === 0) {
-        setIngestionError(stepErrors.join('\n'));
+      if (parsed.kind === 'error') {
+        setIngestionError(parsed.message);
         setIngestionStatus('error');
         return;
       }
 
-      // If we got OCR text but no spots (and no step errors), create a single spot with the text
-      if (extractedSpots.length === 0 && ocrText) {
-        extractedSpots = [{
-          id: `spot-${Date.now()}-0`,
-          spotNumber: 1,
-          title: 'Untitled',
-          artist: '',
-          period: '',
-          material: '',
-          dimensions: '',
-          highlight: '',
-          culturalDesignation: '',
-          sourceText: ocrText,
-          assetIds: selectedAssetIds,
-        }];
-      }
-
-      // If AI returned no spots at all, surface the error
-      if (extractedSpots.length === 0) {
-        if (response.status === 'error') {
-          setIngestionError(
-            response.finalText ?? 'Pipeline returned an error with no details.',
-          );
-        } else {
-          setIngestionError(
-            'AI could not extract any metadata from the uploaded content. ' +
-            'Please check your files and try again.',
-          );
-        }
-        setIngestionStatus('error');
-        return;
-      }
-
-      setSpots(extractedSpots);
-
-      // Check if pipeline stopped at a human gate
-      if (lastStatus === 'STOPPED' || executedNodes.includes('HG1: Data Review')) {
-        setIngestionStatus('review');
-      } else {
-        setIngestionStatus('review');
-      }
+      setSpots(parsed.spots);
+      setIngestionStatus('review');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       setIngestionError(message);
@@ -297,7 +184,7 @@ export default function IngestionStep() {
     }
   }, [
     selectedAssetIds,
-    buildQuestion,
+    assets,
     setIngestionStatus,
     setIngestionError,
     setSpots,

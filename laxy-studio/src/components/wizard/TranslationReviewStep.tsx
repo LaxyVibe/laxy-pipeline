@@ -57,7 +57,14 @@ import type {
   SpotTranslation,
   TranslationStatus,
 } from '../../types/entity';
-import { SUPPORTED_LANGUAGES, langLabel } from '../../types/entity';
+import { langLabel } from '../../types/entity';
+import {
+  buildTranslationGateApprovalPayload,
+  createInitialTranslationProgress,
+  generateTranslationsInParallel,
+  getTargetLanguages,
+  validateTranslationGenerationInput,
+} from '../../workflows/translationWorkflow';
 
 // ── Sub-step definitions ──
 
@@ -351,7 +358,7 @@ export default function TranslationReviewStep() {
 
   // Languages to translate into (all supported except core language)
   const targetLanguages = useMemo(
-    () => supportedLanguages.filter((l) => l !== coreLanguage),
+    () => getTargetLanguages(supportedLanguages, coreLanguage),
     [supportedLanguages, coreLanguage],
   );
 
@@ -369,59 +376,46 @@ export default function TranslationReviewStep() {
 
   // ── Parallel per-language translation generation ──
   const handleGenerateTranslations = useCallback(async () => {
-    if (targetLanguages.length === 0) {
-      setTranslationError(
-        'No target languages configured. Add additional languages in Entity Setup.',
-      );
-      return;
-    }
-
     const approvedScripts = scripts.filter((s) => s.approved);
-    if (approvedScripts.length === 0) {
-      setTranslationError('No approved scripts to translate.');
+    const validationError = validateTranslationGenerationInput({
+      targetLanguages,
+      approvedScripts,
+    });
+
+    if (validationError) {
+      setTranslationError(validationError);
       return;
     }
 
     setTranslationStatus('translating');
     setTranslationError(null);
 
-    // Per-language progress state
-    const initialProgress: Record<string, { status: 'pending' | 'translating' | 'done' | 'error'; error?: string }> = {};
-    targetLanguages.forEach((lang) => {
-      initialProgress[lang] = { status: 'pending' };
-    });
-    setPerLangProgress(initialProgress);
+    setPerLangProgress(createInitialTranslationProgress(targetLanguages));
 
     try {
-      // Fire off all language translations in parallel
-      const results: LanguageTranslation[] = [];
-      await Promise.all(
-        targetLanguages.map(async (lang) => {
-          setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'translating' } }));
-          try {
-            const res = await translateLanguage({
-              scripts: approvedScripts.map((s) => ({
-                spotId: s.spotId,
-                spotNumber: s.spotNumber,
-                title: s.title,
-                scriptText: s.scriptText,
-              })),
-              targetLanguage: lang,
-              coreLanguage,
-            });
-            results.push({ ...res, approved: false });
-            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'done' } }));
-          } catch (err: any) {
-            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'error', error: err?.message || 'Error' } }));
-          }
-        })
-      );
-      if (results.length === 0) {
+      const result = await generateTranslationsInParallel({
+        targetLanguages,
+        coreLanguage,
+        approvedScripts,
+        translate: translateLanguage,
+        onProgress: (language, update) => {
+          setPerLangProgress((prev) => ({
+            ...prev,
+            [language]: {
+              status: update.status,
+              ...(update.error ? { error: update.error } : {}),
+            },
+          }));
+        },
+      });
+
+      if (result.translations.length === 0) {
         setTranslationError('No translations returned.');
         setTranslationStatus('error');
         return;
       }
-      setTranslations(results);
+
+      setTranslations(result.translations);
       setTranslationStatus('review');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -442,21 +436,7 @@ export default function TranslationReviewStep() {
     setApproveLoading(true);
     setGateSyncFailed(false);
     try {
-      const approvalPayload = {
-        approvedLanguages: filteredTranslations
-          .filter((t) => t.approved)
-          .map((t) => t.lang),
-        rejectedLanguages: filteredTranslations
-          .filter((t) => !t.approved)
-          .map((t) => t.lang),
-        editedTranslations: filteredTranslations.map((lt) => ({
-          lang: lt.lang,
-          spots: lt.spots.map((sp) => ({
-            spotId: sp.spotId,
-            translatedText: sp.translatedText,
-          })),
-        })),
-      };
+      const approvalPayload = buildTranslationGateApprovalPayload(filteredTranslations);
 
       // Read pipeline IDs directly from the store to avoid stale closures
       const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();

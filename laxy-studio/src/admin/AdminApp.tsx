@@ -1,8 +1,7 @@
 // ---------------------------------------------------------------------------
 // AdminApp — FireCMS root component mounted at /admin
 // ---------------------------------------------------------------------------
-import { useMemo } from 'react';
-import { BrowserRouter } from 'react-router-dom';
+import '@firecms/ui/index.css';
 
 import {
   FireCMS,
@@ -25,7 +24,8 @@ import {
   useInitialiseFirebase,
 } from '@firecms/firebase';
 
-import { laxyAuthenticator } from './auth/authenticator';
+import { laxyAuthenticator, resolveLaxyRoles } from './auth/authenticator';
+import { ROUTES } from '../routes';
 
 // Collections
 import { tenantsCollection } from './collections/tenants';
@@ -74,6 +74,7 @@ export default function AdminApp() {
   const authController = useFirebaseAuthController({
     firebaseApp,
     signInOptions: ['password', 'google.com'],
+    defineRolesFor: resolveLaxyRoles,
   });
 
   // ------ Data sources ------
@@ -93,8 +94,8 @@ export default function AdminApp() {
     authController,
     dataSourceDelegate: firestoreDelegate,
     userConfigPersistence,
-    basePath: '/admin',
-    baseCollectionPath: '/admin/c',
+    basePath: ROUTES.admin,
+    baseCollectionPath: ROUTES.adminCollection,
   });
 
   // ------ Mode (light/dark) ------
@@ -110,35 +111,32 @@ export default function AdminApp() {
   }
 
   return (
-    <BrowserRouter basename="/admin">
-      <SnackbarProvider>
-        <ModeControllerProvider value={modeController}>
-          <FireCMS
-            authController={authController}
-            navigationController={navigationController}
-            dataSourceDelegate={firestoreDelegate}
-            storageSource={storageSource}
-            userConfigPersistence={userConfigPersistence}
-          >
-            {({ context, loading }) => {
-              if (loading) {
-                return <CircularProgressCenter />;
-              }
+    <SnackbarProvider>
+      <ModeControllerProvider value={modeController}>
+        <FireCMS
+          authController={authController}
+          navigationController={navigationController}
+          dataSourceDelegate={firestoreDelegate}
+          storageSource={storageSource}
+          userConfigPersistence={userConfigPersistence}
+        >
+          {({ context, loading }) => {
+            if (loading) {
+              return <CircularProgressCenter />;
+            }
 
-              return (
-                <Scaffold
-                  autoOpenDrawer={false}
-                  logo="/laxy-logo.svg"
-                >
-                  <AppBar title="Laxy Admin" />
-                  <Drawer />
-                  <NavigationRoutes />
-                </Scaffold>
-              );
-            }}
-          </FireCMS>
-        </ModeControllerProvider>
-      </SnackbarProvider>
-    </BrowserRouter>
+            return (
+              <Scaffold
+                autoOpenDrawer={false}
+              >
+                <AppBar title="Laxy Admin" />
+                <Drawer />
+                <NavigationRoutes />
+              </Scaffold>
+            );
+          }}
+        </FireCMS>
+      </ModeControllerProvider>
+    </SnackbarProvider>
   );
 }

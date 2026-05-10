@@ -2,42 +2,18 @@
 // Frontend unit tests: API adapter + helper functions
 // ---------------------------------------------------------------------------
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { PipelineResponse, PipelineStep } from './api';
-
-// ── We import only the pure helper functions (no firebase/fetch side-effects)
-// The helper functions are pure and can be tested directly.
-
-// Re-implement helpers inline for isolated testing (matching api.ts logic)
-function getExecutedNodes(res: PipelineResponse): string[] {
-  return (res.steps ?? []).map((s) => s.label);
-}
-function getLastStatus(res: PipelineResponse): string {
-  const steps = res.steps ?? [];
-  if (steps.length) return steps[steps.length - 1].status;
-  return normalizeSessionStatus(res.status);
-}
-
-function normalizeSessionStatus(status?: string): string {
-  switch (status) {
-    case 'awaiting_input':
-      return 'STOPPED';
-    case 'completed':
-      return 'FINISHED';
-    case 'error':
-      return 'ERROR';
-    case 'running':
-      return 'RUNNING';
-    default:
-      return 'UNKNOWN';
-  }
-}
-function getStoppedNodeId(res: PipelineResponse): string | null {
-  return res.checkpointId ?? null;
-}
-function getNodeOutput(res: PipelineResponse, label: string): unknown {
-  const step = (res.steps ?? []).find((s) => s.label === label);
-  return step?.output ?? null;
-}
+import {
+  getExecutedNodes,
+  getExecutedStepIds,
+  getLastStatus,
+  normalizeSessionStatus,
+  getStoppedNodeId,
+  getNodeOutputByStepId,
+  getNodeOutput,
+  getNodeOutputByLabel,
+  type PipelineResponse,
+  type PipelineStep,
+} from './api';
 
 // ── Fixtures ──
 
@@ -82,6 +58,28 @@ describe('getExecutedNodes', () => {
       'S2: OCR Parse (Gemini)',
       'S1: Metadata Extract (Gemini)',
       'HG1: Data Review',
+    ]);
+  });
+});
+
+describe('getExecutedStepIds', () => {
+  it('returns empty array for no steps', () => {
+    const res = makePipelineResponse({ steps: [] });
+    expect(getExecutedStepIds(res)).toEqual([]);
+  });
+
+  it('returns stepIds of all steps', () => {
+    const res = makePipelineResponse({
+      steps: [
+        makeStep({ stepId: 's2_ocr_parse' }),
+        makeStep({ stepId: 's1_metadata_extract', label: 'S1: Metadata Extract (Gemini)' }),
+        makeStep({ stepId: 'hg1_data_review', label: 'HG1: Data Review', status: 'STOPPED' }),
+      ],
+    });
+    expect(getExecutedStepIds(res)).toEqual([
+      's2_ocr_parse',
+      's1_metadata_extract',
+      'hg1_data_review',
     ]);
   });
 });
@@ -147,37 +145,71 @@ describe('getStoppedNodeId', () => {
 });
 
 describe('getNodeOutput', () => {
-  it('returns null for missing label', () => {
+  it('returns null for missing stepId', () => {
     const res = makePipelineResponse({
       steps: [makeStep({ label: 'S2: OCR Parse (Gemini)' })],
     });
-    expect(getNodeOutput(res, 'S1: Metadata Extract (Gemini)')).toBeNull();
+    expect(getNodeOutput(res, 's1_metadata_extract')).toBeNull();
   });
 
-  it('returns output for matching label', () => {
+  it('returns output for matching stepId', () => {
     const output = { spots: [{ id: 's1', title: 'Great Wave' }] };
     const res = makePipelineResponse({
-      steps: [makeStep({ label: 'S1: Metadata Extract (Gemini)', output })],
+      steps: [makeStep({ stepId: 's1_metadata_extract', label: 'S1: Metadata Extract (Gemini)', output })],
     });
-    expect(getNodeOutput(res, 'S1: Metadata Extract (Gemini)')).toEqual(output);
+    expect(getNodeOutput(res, 's1_metadata_extract')).toEqual(output);
   });
 
   it('returns null when step has no output', () => {
     const res = makePipelineResponse({
-      steps: [makeStep({ label: 'HG1: Data Review', status: 'STOPPED', output: null })],
+      steps: [makeStep({ stepId: 'hg1_data_review', label: 'HG1: Data Review', status: 'STOPPED', output: null })],
     });
-    expect(getNodeOutput(res, 'HG1: Data Review')).toBeNull();
+    expect(getNodeOutput(res, 'hg1_data_review')).toBeNull();
   });
 
-  it('returns first match when multiple steps with same label', () => {
+  it('returns first match when multiple steps with same stepId', () => {
     const res = makePipelineResponse({
       steps: [
-        makeStep({ label: 'S2: OCR Parse (Gemini)', output: { run: 1 } }),
-        makeStep({ label: 'S2: OCR Parse (Gemini)', output: { run: 2 } }),
+        makeStep({ stepId: 's2_ocr_parse', label: 'S2: OCR Parse (Gemini)', output: { run: 1 } }),
+        makeStep({ stepId: 's2_ocr_parse', label: 'S2: OCR Parse (Gemini)', output: { run: 2 } }),
       ],
     });
     // find() returns first match
-    expect(getNodeOutput(res, 'S2: OCR Parse (Gemini)')).toEqual({ run: 1 });
+    expect(getNodeOutput(res, 's2_ocr_parse')).toEqual({ run: 1 });
+  });
+});
+
+describe('getNodeOutputByStepId', () => {
+  it('returns output for matching stepId', () => {
+    const output = { scripts: [{ spotId: 'spot-1' }] };
+    const res = makePipelineResponse({
+      steps: [makeStep({ stepId: 's4_script_gen', label: 'S4: Script Gen (Gemini Pro)', output })],
+    });
+    expect(getNodeOutputByStepId(res, 's4_script_gen')).toEqual(output);
+  });
+
+  it('returns null for unknown stepId', () => {
+    const res = makePipelineResponse({
+      steps: [makeStep({ stepId: 's4_script_gen', label: 'S4: Script Gen (Gemini Pro)' })],
+    });
+    expect(getNodeOutputByStepId(res, 's5_image_map')).toBeNull();
+  });
+});
+
+describe('getNodeOutputByLabel', () => {
+  it('returns output for matching label', () => {
+    const output = { guideUrl: 'https://example.com/guide' };
+    const res = makePipelineResponse({
+      steps: [makeStep({ stepId: 'pipeline_complete', label: 'Publish Result', output })],
+    });
+    expect(getNodeOutputByLabel(res, 'Publish Result')).toEqual(output);
+  });
+
+  it('returns null for missing label', () => {
+    const res = makePipelineResponse({
+      steps: [makeStep({ stepId: 'pipeline_complete', label: 'Pipeline Complete' })],
+    });
+    expect(getNodeOutputByLabel(res, 'Publish Result')).toBeNull();
   });
 });
 
@@ -393,11 +425,362 @@ describe('fetchPipelineStatus', () => {
     const { fetchPipelineStatus } = await import('./api');
     const result = await fetchPipelineStatus('poll-session');
 
-    expect(global.fetch).toHaveBeenCalledWith(
-      '/pipeline/status?sessionId=poll-session',
-      expect.objectContaining({ method: 'GET' }),
-    );
+    const calledUrl = (global.fetch as any).mock.calls[0][0] as string;
+    const calledOptions = (global.fetch as any).mock.calls[0][1];
+    expect(calledUrl).toContain('sessionId=poll-session');
+    expect(calledUrl).toMatch(/\/pipeline\/status|pipeline-status-/);
+    expect(calledOptions).toEqual(expect.objectContaining({ method: 'GET' }));
     expect(result.sessionId).toBe('poll-session');
+  });
+});
+
+describe('bootstrapAudioSession', () => {
+  it('calls audio-session-bootstrap endpoint with context', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        sessionId: 'audio-abc123',
+        status: 'created',
+        tenantId: 'tenant-1',
+      }),
+    });
+
+    const { bootstrapAudioSession } = await import('./api');
+    const result = await bootstrapAudioSession({
+      sessionId: 'audio-abc123',
+      context: {
+        coreLanguage: 'en',
+        supportedLanguages: ['en', 'ja'],
+      },
+    });
+
+    const calledUrl = String((global.fetch as any).mock.calls[0][0]);
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(calledUrl).toMatch(/\/pipeline\/audio-session-bootstrap|audio-session-bootstrap-/);
+    expect(body.sessionId).toBe('audio-abc123');
+    expect(body.context.coreLanguage).toBe('en');
+    expect(body.context.supportedLanguages).toEqual(['en', 'ja']);
+    expect(result.sessionId).toBe('audio-abc123');
+    expect(result.status).toBe('created');
+  });
+
+  it('rejects invalid bootstrap response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        sessionId: '',
+        status: 'ok',
+      }),
+    });
+
+    const { bootstrapAudioSession } = await import('./api');
+    await expect(
+      bootstrapAudioSession({
+        sessionId: 'audio-abc123',
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SCHEMA',
+    });
+  });
+});
+
+describe('API error normalization', () => {
+  it('surfaces structured backend error envelope fields', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({
+        error: {
+          code: 'INVALID_QUERY_PARAMS',
+          message: 'Invalid query params',
+          details: [{ loc: ['sessionId'], msg: 'Field required' }],
+          retryable: false,
+        },
+      }),
+    });
+
+    const { fetchPipelineStatus } = await import('./api');
+    await expect(fetchPipelineStatus('')).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 400,
+      code: 'INVALID_QUERY_PARAMS',
+      message: 'Invalid query params',
+      retryable: false,
+    });
+  });
+
+  it('supports legacy string error payloads', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: 'sessionId is required' }),
+    });
+
+    const { startPipeline } = await import('./api');
+    await expect(startPipeline('q', '')).rejects.toThrow('sessionId is required');
+  });
+
+  it('falls back to HTTP status when error body is not JSON', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => Promise.reject(new Error('not json')),
+    });
+
+    const { fetchPipelineStatus } = await import('./api');
+    await expect(fetchPipelineStatus('sess-1')).rejects.toThrow('HTTP 503');
+  });
+
+  it('maps invalid success payload schema to INVALID_RESPONSE_SCHEMA', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        sessionId: 'sess-1',
+        checkpointId: null,
+        steps: [{ label: 'S2: OCR Parse (Gemini)', status: 'FINISHED' }],
+      }),
+    });
+
+    const { fetchPipelineStatus } = await import('./api');
+    await expect(fetchPipelineStatus('sess-1')).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SCHEMA',
+    });
+  });
+});
+
+describe('success payload validation', () => {
+  it('accepts valid generateAudio response', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        audioFiles: [
+          {
+            lang: 'en',
+            spotId: 'spot_001',
+            spotNumber: 1,
+            title: 'Entrance',
+            audioUrl: 'https://cdn/en/spot1.wav',
+            durationMs: 1000,
+          },
+        ],
+        srtFiles: [
+          {
+            lang: 'en',
+            spotId: 'spot_001',
+            entries: [
+              { index: 1, startTime: '00:00:00,000', endTime: '00:00:01,000', text: 'Hello' },
+            ],
+            rawSrt: '1\\n00:00:00,000 --> 00:00:01,000\\nHello',
+          },
+        ],
+        totalAudioFiles: 1,
+        totalSrtFiles: 1,
+      }),
+    });
+
+    const { generateAudio } = await import('./api');
+    const res = await generateAudio({
+      sessionId: 'sess-audio',
+      scripts: [{ spotId: 'spot_001', spotNumber: 1, title: 'Entrance', scriptText: 'Hello' }],
+      voiceId: 'Aoede',
+      languages: ['en'],
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.audioFiles).toHaveLength(1);
+    expect(res.srtFiles).toHaveLength(1);
+  });
+
+  it('rejects invalid generateAudio response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        audioFiles: [],
+        srtFiles: [],
+        totalAudioFiles: 0,
+        totalSrtFiles: 0,
+      }),
+    });
+
+    const { generateAudio } = await import('./api');
+    await expect(
+      generateAudio({
+        sessionId: 'sess-audio',
+        scripts: [{ spotId: 'spot_001', spotNumber: 1, title: 'Entrance', scriptText: 'Hello' }],
+        voiceId: 'Aoede',
+        languages: ['en'],
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SCHEMA',
+    });
+  });
+
+  it('rejects invalid generateAudioForLanguage response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        lang: 'en',
+        audioFiles: [
+          {
+            lang: 'en',
+            spotId: 'spot_001',
+            spotNumber: '1',
+            title: 'Entrance',
+            audioUrl: 'https://cdn/en/spot1.wav',
+            durationMs: 1000,
+          },
+        ],
+        srtFiles: [],
+      }),
+    });
+
+    const { generateAudioForLanguage } = await import('./api');
+    await expect(
+      generateAudioForLanguage({
+        sessionId: 'sess-audio',
+        scripts: [{ spotId: 'spot_001', spotNumber: 1, title: 'Entrance', scriptText: 'Hello' }],
+        voiceId: 'Aoede',
+        language: 'en',
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SCHEMA',
+    });
+  });
+
+  it('rejects invalid translateLanguage response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        lang: 'ja',
+        label: 'Japanese',
+        approved: false,
+      }),
+    });
+
+    const { translateLanguage } = await import('./api');
+    await expect(
+      translateLanguage({
+        scripts: [{ spotId: 'spot_001', spotNumber: 1, title: 'Entrance', scriptText: 'Hello' }],
+        targetLanguage: 'ja',
+        coreLanguage: 'en',
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SCHEMA',
+    });
+  });
+
+  it('accepts valid publishGuide response', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        publishId: 'pub-123',
+        status: 'published',
+        guideUrl: 'https://guide.laxy.app/g/test',
+        shortUrl: 'https://laxy.click/test',
+        slug: 'test',
+        qrDataUrl: 'data:image/svg+xml;base64,PHN2Zy8+',
+        publishedAt: 1710000000000,
+        retryable: false,
+      }),
+    });
+
+    const { publishGuide } = await import('./api');
+    const result = await publishGuide({
+      sessionId: 'publish-1',
+      venueName: 'Laxy Museum',
+      coreLanguage: 'en',
+      supportedLanguages: ['en', 'ja'],
+      spotsCount: 5,
+      scriptsCount: 5,
+      slideshowsCount: 5,
+      audioCount: 2,
+      srtCount: 2,
+    });
+
+    expect(result.publishId).toBe('pub-123');
+    expect(result.status).toBe('published');
+  });
+
+  it('rejects invalid publishGuide response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        publishId: 'pub-123',
+        status: 'published',
+      }),
+    });
+
+    const { publishGuide } = await import('./api');
+    await expect(
+      publishGuide({
+        sessionId: 'publish-1',
+        venueName: 'Laxy Museum',
+        coreLanguage: 'en',
+        supportedLanguages: ['en'],
+        spotsCount: 1,
+        scriptsCount: 1,
+        slideshowsCount: 1,
+        audioCount: 1,
+        srtCount: 1,
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SCHEMA',
+    });
+  });
+
+  it('fetches publish status response', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        publishId: 'pub-123',
+        status: 'processing',
+        guideUrl: 'https://guide.laxy.app/g/test',
+        shortUrl: 'https://laxy.click/test',
+        slug: 'test',
+        qrDataUrl: 'data:image/svg+xml;base64,PHN2Zy8+',
+        publishedAt: 1710000000000,
+        retryable: true,
+        attempts: 1,
+        maxAttempts: 3,
+      }),
+    });
+
+    const { fetchPublishStatus } = await import('./api');
+    const result = await fetchPublishStatus('pub-123');
+    const calledUrl = String((global.fetch as any).mock.calls[0][0]);
+
+    expect(result.publishId).toBe('pub-123');
+    expect(result.status).toBe('processing');
+    expect(calledUrl).toContain('publish-status');
+    expect(calledUrl).toContain('publishId=pub-123');
   });
 });
 

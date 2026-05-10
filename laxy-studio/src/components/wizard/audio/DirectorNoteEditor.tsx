@@ -19,10 +19,10 @@ export default function DirectorNoteEditor() {
 
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         <TextField
-          label="Vocal Environment"
+          label="Scene"
           placeholder="e.g. Museum gallery, quiet and reflective atmosphere"
-          value={directorNote.vocalEnvironment}
-          onChange={(e) => setDirectorNote({ vocalEnvironment: e.target.value })}
+          value={directorNote.scene}
+          onChange={(e) => setDirectorNote({ scene: e.target.value })}
           multiline
           minRows={2}
           maxRows={4}
@@ -33,10 +33,10 @@ export default function DirectorNoteEditor() {
         />
 
         <TextField
-          label="Mission of Speech"
+          label="Style"
           placeholder="e.g. Inform and inspire visitors about the cultural significance of each piece"
-          value={directorNote.mission}
-          onChange={(e) => setDirectorNote({ mission: e.target.value })}
+          value={directorNote.style}
+          onChange={(e) => setDirectorNote({ style: e.target.value })}
           multiline
           minRows={2}
           maxRows={4}

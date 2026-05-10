@@ -5,8 +5,6 @@ import { useCallback } from 'react';
 import { useGuidesStore } from '../guidesStore';
 import {
   type PipelineResponse,
-  getExecutedNodes,
-  getNodeOutput,
   getStoppedNodeId,
 } from '../api';
 
@@ -36,12 +34,10 @@ export function usePipelineSync() {
       const checkpointId = getStoppedNodeId(res);
       setPipelineIds(res.sessionId, checkpointId);
 
-      // Walk executed steps and apply their outputs
-      const labels = getExecutedNodes(res);
-      for (const label of labels) {
-        const output = getNodeOutput(res, label);
-        if (output) {
-          applyStepData(label, output);
+      // Walk executed steps and apply their outputs by canonical stepId.
+      for (const step of res.steps ?? []) {
+        if (step.output != null) {
+          applyStepData(step.stepId, step.output);
         }
       }
 

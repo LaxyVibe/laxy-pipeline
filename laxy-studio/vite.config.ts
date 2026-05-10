@@ -10,6 +10,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    test: {
+      exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
+    },
     server: {
       port: 5173,
       proxy: {
@@ -17,6 +20,11 @@ export default defineConfig(({ mode }) => {
           target: 'http://127.0.0.1:5001',
           changeOrigin: true,
           rewrite: () => `/${GCP_PROJECT}/${GCP_REGION}/audio_generate_language`,
+        },
+        '/pipeline/audio-session-bootstrap': {
+          target: 'http://127.0.0.1:5001',
+          changeOrigin: true,
+          rewrite: () => `/${GCP_PROJECT}/${GCP_REGION}/audio_session_bootstrap`,
         },
         '/pipeline/audio-generate': {
           target: 'http://127.0.0.1:5001',

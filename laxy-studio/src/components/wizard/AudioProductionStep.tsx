@@ -45,7 +45,6 @@ import type {
   SRTEntry,
 } from '../../types/entity';
 import {
-  SUPPORTED_LANGUAGES,
   langLabel,
   CHARACTER_PRESETS,
   AVAILABLE_VOICES,
@@ -60,6 +59,14 @@ import PronunciationMarkerUI from './audio/PronunciationMarker';
 import GenerationHistory from './audio/GenerationHistory';
 import SRTViewer from './audio/SRTViewer';
 import { usePipelineSync } from '../../hooks/usePipelineSync';
+import {
+  buildAudioGateApprovalPayload,
+  buildAudioScriptPayload,
+  buildDirectorNotePayload,
+  buildTranslationsByLanguage,
+  createInitialAudioProgress,
+  generateAudioInParallel,
+} from '../../workflows/audioWorkflow';
 
 // ── Sub-step definitions ──
 
@@ -219,114 +226,47 @@ export default function AudioProductionStep() {
 
     const sessionId = `audio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // Initialise per-language progress
-    const initialProgress: Record<string, { status: LangProgressStatus; error?: string }> = {};
-    selectedGenLanguages.forEach((lang) => { initialProgress[lang] = { status: 'pending' }; });
-    setPerLangProgress(initialProgress);
+    setPerLangProgress(createInitialAudioProgress(selectedGenLanguages));
 
-    // Build translation lookup per language
-    const translationsByLang: Record<string, Array<{ spotId: string; translatedText: string }>> = {};
-    translations.filter((t) => t.lang !== coreLanguage).forEach((t) => {
-      translationsByLang[t.lang] = t.spots.map((sp) => ({
-        spotId: sp.spotId,
-        translatedText: sp.translatedText,
-      }));
-    });
-
-    const scriptPayload = scripts.map((s) => ({
-      spotId: s.spotId,
-      spotNumber: s.spotNumber,
-      title: s.title,
-      scriptText: s.scriptText,
-    }));
-
-    const directorNotePayload = {
-      vocalEnvironment: directorNote.vocalEnvironment || '',
-      mission: directorNote.mission || '',
-      pacing: directorNote.pacing || '',
-    };
+    const translationsByLanguage = buildTranslationsByLanguage(translations, coreLanguage);
+    const scriptPayload = buildAudioScriptPayload(scripts);
+    const directorNotePayload = buildDirectorNotePayload(directorNote);
 
     try {
-      const allAudio: LanguageAudio[] = [];
-      const allSrt: LanguageSRT[] = [];
+      const result = await generateAudioInParallel({
+        languages: selectedGenLanguages,
+        sessionId,
+        scripts: scriptPayload,
+        voiceId: selectedVoiceId!,
+        directorNote: directorNotePayload,
+        translationsByLanguage,
+        generate: generateAudioForLanguage,
+        onProgress: (language, update) => {
+          setPerLangProgress((prev) => ({
+            ...prev,
+            [language]: {
+              status: update.status,
+              ...(update.error ? { error: update.error } : {}),
+            },
+          }));
+        },
+      });
 
-      await Promise.all(
-        selectedGenLanguages.map(async (lang) => {
-          setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'generating' } }));
-          try {
-            const res = await generateAudioForLanguage({
-              sessionId,
-              scripts: scriptPayload,
-              voiceId: selectedVoiceId!,
-              language: lang,
-              directorNote: directorNotePayload,
-              translations: translationsByLang[lang],
-            });
-
-            // Aggregate audio files for this language — keep ALL per-spot audio
-            const spotAudios: import('../../types/entity').SpotAudioFile[] = [];
-            let firstUrl = '';
-            let totalDuration = 0;
-            for (const af of res.audioFiles) {
-              if (af.audioUrl) {
-                if (!firstUrl) firstUrl = af.audioUrl;
-                spotAudios.push({
-                  spotId: af.spotId,
-                  spotNumber: af.spotNumber,
-                  title: af.title,
-                  audioUrl: af.audioUrl,
-                  durationMs: af.durationMs,
-                });
-              }
-              totalDuration += af.durationMs;
-            }
-            if (firstUrl) {
-              allAudio.push({
-                lang,
-                label: langLabel(lang),
-                audioUrl: firstUrl,
-                durationMs: totalDuration,
-                approved: false,
-                spots: spotAudios,
-              });
-            }
-
-            // Aggregate SRT files
-            const entries: SRTEntry[] = [];
-            let rawSrt = '';
-            for (const sf of res.srtFiles) {
-              const offset = entries.length;
-              for (const e of sf.entries) {
-                entries.push({ index: e.index + offset, startTime: e.startTime, endTime: e.endTime, text: e.text });
-              }
-              rawSrt += (rawSrt ? '\n' : '') + sf.rawSrt;
-            }
-            if (entries.length > 0) {
-              allSrt.push({ lang, label: langLabel(lang), entries, rawSrt });
-            }
-
-            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'done' } }));
-          } catch (err: any) {
-            setPerLangProgress((prev) => ({ ...prev, [lang]: { status: 'error', error: err?.message || 'Error' } }));
-          }
-        }),
-      );
-
-      if (allAudio.length === 0) {
+      if (result.audioFiles.length === 0) {
         setAudioError('No audio was generated for any language.');
         setAudioStatus('error');
         return;
       }
 
       setPipelineIds(sessionId, null);
-      setAudioFiles(allAudio);
-      setSrtFiles(allSrt);
+      setAudioFiles(result.audioFiles);
+      setSrtFiles(result.srtFiles);
 
       // Record generation run
       const character = CHARACTER_PRESETS.find((c) => c.id === selectedCharacterId);
       const voice = AVAILABLE_VOICES.find((v) => v.id === selectedVoiceId);
       const audioUrls: Record<string, string> = {};
-      allAudio.forEach((a) => { audioUrls[a.lang] = a.audioUrl; });
+      result.audioFiles.forEach((audio) => { audioUrls[audio.lang] = audio.audioUrl; });
 
       addGenerationRun({
         id: `run-${Date.now().toString(36)}`,
@@ -370,14 +310,13 @@ export default function AudioProductionStep() {
     setApproveLoading(true);
     setGateSyncFailed(false);
     try {
-      const approvalPayload = {
-        approvedLanguages: audioFiles.filter((a) => a.approved).map((a) => a.lang),
-        rejectedLanguages: audioFiles.filter((a) => !a.approved).map((a) => a.lang),
+      const approvalPayload = buildAudioGateApprovalPayload({
+        audioFiles,
         pronunciationMarkers: useGuidesStore.getState().pronunciationMarkers,
-        characterId: selectedCharacterId,
-        voiceId: selectedVoiceId,
+        selectedCharacterId,
+        selectedVoiceId,
         directorNote,
-      };
+      });
 
       // Read pipeline IDs directly from the store to avoid stale closures
       const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();

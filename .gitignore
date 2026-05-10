@@ -38,6 +38,8 @@ database-debug.log
 
 # === Node (root-level tooling) ===
 node_modules/
+laxy-studio/playwright-report/
+laxy-studio/test-results/
 
 # === Logs ===
 *.log

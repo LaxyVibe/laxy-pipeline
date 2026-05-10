@@ -60,11 +60,10 @@ const PERMISSION_MATRIX: Record<LaxyRoleId, Record<CollectionId, Permissions>> =
 
 /**
  * Resolve the Laxy role from the FireCMS user's roles array.
- * Falls back to 'super-admin' in dev mode if no role is set yet.
  */
 function resolveRole(user: User | null): LaxyRoleId | undefined {
   if (!user?.roles?.length) {
-    return import.meta.env.DEV ? 'super-admin' : undefined;
+    return undefined;
   }
   // Pick the highest-priority role
   const roleIds = user.roles.map((r) => r.id);

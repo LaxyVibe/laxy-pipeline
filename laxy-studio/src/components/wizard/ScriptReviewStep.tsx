@@ -54,13 +54,15 @@ import { useGuidesStore } from '../../guidesStore';
 import {
   startPipeline,
   sendHumanInput,
-  getExecutedNodes,
-  getLastStatus,
   getStoppedNodeId,
-  getNodeOutput,
 } from '../../api';
 import { usePipelineSync } from '../../hooks/usePipelineSync';
 import type { SpotScript, SpotImageMapping, ScriptStatus } from '../../types/entity';
+import {
+  buildScriptGateApprovalPayload,
+  buildScriptQuestion,
+  parseScriptPipelineResponse,
+} from '../../workflows/scriptWorkflow';
 import ImageSpotMapper from './ImageSpotMapper';
 
 // ── Sub-step definitions ──
@@ -289,7 +291,6 @@ export default function ScriptReviewStep() {
   const rejectAllScripts = useGuidesStore((s) => s.rejectAllScripts);
   const resetDownstreamFrom = useGuidesStore((s) => s.resetDownstreamFrom);
   const coreLanguage = useGuidesStore((s) => s.entityConfig.coreLanguage);
-  const assets = useGuidesStore((s) => s.assets);
   const setPipelineIds = useGuidesStore((s) => s.setPipelineIds);
 
   const { applyResponse, buildGatePayload } = usePipelineSync();
@@ -301,26 +302,6 @@ export default function ScriptReviewStep() {
   const approvedCount = scripts.filter((s) => s.approved).length;
   const fastTrackCount = scripts.filter((s) => s.fastTrack).length;
   const allApproved = scripts.length > 0 && approvedCount === scripts.length;
-
-  // ── Build question for script generation ──
-  const buildScriptQuestion = useCallback(() => {
-    const spotsSummary = spots
-      .map(
-        (s) =>
-          `Spot #${s.spotNumber}: "${s.title}" by ${s.artist || 'Unknown'} (${s.period || 'Unknown period'})` +
-          `\n  Material: ${s.material || 'N/A'}` +
-          `\n  Dimensions: ${s.dimensions || 'N/A'}` +
-          `\n  Highlight: ${s.highlight || 'N/A'}` +
-          `\n  Cultural Designation: ${s.culturalDesignation || 'N/A'}`,
-      )
-      .join('\n\n');
-
-    return (
-      `Generate audio guide scripts for the following ${spots.length} approved spots.\n` +
-      `Core language: ${coreLanguage}\n\n` +
-      `Approved Metadata:\n${spotsSummary}`
-    );
-  }, [spots, coreLanguage]);
 
   // ── Trigger script generation ──
   const handleGenerateScripts = useCallback(async () => {
@@ -355,14 +336,13 @@ export default function ScriptReviewStep() {
       } else {
         // Fallback: start a new pipeline session
         const sessionId = `script-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-        response = await startPipeline(buildScriptQuestion(), sessionId, undefined, {
+        response = await startPipeline(buildScriptQuestion(spots, coreLanguage), sessionId, undefined, {
           venueName: useGuidesStore.getState().entityConfig.venueName,
           coreLanguage: useGuidesStore.getState().entityConfig.coreLanguage,
           supportedLanguages: useGuidesStore.getState().entityConfig.supportedLanguages,
         });
       }
 
-      const executedNodes = getExecutedNodes(response);
       const stoppedNodeId = getStoppedNodeId(response);
 
       // Store pipeline IDs for human gate
@@ -371,77 +351,17 @@ export default function ScriptReviewStep() {
       // Apply response through the central sync mechanism
       applyResponse(response);
 
-      // Try to parse script generation output (S4: Script Gen)
-      const scriptOutput = getNodeOutput(response, 'S4: Script Gen (Gemini Pro)') ?? getNodeOutput(response, 'S4: Script Generation');
-      // Also try image mapping output (S5: Image Map)
-      const imageMapOutput = getNodeOutput(response, 'S5: Image Map (Gemini)') ?? getNodeOutput(response, 'S5: Image-Spot Mapping');
+      const parsed = parseScriptPipelineResponse(response, spots);
 
-      let extractedScripts: SpotScript[] = [];
-      let extractedMappings: SpotImageMapping[] = [];
-
-      if (scriptOutput && typeof scriptOutput === 'object') {
-        const rawScripts =
-          (scriptOutput as Record<string, unknown>).scripts ??
-          (scriptOutput as Record<string, unknown>).spots ??
-          (Array.isArray(scriptOutput) ? scriptOutput : null);
-
-        if (Array.isArray(rawScripts)) {
-          extractedScripts = rawScripts.map(
-            (raw: Record<string, unknown>, idx: number) => {
-              // Backend may return variants: { kids, academic, quick, professional, brief }
-              // Pick 'professional' as the default scriptText, fallback to other fields
-              let text = (raw.scriptText as string) ?? (raw.script as string) ?? (raw.text as string) ?? '';
-              if (!text && typeof raw.variants === 'object' && raw.variants !== null) {
-                const variants = raw.variants as Record<string, string>;
-                text = variants.professional ?? variants.academic ?? variants.quick ?? variants.kids ?? variants.brief ?? '';
-              }
-              return {
-                spotId: (raw.spotId as string) ?? (raw.id as string) ?? spots[idx]?.id ?? `spot-${idx}`,
-                spotNumber: (raw.spotNumber as number) ?? idx + 1,
-                title: (raw.title as string) ?? spots[idx]?.title ?? `Spot ${idx + 1}`,
-                scriptText: text,
-                approved: false,
-                fastTrack: false,
-              };
-            },
-          );
-        }
-      }
-
-      // Parse image mapping output
-      if (imageMapOutput && typeof imageMapOutput === 'object') {
-        const rawMappings =
-          (imageMapOutput as Record<string, unknown>).mappings ??
-          (imageMapOutput as Record<string, unknown>).spots ??
-          (Array.isArray(imageMapOutput) ? imageMapOutput : null);
-
-        if (Array.isArray(rawMappings)) {
-          extractedMappings = rawMappings.map(
-            (raw: Record<string, unknown>, idx: number) => ({
-              spotId: (raw.spotId as string) ?? spots[idx]?.id ?? `spot-${idx}`,
-              assignedAssetIds: Array.isArray(raw.suggestedImages)
-                ? (raw.suggestedImages as string[])
-                : Array.isArray(raw.assetIds)
-                  ? (raw.assetIds as string[])
-                  : [],
-              aiSuggested: true,
-            }),
-          );
-        }
-      }
-
-      // If pipeline returned no scripts, show an error instead of fake data
-      if (extractedScripts.length === 0) {
-        setScriptError(
-          'AI did not return any scripts. Please check the pipeline logs and try again.',
-        );
+      if (parsed.error) {
+        setScriptError(parsed.error);
         setScriptStatus('error');
         return;
       }
 
-      setScripts(extractedScripts);
-      if (extractedMappings.length > 0) {
-        setImageMappings(extractedMappings);
+      setScripts(parsed.scripts);
+      if (parsed.imageMappings.length > 0) {
+        setImageMappings(parsed.imageMappings);
       }
       setScriptStatus('review');
     } catch (err: unknown) {
@@ -452,8 +372,7 @@ export default function ScriptReviewStep() {
   }, [
     spots,
     scripts,
-    assets,
-    buildScriptQuestion,
+    coreLanguage,
     buildGatePayload,
     applyResponse,
     setScripts,
@@ -468,16 +387,7 @@ export default function ScriptReviewStep() {
     setApproveLoading(true);
     setGateSyncFailed(false);
     try {
-      // Build the approval payload with per-spot statuses
-      const approvalPayload = {
-        approvedSpots: scripts.filter((s) => s.approved).map((s) => s.spotId),
-        rejectedSpots: scripts.filter((s) => !s.approved).map((s) => s.spotId),
-        fastTrackSpots: scripts.filter((s) => s.fastTrack).map((s) => s.spotId),
-        editedScripts: scripts.map((s) => ({
-          spotId: s.spotId,
-          scriptText: s.scriptText,
-        })),
-      };
+      const approvalPayload = buildScriptGateApprovalPayload(scripts);
 
       // Read pipeline IDs directly from the store to avoid stale closures
       const { pipelineSessionId: sid, pipelineCheckpointId: cpId } = useGuidesStore.getState();
@@ -522,7 +432,7 @@ export default function ScriptReviewStep() {
         try {
           const sessionId = `hg3-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
           const response = await startPipeline(
-            buildScriptQuestion() + '\n\nUser has approved the scripts above. Continue to translation.',
+            buildScriptQuestion(spots, coreLanguage) + '\n\nUser has approved the scripts above. Continue to translation.',
             sessionId,
             undefined,
             {
@@ -546,7 +456,7 @@ export default function ScriptReviewStep() {
     } finally {
       setApproveLoading(false);
     }
-  }, [scripts, setScriptStatus, setScriptError, applyResponse, buildScriptQuestion]);
+  }, [scripts, spots, coreLanguage, setScriptStatus, setScriptError, applyResponse]);
 
   // ── Reset (cascades to all downstream steps) ──
   const handleReset = useCallback(() => {

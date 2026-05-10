@@ -21,8 +21,10 @@ import AddIcon from '@mui/icons-material/Add';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import HeadphonesIcon from '@mui/icons-material/Headphones';
 import { useNavigate } from 'react-router-dom';
 import { useGuidesStore } from '../guidesStore';
+import { ROUTES, guidePath } from '../routes';
 import type { GuideListItem } from '../types/guide';
 
 /**
@@ -63,11 +65,11 @@ export default function DashboardPage() {
     s.resetAudio();
     s.resetPublish();
     s.clearAssets();
-    navigate('/guides/new');
+    navigate(guidePath('new', 'entity-config'));
   };
 
   const handleOpenGuide = (id: string) => {
-    navigate(`/guides/${id}`);
+    navigate(guidePath(id, 'entity-config'));
   };
 
   const handleMenuOpen = (event: React.MouseEvent<HTMLElement>, id: string) => {
@@ -99,9 +101,14 @@ export default function DashboardPage() {
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 4 }}>
         <Typography variant="h4">My Guides</Typography>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={handleNewGuide}>
-          New Guide
-        </Button>
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <Button variant="outlined" startIcon={<HeadphonesIcon />} onClick={() => navigate(ROUTES.tts)}>
+            TTS
+          </Button>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={handleNewGuide}>
+            New Guide
+          </Button>
+        </Box>
       </Box>
 
       {guides.length === 0 ? (

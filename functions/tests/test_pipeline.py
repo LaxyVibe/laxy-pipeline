@@ -49,11 +49,13 @@ for mod_name, mod_mock in [
     sys.modules[mod_name] = sys.modules.get(mod_name, mod_mock)
 
 # Now import the code under test
+from agents import audio_alignment  # noqa: E402
 from agents.pipeline_agent import (  # noqa: E402
     HUMAN_GATES,
     PIPELINE_STEPS,
     STEP_LABELS,
     PipelineExecutor,
+    SessionAlreadyExistsError,
 )
 
 
@@ -66,6 +68,10 @@ def _make_in_memory_sessions() -> dict[str, dict[str, Any]]:
 
 def _make_mock_session_service(store: dict[str, dict[str, Any]]):
     """Create mock functions that back onto a dict store."""
+    idempotency_store: dict[str, dict[str, Any]] = {}
+
+    def _idp_key(session_id: str, operation: str, idempotency_key: str) -> str:
+        return f"{session_id}:{operation}:{idempotency_key}"
 
     def get_session(sid: str):
         return store.get(sid)
@@ -78,6 +84,7 @@ def _make_mock_session_service(store: dict[str, dict[str, Any]]):
             "checkpoint_id": None,
             "steps": [],
             "outputs": {},
+            "step_attempts": {},
             **(data or {}),
         }
         store[sid] = session
@@ -100,6 +107,22 @@ def _make_mock_session_service(store: dict[str, dict[str, Any]]):
         sess.setdefault("outputs", {})[step["step_id"]] = step.get("output")
         sess["current_step"] = step["step_id"]
 
+    def next_step_attempt(sid: str, step_id: str) -> int:
+        sess = store[sid]
+        attempts = sess.setdefault("step_attempts", {})
+        historical_attempts = sum(1 for step in sess.get("steps", []) if step.get("step_id") == step_id)
+        baseline = max(int(attempts.get(step_id, 0)), historical_attempts)
+        attempts[step_id] = baseline + 1
+        return attempts[step_id]
+
+    def get_idempotency_request(sid: str, operation: str, idempotency_key: str):
+        return idempotency_store.get(_idp_key(sid, operation, idempotency_key))
+
+    def upsert_idempotency_request(sid: str, operation: str, idempotency_key: str, record: dict):
+        key = _idp_key(sid, operation, idempotency_key)
+        existing = idempotency_store.get(key, {})
+        idempotency_store[key] = {**existing, **record}
+
     def set_checkpoint(sid: str, cp: str):
         store[sid]["status"] = "awaiting_input"
         store[sid]["checkpoint_id"] = cp
@@ -116,6 +139,9 @@ def _make_mock_session_service(store: dict[str, dict[str, Any]]):
         create_session=MagicMock(side_effect=create_session),
         update_session=MagicMock(side_effect=update_session),
         append_step=MagicMock(side_effect=append_step),
+        next_step_attempt=MagicMock(side_effect=next_step_attempt),
+        get_idempotency_request=MagicMock(side_effect=get_idempotency_request),
+        upsert_idempotency_request=MagicMock(side_effect=upsert_idempotency_request),
         set_checkpoint=MagicMock(side_effect=set_checkpoint),
         clear_checkpoint=MagicMock(side_effect=clear_checkpoint),
         complete_session=MagicMock(side_effect=complete_session),
@@ -142,6 +168,54 @@ def session_store():
 @pytest.fixture
 def mock_ss(session_store):
     return _make_mock_session_service(session_store)
+
+
+GATE_SEQUENCE = [
+    "hg1_data_review",
+    "hg3_script_review",
+    "hg4_translation_review",
+    "hg5_audio_review",
+]
+
+GATE_STAGE_START = {
+    "hg1_data_review": "s2_ocr_parse",
+    "hg3_script_review": "s4_script_gen",
+    "hg4_translation_review": "s6_translation",
+    "hg5_audio_review": "n5_character_select",
+}
+
+
+def _make_llm_json_response(payload: str = '{"result": "ok"}') -> MagicMock:
+    response = MagicMock()
+    response.text = payload
+    response.usage_metadata = None
+    return response
+
+
+async def _advance_to_gate(executor: PipelineExecutor, session_id: str, target_gate: str) -> dict[str, Any]:
+    """Start a session then approve through gates until target_gate is reached."""
+    result = await executor.start(session_id, "Describe this exhibit")
+    if target_gate == "hg1_data_review":
+        return result
+
+    safety = 0
+    while result.get("checkpointId") and result.get("checkpointId") != target_gate:
+        checkpoint_id = result["checkpointId"]
+        result = await executor.resume(
+            session_id,
+            checkpoint_id,
+            "approve",
+            feedback=f"advance-{checkpoint_id}",
+        )
+        safety += 1
+        if safety > len(GATE_SEQUENCE) + 1:
+            raise AssertionError("Failed to advance to target gate within expected steps")
+
+    if result.get("checkpointId") != target_gate:
+        raise AssertionError(
+            f"Expected checkpoint {target_gate}, got {result.get('checkpointId')}"
+        )
+    return result
 
 
 # ── Constants tests ───────────────────────────────────────────────────────
@@ -207,6 +281,40 @@ class TestPipelineStart:
         mock_ss.create_session.assert_called_once()
         assert mock_ss.create_session.call_args[0][0] == "sess-2"
 
+    @pytest.mark.asyncio
+    async def test_start_idempotency_key_replays_cached_response(self, executor, mock_ss):
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            mock_response = MagicMock()
+            mock_response.text = '{"result": "ok"}'
+            mock_response.usage_metadata = None
+            executor._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            first = await executor.start("sess-idem", "Describe this exhibit", idempotency_key="start-key-1")
+            first_calls = executor._client.aio.models.generate_content.await_count
+
+            second = await executor.start("sess-idem", "Describe this exhibit", idempotency_key="start-key-1")
+
+        assert second == first
+        assert executor._client.aio.models.generate_content.await_count == first_calls
+
+    @pytest.mark.asyncio
+    async def test_start_existing_session_without_idempotency_raises(self, executor, session_store, mock_ss):
+        session_store["sess-existing"] = {
+            "session_id": "sess-existing",
+            "status": "running",
+            "checkpoint_id": None,
+            "question": "existing",
+            "uploads": None,
+            "steps": [],
+            "outputs": {},
+            "current_step": None,
+            "step_attempts": {},
+        }
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            with pytest.raises(SessionAlreadyExistsError):
+                await executor.start("sess-existing", "Describe this exhibit")
+
 
 # ── resume() tests ────────────────────────────────────────────────────────
 
@@ -247,6 +355,51 @@ class TestPipelineResume:
         assert "s4_script_gen" in step_ids
 
     @pytest.mark.asyncio
+    async def test_resume_idempotency_key_replays_cached_response(self, executor, session_store, mock_ss):
+        session_store["sess-r1-idem"] = {
+            "session_id": "sess-r1-idem",
+            "status": "awaiting_input",
+            "checkpoint_id": "hg1_data_review",
+            "question": "describe this",
+            "uploads": None,
+            "steps": [
+                {"step_id": "s2_ocr_parse", "label": "S2", "status": "FINISHED", "output": {"_content": "ocr text"}},
+                {"step_id": "s1_metadata_extract", "label": "S1", "status": "FINISHED", "output": {"spots": []}},
+                {"step_id": "hg1_data_review", "label": "HG1", "status": "STOPPED", "output": None},
+            ],
+            "outputs": {
+                "s2_ocr_parse": {"_content": "ocr text"},
+                "s1_metadata_extract": {"spots": []},
+            },
+            "current_step": "hg1_data_review",
+            "step_attempts": {},
+        }
+
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            mock_response = MagicMock()
+            mock_response.text = '{"scripts": []}'
+            mock_response.usage_metadata = None
+            executor._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            first = await executor.resume(
+                "sess-r1-idem",
+                "hg1_data_review",
+                "approve",
+                idempotency_key="resume-key-1",
+            )
+            first_calls = executor._client.aio.models.generate_content.await_count
+
+            second = await executor.resume(
+                "sess-r1-idem",
+                "hg1_data_review",
+                "approve",
+                idempotency_key="resume-key-1",
+            )
+
+        assert second == first
+        assert executor._client.aio.models.generate_content.await_count == first_calls
+
+    @pytest.mark.asyncio
     async def test_reject_reruns_stage(self, executor, session_store, mock_ss):
         """Rejecting HG1 should re-run from the start (S2)."""
         session_store["sess-r2"] = {
@@ -281,6 +434,7 @@ class TestPipelineResume:
         # At minimum, s2_ocr_parse should appear again
         count_s2 = new_step_ids.count("s2_ocr_parse")
         assert count_s2 >= 2, f"Expected s2_ocr_parse to run twice, got {count_s2}"
+        assert session_store["sess-r2"].get("step_attempts", {}).get("s2_ocr_parse", 0) >= 2
 
     @pytest.mark.asyncio
     async def test_resume_unknown_session_raises(self, executor, mock_ss):
@@ -317,6 +471,93 @@ class TestPipelineResume:
         with patch("agents.pipeline_agent.session_service", mock_ss):
             with pytest.raises(ValueError, match="Unknown action"):
                 await executor.resume("sess-a", "hg1_data_review", "skip")
+
+
+class TestHumanGateEndToEnd:
+    @pytest.mark.asyncio
+    async def test_approve_flow_visits_all_human_gates_in_order(self, executor, mock_ss):
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            executor._client.aio.models.generate_content = AsyncMock(
+                return_value=_make_llm_json_response()
+            )
+
+            result = await executor.start("sess-e2e-approve", "Describe this exhibit")
+            visited_gates: list[str] = []
+
+            while result.get("checkpointId"):
+                checkpoint_id = result["checkpointId"]
+                visited_gates.append(checkpoint_id)
+                result = await executor.resume(
+                    "sess-e2e-approve",
+                    checkpoint_id,
+                    "approve",
+                    feedback=f"approved-{checkpoint_id}",
+                )
+
+        assert visited_gates == GATE_SEQUENCE
+        assert result["status"] == "completed"
+        assert result["checkpointId"] is None
+        step_ids = [step["stepId"] for step in result["steps"]]
+        assert "pipeline_complete" in step_ids
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "target_gate",
+        ["hg1_data_review", "hg3_script_review", "hg4_translation_review", "hg5_audio_review"],
+    )
+    async def test_reject_replays_current_stage_for_each_gate(self, executor, mock_ss, target_gate: str):
+        session_id = f"sess-e2e-reject-{target_gate}"
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            executor._client.aio.models.generate_content = AsyncMock(
+                return_value=_make_llm_json_response()
+            )
+
+            await _advance_to_gate(executor, session_id, target_gate)
+            result = await executor.resume(
+                session_id,
+                target_gate,
+                "reject",
+                feedback=f"needs-fix-{target_gate}",
+            )
+
+        assert result["status"] == "awaiting_input"
+        assert result["checkpointId"] == target_gate
+        step_ids = [step["stepId"] for step in result["steps"]]
+        assert step_ids.count(GATE_STAGE_START[target_gate]) >= 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "target_gate",
+        ["hg1_data_review", "hg3_script_review", "hg4_translation_review", "hg5_audio_review"],
+    )
+    async def test_approve_idempotency_replays_response_for_each_gate(self, executor, mock_ss, target_gate: str):
+        session_id = f"sess-e2e-retry-{target_gate}"
+        idempotency_key = f"retry-{target_gate}"
+        with patch("agents.pipeline_agent.session_service", mock_ss):
+            executor._client.aio.models.generate_content = AsyncMock(
+                return_value=_make_llm_json_response()
+            )
+
+            await _advance_to_gate(executor, session_id, target_gate)
+            first = await executor.resume(
+                session_id,
+                target_gate,
+                "approve",
+                feedback=f"approve-{target_gate}",
+                idempotency_key=idempotency_key,
+            )
+            calls_after_first = executor._client.aio.models.generate_content.await_count
+
+            second = await executor.resume(
+                session_id,
+                target_gate,
+                "approve",
+                feedback=f"approve-{target_gate}",
+                idempotency_key=idempotency_key,
+            )
+
+        assert second == first
+        assert executor._client.aio.models.generate_content.await_count == calls_after_first
 
 
 # ── get_status() tests ────────────────────────────────────────────────────
@@ -409,10 +650,10 @@ class TestModelSelection:
         for step in flash_steps:
             assert "flash" in executor._get_model_for_step(step).lower() or "2.0" in executor._get_model_for_step(step)
 
-    def test_pro_steps(self, executor):
-        pro_steps = ["s4_script_gen", "s6_translation"]
-        for step in pro_steps:
-            assert "pro" in executor._get_model_for_step(step).lower()
+    def test_high_throughput_steps_use_flash(self, executor):
+        high_throughput_steps = ["s4_script_gen", "s6_translation"]
+        for step in high_throughput_steps:
+            assert "flash" in executor._get_model_for_step(step).lower()
 
     def test_tts_step(self, executor):
         assert "tts" in executor._get_model_for_step("s9_audio_gen").lower()
@@ -707,6 +948,25 @@ class TestSrtDurationConsistency:
         assert s10_output.get("success") is True
         assert s10_output.get("totalFiles", 0) > 0
 
+    @pytest.mark.asyncio
+    async def test_s10_fail_closed_when_alignment_required_and_srt_missing(self, executor):
+        outputs = {
+            "s4_script_gen": {
+                "scripts": [{"spotId": "s1", "scriptText": "Hello world"}],
+            },
+            "s6_translation": {"translations": []},
+            "s9_audio_gen": {
+                "alignmentRequired": True,
+                "audioFiles": [
+                    {"lang": "en", "spotId": "s1", "audioUrl": "http://a.wav", "durationMs": 2500},
+                ],
+                "srtFiles": [],
+            },
+        }
+
+        with pytest.raises(RuntimeError, match="ALIGNMENT_FAILED"):
+            await executor._execute_step("s10_srt_gen", None, None, outputs)
+
 
 class TestAlgiebaTypo:
     """Issue #14: Backend S7 prompt should use 'Algieba' not 'Algeba'."""
@@ -717,3 +977,72 @@ class TestAlgiebaTypo:
         prompt = load_prompt("s7_voice_recommend")
         assert "Algieba" in prompt, "S7 prompt should use 'Algieba' (correct spelling)"
         assert "Algeba" not in prompt, "S7 prompt should NOT contain 'Algeba' (typo)"
+
+
+class TestAiSegmentation:
+    def test_build_ai_segmentation_prompt_for_cjk(self):
+        prompt = PipelineExecutor._build_ai_segmentation_prompt(
+            text="本圖以極為簡略的墨線描繪大黑天",
+            language="zh-TW",
+        )
+        assert "Respect CJK sentence structure" in prompt
+        assert "6-16 CJK characters" in prompt
+
+    def test_build_ai_segmentation_prompt_for_non_cjk(self):
+        prompt = PipelineExecutor._build_ai_segmentation_prompt(
+            text="This sculpture represents prosperity and good fortune.",
+            language="en",
+        )
+        assert "Respect sentence syntax for the target language" in prompt
+        assert "3-12 words" in prompt
+
+    def test_build_forced_break_positions_from_segments(self):
+        breaks = PipelineExecutor._build_forced_break_positions_from_segments(
+            reference_text="甲乙丙丁戊己",
+            segments=["甲乙", "丙丁", "戊己"],
+        )
+        assert breaks == {1, 3}
+
+    def test_build_forced_break_positions_returns_none_on_mismatch(self):
+        breaks = PipelineExecutor._build_forced_break_positions_from_segments(
+            reference_text="甲乙丙丁",
+            segments=["甲乙", "丙丁外"],
+        )
+        assert breaks is None
+
+    @pytest.mark.asyncio
+    async def test_segment_text_with_gemini_returns_segments(self, executor):
+        mock_response = MagicMock()
+        mock_response.text = '{"segments":["甲乙","丙丁"]}'
+
+        with patch("agents.pipeline_agent._retry_generate_content", new=AsyncMock(return_value=mock_response)):
+            segments = await executor._segment_text_with_gemini(text="甲乙丙丁", language="zh")
+
+        assert segments == ["甲乙", "丙丁"]
+
+    @pytest.mark.asyncio
+    async def test_segment_text_with_gemini_ignores_rewritten_text(self, executor):
+        mock_response = MagicMock()
+        mock_response.text = '{"segments":["甲乙","丙丁外"]}'
+
+        with patch("agents.pipeline_agent._retry_generate_content", new=AsyncMock(return_value=mock_response)):
+            segments = await executor._segment_text_with_gemini(text="甲乙丙丁", language="zh")
+
+        assert segments is None
+
+    @pytest.mark.asyncio
+    async def test_generate_aligned_srt_entries_falls_back_when_stt_has_no_timestamps(self, executor):
+        with patch.object(executor, "_segment_text_with_gemini", new=AsyncMock(return_value=None)):
+            with patch(
+                "agents.pipeline_agent.audio_alignment.transcribe_audio_word_timestamps",
+                side_effect=audio_alignment.AlignmentError("Speech-to-Text returned no word timestamps"),
+            ):
+                entries = await executor._generate_aligned_srt_entries(
+                    text="Hello world. This is a preview.",
+                    audio_data=b"wav",
+                    language="en",
+                    duration_ms=2400,
+                )
+
+        assert len(entries) >= 1
+        assert all("startTime" in entry and "endTime" in entry for entry in entries)

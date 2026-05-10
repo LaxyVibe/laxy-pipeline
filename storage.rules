@@ -1,8 +1,52 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function hasRole(role) {
+      return isSignedIn() && request.auth.token.role == role;
+    }
+
+    function isAdminRole() {
+      return hasRole('super-admin')
+        || hasRole('client-admin')
+        || hasRole('client-editor');
+    }
+
+    function canManageAdminAssets() {
+      return hasRole('super-admin') || hasRole('client-admin');
+    }
+
+    // Wizard authoring uploads
+    match /assets/{assetId}/{fileName=**} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /guides/{guideId}/{allPaths=**} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Admin-managed assets
+    match /tenants/logos/{fileName=**} {
+      allow read: if isSignedIn();
+      allow write: if canManageAdminAssets();
+    }
+
+    match /users/avatars/{fileName=**} {
+      allow read: if isSignedIn();
+      allow write: if canManageAdminAssets();
+    }
+
+    // Generated audio is server-written; client can read if authenticated
+    match /audio/{sessionId}/{language}/{fileName=**} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
     match /{allPaths=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

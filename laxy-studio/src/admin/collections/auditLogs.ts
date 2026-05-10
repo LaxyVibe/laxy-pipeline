@@ -5,7 +5,7 @@ import { buildCollection, buildProperty } from '@firecms/core';
 import { buildPermissionsFor } from '../auth/permissions';
 
 /**
- * Schema: _platform/auditLogs/{logId}
+ * Schema: _platform/system/auditLogs/{logId}
  *
  * Access: read-only for all roles (scoped by tenant for non-Super Admins)
  */
@@ -13,7 +13,7 @@ export const auditLogsCollection = buildCollection({
   id: 'auditLogs',
   name: 'Audit Logs',
   singularName: 'Audit Log',
-  path: '_platform/auditLogs',
+  path: '_platform/system/auditLogs',
   icon: 'History',
   group: 'Monitoring',
   description: 'Read-only audit trail of all role actions',

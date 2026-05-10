@@ -14,7 +14,7 @@
 //   S6-5  QR Code Generation
 //   S6-6  Shortlink / URL
 // ---------------------------------------------------------------------------
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -40,14 +40,11 @@ import CelebrationIcon from '@mui/icons-material/Celebration';
 
 import { useGuidesStore } from '../../guidesStore';
 import {
-  startPipeline,
-  getExecutedNodes,
-  getStoppedNodeId,
-  getNodeOutput,
+  ApiRequestError,
+  fetchPublishStatus,
+  publishGuide,
 } from '../../api';
 import type {
-  SpotSlideshow,
-  SlideshowImage,
   PublishStatus,
   PublishedGuide,
 } from '../../types/entity';
@@ -57,6 +54,12 @@ import PublishChecklist from './publish/PublishChecklist';
 import GuidePreview from './publish/GuidePreview';
 import FinalApproval from './publish/FinalApproval';
 import QRCodeCard from './publish/QRCodeCard';
+import {
+  buildInitialSlideshows,
+  buildPublishSessionId,
+  derivePublishSlug,
+  isPublishReady,
+} from '../../workflows/publishWorkflow';
 
 // ── Sub-step definitions ──
 
@@ -155,6 +158,10 @@ function PublishedSuccess({ guide }: { guide: PublishedGuide }) {
 // ── Main PublishStep ──
 
 export default function PublishStep() {
+  const ingestionStatus = useGuidesStore((s) => s.ingestionStatus);
+  const scriptStatus = useGuidesStore((s) => s.scriptStatus);
+  const translationStatus = useGuidesStore((s) => s.translationStatus);
+  const audioStatus = useGuidesStore((s) => s.audioStatus);
   const spots = useGuidesStore((s) => s.spots);
   const audioFiles = useGuidesStore((s) => s.audioFiles);
   const imageMappings = useGuidesStore((s) => s.imageMappings);
@@ -163,6 +170,7 @@ export default function PublishStep() {
   const srtFiles = useGuidesStore((s) => s.srtFiles);
   const publishStatus = useGuidesStore((s) => s.publishStatus);
   const publishError = useGuidesStore((s) => s.publishError);
+  const publishJobId = useGuidesStore((s) => s.publishJobId);
   const publishedGuide = useGuidesStore((s) => s.publishedGuide);
   const customSlug = useGuidesStore((s) => s.customSlug);
   const entityConfig = useGuidesStore((s) => s.entityConfig);
@@ -171,8 +179,8 @@ export default function PublishStep() {
   const setPublishStatus = useGuidesStore((s) => s.setPublishStatus);
   const setPublishError = useGuidesStore((s) => s.setPublishError);
   const setCustomSlug = useGuidesStore((s) => s.setCustomSlug);
+  const setPublishJobId = useGuidesStore((s) => s.setPublishJobId);
   const setPublishedGuide = useGuidesStore((s) => s.setPublishedGuide);
-  const resetPublish = useGuidesStore((s) => s.resetPublish);
 
   const [subStep, setSubStep] = useState(() => statusToSubStep(publishStatus));
 
@@ -184,40 +192,11 @@ export default function PublishStep() {
   // ── Initialize slideshows from spots on mount ──
   useEffect(() => {
     if (slideshows.length === 0 && spots.length > 0) {
-      const initial: SpotSlideshow[] = spots.map((spot, idx) => {
-        // Find images mapped to this spot from the script step
-        const mapping = imageMappings.find((m) => m.spotId === spot.id);
-        const spotAudio = audioFiles.find(
-          (a) => a.lang === entityConfig.coreLanguage,
-        );
-        const audioDuration = spotAudio ? 30 : 15; // placeholder duration
-
-        const images: SlideshowImage[] = (mapping?.assignedAssetIds ?? []).map(
-          (assetId: string, imgIdx: number) => ({
-            assetId,
-            order: imgIdx,
-            startSec: 0,
-            durationSec: 0,
-            caption: '',
-          }),
-        );
-
-        // Distribute time evenly
-        if (images.length > 0) {
-          const perImage = audioDuration / images.length;
-          images.forEach((img, i) => {
-            img.startSec = parseFloat((i * perImage).toFixed(2));
-            img.durationSec = parseFloat(perImage.toFixed(2));
-          });
-        }
-
-        return {
-          spotId: spot.id,
-          spotNumber: spot.spotNumber ?? idx + 1,
-          title: spot.title,
-          audioDurationSec: audioDuration,
-          images,
-        };
+      const initial = buildInitialSlideshows({
+        spots,
+        imageMappings,
+        audioFiles,
+        coreLanguage: entityConfig.coreLanguage,
       });
       setSlideshows(initial);
     }
@@ -225,170 +204,198 @@ export default function PublishStep() {
 
   // ── Readiness check ──
   const allReady = useMemo(() => {
-    const ingestionOk = useGuidesStore.getState().ingestionStatus === 'approved';
-    const scriptOk = useGuidesStore.getState().scriptStatus === 'approved';
-    const audioOk = useGuidesStore.getState().audioStatus === 'approved';
-    const srtOk = srtFiles.length > 0;
-    const slideshowOk = slideshows.length > 0 && slideshows.every((s) => s.images.length > 0);
+    return isPublishReady({
+      ingestionStatus,
+      scriptStatus,
+      translationStatus,
+      audioStatus,
+      supportedLanguages: entityConfig.supportedLanguages ?? [],
+      srtCount: srtFiles.length,
+      slideshows,
+    });
+  }, [
+    ingestionStatus,
+    scriptStatus,
+    translationStatus,
+    audioStatus,
+    entityConfig.supportedLanguages,
+    srtFiles.length,
+    slideshows,
+  ]);
 
-    // Translation is optional (single language may skip)
-    const transStatus = useGuidesStore.getState().translationStatus;
-    const langs = entityConfig.supportedLanguages ?? [];
-    const translationOk = langs.length <= 1 || transStatus === 'approved';
+  const pollTimeoutRef = useRef<number | null>(null);
+  const pollInFlightRef = useRef(false);
 
-    return ingestionOk && scriptOk && translationOk && audioOk && srtOk && slideshowOk;
-  }, [slideshows, srtFiles.length, entityConfig.supportedLanguages]);
+  const publishRequestBase = useMemo(() => ({
+    sessionId: buildPublishSessionId(entityConfig.venueName),
+    venueName: entityConfig.venueName,
+    coreLanguage: entityConfig.coreLanguage,
+    supportedLanguages: entityConfig.supportedLanguages,
+    customSlug: customSlug || undefined,
+    spotsCount: spots.length,
+    scriptsCount: scripts.length,
+    slideshowsCount: slideshows.length,
+    audioCount: audioFiles.length,
+    srtCount: srtFiles.length,
+  }), [
+    entityConfig.venueName,
+    entityConfig.coreLanguage,
+    entityConfig.supportedLanguages,
+    customSlug,
+    spots.length,
+    scripts.length,
+    slideshows.length,
+    audioFiles.length,
+    srtFiles.length,
+  ]);
+
+  const stopPublishPolling = useCallback(() => {
+    if (pollTimeoutRef.current !== null) {
+      window.clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+    pollInFlightRef.current = false;
+  }, []);
+
+  const applyPublishResult = useCallback((result: Awaited<ReturnType<typeof publishGuide>>) => {
+    setPublishJobId(result.publishId);
+
+    if (result.status === 'processing') {
+      setPublishError(null);
+      setPublishStatus('publishing');
+      return;
+    }
+
+    if (result.status === 'failed') {
+      setPublishStatus('error');
+      setPublishError(
+        result.retryable
+          ? 'Publish failed. Retry to start a new publish attempt.'
+          : 'Publish failed and cannot be retried.',
+      );
+      return;
+    }
+
+    if (!result.guideUrl) {
+      setPublishError('Pipeline did not return a published guide URL.');
+      setPublishStatus('error');
+      return;
+    }
+
+    const slugValue = derivePublishSlug({
+      pipelineSlug: result.slug,
+      customSlug,
+      venueName: entityConfig.venueName,
+    });
+
+    const published: PublishedGuide = {
+      publishId: result.publishId,
+      guideUrl: result.guideUrl,
+      shortUrl: result.shortUrl,
+      slug: slugValue,
+      qrDataUrl: result.qrDataUrl,
+      publishedAt: result.publishedAt || Date.now(),
+    };
+
+    setPublishedGuide(published);
+    setPublishError(null);
+    setPublishStatus('published');
+  }, [
+    customSlug,
+    entityConfig.venueName,
+    setPublishError,
+    setPublishedGuide,
+    setPublishJobId,
+    setPublishStatus,
+  ]);
+
+  const pollPublishJob = useCallback(async (jobId: string) => {
+    if (pollInFlightRef.current) {
+      return;
+    }
+
+    pollInFlightRef.current = true;
+    try {
+      const result = await fetchPublishStatus(jobId);
+      applyPublishResult(result);
+
+      if (result.status === 'processing') {
+        pollTimeoutRef.current = window.setTimeout(() => {
+          void pollPublishJob(jobId);
+        }, 2000);
+      } else {
+        stopPublishPolling();
+      }
+    } catch (err) {
+      stopPublishPolling();
+      console.error('[PublishStep] Publish status polling error:', err);
+      const message = err instanceof ApiRequestError
+        ? err.message
+        : (err instanceof Error ? err.message : 'Publish status polling failed');
+      setPublishError(message);
+      setPublishStatus('error');
+    } finally {
+      pollInFlightRef.current = false;
+    }
+  }, [applyPublishResult, setPublishError, setPublishStatus, stopPublishPolling]);
+
+  const startPublishPolling = useCallback((jobId: string) => {
+    stopPublishPolling();
+    setPublishJobId(jobId);
+    setPublishStatus('publishing');
+    pollTimeoutRef.current = window.setTimeout(() => {
+      void pollPublishJob(jobId);
+    }, 0);
+  }, [pollPublishJob, setPublishJobId, setPublishStatus, stopPublishPolling]);
+
+  useEffect(() => {
+    if (!publishJobId && publishedGuide?.publishId) {
+      setPublishJobId(publishedGuide.publishId);
+    }
+  }, [publishJobId, publishedGuide, setPublishJobId]);
+
+  useEffect(() => {
+    if (publishStatus === 'publishing' && publishJobId) {
+      startPublishPolling(publishJobId);
+    }
+  }, [publishStatus, publishJobId, startPublishPolling]);
+
+  useEffect(() => {
+    return () => {
+      stopPublishPolling();
+    };
+  }, [stopPublishPolling]);
 
   // ── Publish handler ──
   const handlePublish = useCallback(async () => {
+    stopPublishPolling();
+    setPublishedGuide(null);
     setPublishStatus('publishing');
     setPublishError(null);
 
     try {
-      // Build the question prompt for pipeline
-      const spotSummary = spots
-        .map(
-          (s, i) =>
-            `Spot ${i + 1}: "${s.title}" — ` +
-            `${imageMappings.find((m) => m.spotId === s.id)?.assignedAssetIds.length ?? 0} images, ` +
-            `script ${scripts.find((sc) => sc.spotId === s.id) ? 'ready' : 'missing'}`,
-        )
-        .join('\n');
+      const result = await publishGuide(publishRequestBase);
+      applyPublishResult(result);
 
-      const question = [
-        `[PUBLISH] Guide "${entityConfig.venueName}"`,
-        `Venue: ${entityConfig.venueName}`,
-        `Languages: ${entityConfig.coreLanguage}${(entityConfig.supportedLanguages ?? []).length > 0 ? ', ' + entityConfig.supportedLanguages!.join(', ') : ''}`,
-        `Spots (${spots.length}):`,
-        spotSummary,
-        `Audio files: ${audioFiles.length}`,
-        `SRT files: ${srtFiles.length}`,
-        `Slideshows configured: ${slideshows.length}`,
-        customSlug ? `Custom slug: ${customSlug}` : '',
-        '',
-        'Bundle and publish this guide to CDN. Generate QR code and shortlink.',
-      ]
-        .filter(Boolean)
-        .join('\n');
-
-      const sessionId = `publish-${entityConfig.venueName || 'guide'}-${Date.now()}`;
-
-      let guideUrl = '';
-      let shortUrl = '';
-      let slug = '';
-
-      try {
-        const res = await startPipeline(question, sessionId);
-        const nodes = getExecutedNodes(res);
-        console.log('[PublishStep] Executed nodes:', nodes);
-
-        // Try to parse publish result from pipeline response
-        const publishResult = getNodeOutput(res, 'Publish Result') as Record<string, unknown> | null;
-        if (publishResult) {
-          guideUrl = (publishResult.guideUrl as string) ?? '';
-          shortUrl = (publishResult.shortUrl as string) ?? '';
-          slug = (publishResult.slug as string) ?? '';
-        }
-
-        // If pipeline didn't return URLs, use the response text
-        if (!guideUrl && res.finalText) {
-          // Try to parse JSON from response text
-          try {
-            const parsed = JSON.parse(res.finalText);
-            guideUrl = parsed.guideUrl ?? parsed.url ?? '';
-            shortUrl = parsed.shortUrl ?? '';
-            slug = parsed.slug ?? '';
-          } catch {
-            // Non-JSON response — use as guide URL
-            guideUrl = res.finalText.includes('http') ? res.finalText.trim() : '';
-          }
-        }
-      } catch (err) {
-        const pipelineMsg = err instanceof Error ? err.message : 'Pipeline unavailable';
-        setPublishError(pipelineMsg);
-        setPublishStatus('error');
-        return;
+      if (result.status === 'processing') {
+        startPublishPolling(result.publishId);
       }
-
-      if (!guideUrl) {
-        setPublishError('Pipeline did not return a published guide URL.');
-        setPublishStatus('error');
-        return;
-      }
-
-      const slugValue =
-        slug ||
-        customSlug ||
-        (entityConfig.venueName || 'guide')
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '');
-
-      // Generate QR data URL
-      const qrCanvas = document.createElement('canvas');
-      const qrSize = 300;
-      qrCanvas.width = qrSize;
-      qrCanvas.height = qrSize;
-      const qrCtx = qrCanvas.getContext('2d');
-      let qrDataUrl = '';
-      if (qrCtx) {
-        qrCtx.fillStyle = '#ffffff';
-        qrCtx.fillRect(0, 0, qrSize, qrSize);
-        // Simplified QR-like placeholder
-        const cells = 25;
-        const cs = qrSize / cells;
-        const h = Array.from(guideUrl).reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0);
-        qrCtx.fillStyle = '#000000';
-        for (let r = 0; r < cells; r++) {
-          for (let c = 0; c < cells; c++) {
-            if ((r < 8 && c < 8) || (r < 8 && c > cells - 9) || (r > cells - 9 && c < 8)) {
-              // Finder patterns
-              const fx = c < 8 ? 0 : cells - 7;
-              const fy = r < 8 ? 0 : cells - 7;
-              const rx = c - fx;
-              const ry = r - fy;
-              const border = rx === 0 || rx === 6 || ry === 0 || ry === 6;
-              const inner = rx >= 2 && rx <= 4 && ry >= 2 && ry <= 4;
-              if (border || inner) {
-                qrCtx.fillRect(c * cs, r * cs, cs, cs);
-              }
-              continue;
-            }
-            if (((h + r * 37 + c * 53) & 0xffffffff) % 3 === 0) {
-              qrCtx.fillRect(c * cs, r * cs, cs, cs);
-            }
-          }
-        }
-        qrDataUrl = qrCanvas.toDataURL('image/png');
-      }
-
-      const published: PublishedGuide = {
-        guideUrl,
-        shortUrl,
-        slug: slugValue,
-        qrDataUrl,
-        publishedAt: Date.now(),
-      };
-
-      setPublishedGuide(published);
-      setPublishStatus('published');
     } catch (err) {
       console.error('[PublishStep] Publish error:', err);
-      setPublishError(err instanceof Error ? err.message : 'Publish failed');
+      const message = err instanceof ApiRequestError
+        ? err.message
+        : (err instanceof Error ? err.message : 'Publish failed');
+      setPublishError(message);
       setPublishStatus('error');
     }
   }, [
-    spots,
-    scripts,
-    imageMappings,
-    audioFiles,
-    srtFiles,
-    slideshows,
-    entityConfig,
-    customSlug,
-    setPublishStatus,
+    applyPublishResult,
+    publishRequestBase,
     setPublishError,
+    setPublishStatus,
     setPublishedGuide,
+    startPublishPolling,
+    stopPublishPolling,
   ]);
 
   // ── Navigation ──
@@ -415,17 +422,52 @@ export default function PublishStep() {
       setPublishStatus('idle');
       setSubStep(0);
     } else if (subStep === 2 && publishStatus !== 'published') {
+      stopPublishPolling();
       setPublishError(null); // clear stale errors on back-navigation
       setPublishStatus('previewing');
       setSubStep(1);
     }
-  }, [subStep, publishStatus, setPublishStatus, setPublishError]);
+  }, [subStep, publishStatus, setPublishStatus, setPublishError, stopPublishPolling]);
 
   // ── Retry / Reset ──
-  const handleRetry = useCallback(() => {
-    resetPublish();
-    setSubStep(0);
-  }, [resetPublish]);
+  const handleRetry = useCallback(async () => {
+    if (!publishJobId) {
+      await handlePublish();
+      return;
+    }
+
+    stopPublishPolling();
+    setPublishStatus('publishing');
+    setPublishError(null);
+
+    try {
+      const result = await publishGuide({
+        ...publishRequestBase,
+        publishId: publishJobId,
+        retry: true,
+      });
+      applyPublishResult(result);
+      if (result.status === 'processing') {
+        startPublishPolling(result.publishId);
+      }
+    } catch (err) {
+      console.error('[PublishStep] Retry publish error:', err);
+      const message = err instanceof ApiRequestError
+        ? err.message
+        : (err instanceof Error ? err.message : 'Retry publish failed');
+      setPublishError(message);
+      setPublishStatus('error');
+    }
+  }, [
+    applyPublishResult,
+    handlePublish,
+    publishJobId,
+    publishRequestBase,
+    setPublishError,
+    setPublishStatus,
+    startPublishPolling,
+    stopPublishPolling,
+  ]);
 
   // ── Sub-step content ──
   const renderSubStep = () => {
