@@ -14,7 +14,8 @@ import {
 } from '../audioMvp/model';
 import type { AudioDirectorDraft, CharacterEditorDraft } from './types';
 
-export const AUDIO_DIRECTOR_DRAFT_STORAGE_KEY = 'audio-director-draft-v1';
+export const AUDIO_DIRECTOR_DRAFT_STORAGE_KEY = 'audio-director-draft-v2';
+export const LEGACY_AUDIO_DIRECTOR_DRAFT_STORAGE_KEY = 'audio-director-draft-v1';
 export const LEGACY_AUDIO_MVP2_DRAFT_STORAGE_KEY = 'audio-mvp2-draft-v1';
 
 const DETECT_MIN_CONFIDENCE = 0.86;
@@ -123,10 +124,22 @@ export function writeLocalStorage(key: string, value: unknown) {
 export function readStoredAudioDirectorDraft(): AudioDirectorDraft | null {
   const current = readLocalStorage<AudioDirectorDraft | null>(AUDIO_DIRECTOR_DRAFT_STORAGE_KEY, null);
   if (current) return normalizeAudioDirectorDraft(current);
-  return normalizeAudioDirectorDraft(readLocalStorage<AudioDirectorDraft | null>(LEGACY_AUDIO_MVP2_DRAFT_STORAGE_KEY, null));
+
+  const legacyAudioDirector = readLocalStorage<AudioDirectorDraft | null>(LEGACY_AUDIO_DIRECTOR_DRAFT_STORAGE_KEY, null);
+  if (legacyAudioDirector) {
+    return normalizeAudioDirectorDraft(legacyAudioDirector, { dropScriptBoundState: true });
+  }
+
+  return normalizeAudioDirectorDraft(
+    readLocalStorage<AudioDirectorDraft | null>(LEGACY_AUDIO_MVP2_DRAFT_STORAGE_KEY, null),
+    { dropScriptBoundState: true },
+  );
 }
 
-function normalizeAudioDirectorDraft(raw: unknown): AudioDirectorDraft | null {
+function normalizeAudioDirectorDraft(
+  raw: unknown,
+  options: { dropScriptBoundState?: boolean } = {},
+): AudioDirectorDraft | null {
   if (typeof raw !== 'object' || raw === null) return null;
 
   const value = raw as Partial<AudioDirectorDraft>;
@@ -144,27 +157,32 @@ function normalizeAudioDirectorDraft(raw: unknown): AudioDirectorDraft | null {
     },
   } satisfies AudioGuideSettings;
   const globalSettings = normalizeAudioGuideSettings(value.globalSettings, defaultSettings);
-
-  return {
-    manuscriptText: typeof value.manuscriptText === 'string' ? value.manuscriptText : '',
-    sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
-    coreLanguage: typeof value.coreLanguage === 'string' ? value.coreLanguage : 'en',
-    scriptEnhancementEnabled: value.scriptEnhancementEnabled === true,
-    globalSettings,
-    items: Array.isArray(value.items)
+  const dropScriptBoundState = options.dropScriptBoundState === true;
+  const manuscriptText = typeof value.manuscriptText === 'string' ? value.manuscriptText : '';
+  const normalizedItems = dropScriptBoundState
+    ? []
+    : Array.isArray(value.items)
       ? value.items
         .map((item) => normalizeAudioPoiDraft(item, globalSettings))
         .filter((item): item is AudioPoiDraft => Boolean(item))
-      : [],
+      : [];
+
+  return {
+    manuscriptText,
+    sessionId: dropScriptBoundState ? null : typeof value.sessionId === 'string' ? value.sessionId : null,
+    coreLanguage: typeof value.coreLanguage === 'string' ? value.coreLanguage : 'en',
+    scriptEnhancementEnabled: value.scriptEnhancementEnabled === true,
+    globalSettings,
+    items: normalizedItems,
     customCharacters: Array.isArray(value.customCharacters)
       ? value.customCharacters
         .map(normalizeAudioMvpCharacter)
         .filter((item): item is AudioMvpCharacter => Boolean(item))
       : [],
-    enhancementCache: value.enhancementCache && typeof value.enhancementCache === 'object'
+    enhancementCache: !dropScriptBoundState && value.enhancementCache && typeof value.enhancementCache === 'object'
       ? value.enhancementCache
       : {},
-    generationHistory: Array.isArray(value.generationHistory)
+    generationHistory: !dropScriptBoundState && Array.isArray(value.generationHistory)
       ? value.generationHistory
       : [],
   };

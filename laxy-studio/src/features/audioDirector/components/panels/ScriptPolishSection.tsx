@@ -36,6 +36,13 @@ type Props = {
   onToggleEnhancement: (enabled: boolean) => void;
   onEnhanceAll: (forceRegenerate?: boolean) => void;
   onChangeEnhancedScript: (language: string, item: AudioPoiDraft, nextText: string) => void;
+  onChangePhoneticOverrides?: (
+    language: string,
+    item: AudioPoiDraft,
+    overrides: Array<{ source: string; target: string }>,
+  ) => void;
+  eyebrow?: string;
+  mode?: 'card' | 'plain';
 };
 
 type ScriptView = 'original' | 'polished';
@@ -53,80 +60,89 @@ export default function ScriptPolishSection(props: Props) {
     onToggleEnhancement,
     onEnhanceAll,
     onChangeEnhancedScript,
+    eyebrow = 'Right center column',
+    mode = 'card',
   } = props;
 
   const hasEnhancement = Object.keys(activeEnhancementEntries).length > 0;
+  const content = (
+    <Stack spacing={2.5}>
+      <Stack spacing={2}>
+        <AudioDirectorSectionHeader
+          icon={<AutoAwesomeIcon />}
+          title="Script polish"
+          body="Review the original transcript and the polished version side by side through tabs."
+          eyebrow={eyebrow}
+        />
+
+        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+          <Chip label={`Language: ${langLabel(coreLanguage)}`} variant="outlined" />
+        </Stack>
+
+        {generationError ? <Alert severity="error">{generationError}</Alert> : null}
+
+        <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems={{ xs: 'stretch', lg: 'center' }}>
+          <FormControlLabel
+            control={(
+              <Checkbox
+                checked={scriptEnhancementEnabled}
+                onChange={(event) => onToggleEnhancement(event.target.checked)}
+              />
+            )}
+            label="Enable performance cue enhancement"
+          />
+
+          <Button
+            variant="outlined"
+            startIcon={isEnhancing ? <RefreshIcon /> : hasEnhancement ? <RefreshIcon /> : <AutoAwesomeIcon />}
+            onClick={() => onEnhanceAll(hasEnhancement)}
+            disabled={!scriptEnhancementEnabled || isGenerating || isEnhancing}
+          >
+            {isEnhancing ? 'Enhancing…' : hasEnhancement ? 'Re-run enhance script' : 'Run enhance script'}
+          </Button>
+        </Stack>
+
+        <Alert severity={scriptEnhancementEnabled ? 'info' : 'warning'}>
+          {scriptEnhancementEnabled
+            ? 'Performance cues are active. Use the enhance button here when you want a polished script. Generate audio will not run enhancement automatically.'
+            : 'Performance cues are off. Audio generation will use the clean script directly.'}
+        </Alert>
+      </Stack>
+
+      {items.length === 0 ? (
+        <Alert severity="info">
+          Add guide text first to prepare and polish your script.
+        </Alert>
+      ) : (
+        <Stack spacing={1.5}>
+          {items.map((item) => {
+            const settings = getItemSettings(item);
+            const entry = activeEnhancementEntries[item.spotId];
+            return (
+              <ScriptPolishItemCard
+                key={`${coreLanguage}-${item.spotId}`}
+                item={item}
+                coreLanguage={coreLanguage}
+                entry={entry}
+                scriptEnhancementEnabled={scriptEnhancementEnabled}
+                scriptEnhancementLimit={settings.scriptEnhancementLimit}
+                onChangeEnhancedScript={onChangeEnhancedScript}
+              />
+            );
+          })}
+        </Stack>
+      )}
+    </Stack>
+  );
+
+  if (mode === 'plain') {
+    return content;
+  }
 
   return (
     <Card sx={audioDirectorStyles.sectionCard}>
       <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
-        <Stack spacing={2.5}>
-          <Stack spacing={2}>
-            <AudioDirectorSectionHeader
-              icon={<AutoAwesomeIcon />}
-              title="Script polish"
-              body="Review the original transcript and the polished version side by side through tabs."
-              eyebrow="Right center column"
-            />
-
-            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-              <Chip label={`Language: ${langLabel(coreLanguage)}`} variant="outlined" />
-            </Stack>
-
-            {generationError ? <Alert severity="error">{generationError}</Alert> : null}
-
-            <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems={{ xs: 'stretch', lg: 'center' }}>
-              <FormControlLabel
-                control={(
-                  <Checkbox
-                    checked={scriptEnhancementEnabled}
-                    onChange={(event) => onToggleEnhancement(event.target.checked)}
-                  />
-                )}
-                label="Enable performance cue enhancement"
-              />
-
-              <Button
-                variant="outlined"
-                startIcon={isEnhancing ? <RefreshIcon /> : hasEnhancement ? <RefreshIcon /> : <AutoAwesomeIcon />}
-                onClick={() => onEnhanceAll(hasEnhancement)}
-                disabled={!scriptEnhancementEnabled || isGenerating || isEnhancing}
-              >
-                {isEnhancing ? 'Enhancing…' : hasEnhancement ? 'Regenerate' : 'Enhance script'}
-              </Button>
-            </Stack>
-
-            <Alert severity={scriptEnhancementEnabled ? 'info' : 'warning'}>
-              {scriptEnhancementEnabled
-                ? 'Performance cues are active. Edits in the polished tab will be used during generation.'
-                : 'Performance cues are off. Audio generation will use the clean script directly.'}
-            </Alert>
-          </Stack>
-
-          {items.length === 0 ? (
-            <Alert severity="info">
-              Add guide text first to prepare and polish your script.
-            </Alert>
-          ) : (
-            <Stack spacing={1.5}>
-              {items.map((item) => {
-                const settings = getItemSettings(item);
-                const entry = activeEnhancementEntries[item.spotId];
-                return (
-                  <ScriptPolishItemCard
-                    key={`${coreLanguage}-${item.spotId}`}
-                    item={item}
-                    coreLanguage={coreLanguage}
-                    entry={entry}
-                    scriptEnhancementEnabled={scriptEnhancementEnabled}
-                    scriptEnhancementLimit={settings.scriptEnhancementLimit}
-                    onChangeEnhancedScript={onChangeEnhancedScript}
-                  />
-                );
-              })}
-            </Stack>
-          )}
-        </Stack>
+        {content}
       </CardContent>
     </Card>
   );
@@ -158,7 +174,7 @@ function ScriptPolishItemCard(props: {
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} justifyContent="space-between" alignItems={{ xs: 'flex-start', md: 'center' }}>
           <Box>
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-              {item.spotNumber}. {item.title}
+              Script
             </Typography>
             <Typography variant="body2" color="text.secondary">
               {describeScriptEnhancementLimit(scriptEnhancementLimit)}

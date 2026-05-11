@@ -2,6 +2,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CloseIcon from '@mui/icons-material/Close';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import StopIcon from '@mui/icons-material/Stop';
+import { useMemo, useState } from 'react';
 import {
   Box,
   Chip,
@@ -11,6 +12,8 @@ import {
   IconButton,
   Paper,
   Stack,
+  Tab,
+  Tabs,
   Typography,
 } from '@mui/material';
 import type { AudioMvpVoice } from '../../../audioMvp/model';
@@ -27,6 +30,19 @@ type Props = {
   onSelect: (voiceId: string) => void;
   onPreview: (voiceId: string) => void;
 };
+
+type VoiceTab = 'all' | 'female' | 'male';
+
+function buildSpectrum(voiceId: string): number[] {
+  let seed = 0;
+  for (const char of voiceId) {
+    seed += char.charCodeAt(0);
+  }
+  return Array.from({ length: 24 }, (_, index) => {
+    const base = (Math.sin((seed + index * 13) * 0.15) + 1) / 2;
+    return 18 + Math.round(base * 68);
+  });
+}
 
 type VoiceGroupProps = {
   title: string;
@@ -92,6 +108,19 @@ function VoiceGroup(props: VoiceGroupProps) {
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>{voice.summary}</Typography>
                   <Typography variant="caption" color="text.secondary" display="block">Tone: {voice.tone}</Typography>
                   <Typography variant="caption" color="text.secondary" display="block">Best for: {voice.bestFor}</Typography>
+                  <Stack direction="row" spacing={0.5} sx={{ mt: 1, height: 26, alignItems: 'end' }}>
+                    {buildSpectrum(voice.id).map((height, idx) => (
+                      <Box
+                        key={`${voice.id}-spec-${idx}`}
+                        sx={{
+                          width: 4,
+                          height,
+                          borderRadius: 2,
+                          bgcolor: isSelected ? 'primary.main' : 'rgba(31, 92, 79, 0.25)',
+                        }}
+                      />
+                    ))}
+                  </Stack>
                 </Box>
 
                 {isSelected ? (
@@ -118,6 +147,20 @@ export default function VoicePickerDialog(props: Props) {
     onSelect,
     onPreview,
   } = props;
+  const [tab, setTab] = useState<VoiceTab>('all');
+
+  const visibleGroups = useMemo(() => {
+    if (tab === 'female') {
+      return [{ key: 'female', title: 'Female', voices: femaleVoices }];
+    }
+    if (tab === 'male') {
+      return [{ key: 'male', title: 'Male', voices: maleVoices }];
+    }
+    return [
+      { key: 'female', title: 'Female', voices: femaleVoices },
+      { key: 'male', title: 'Male', voices: maleVoices },
+    ];
+  }, [femaleVoices, maleVoices, tab]);
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -135,25 +178,24 @@ export default function VoicePickerDialog(props: Props) {
 
       <DialogContent dividers>
         <Stack spacing={2} sx={{ pt: 1 }}>
-          <VoiceGroup
-            title="Female"
-            voices={femaleVoices}
-            selectedVoiceId={selectedVoiceId}
-            recommendedVoiceId={recommendedVoiceId}
-            playingVoiceId={playingVoiceId}
-            onSelect={onSelect}
-            onPreview={onPreview}
-          />
+          <Tabs value={tab} onChange={(_, next: VoiceTab) => setTab(next)}>
+            <Tab value="all" label="All" />
+            <Tab value="female" label="Female" />
+            <Tab value="male" label="Male" />
+          </Tabs>
 
-          <VoiceGroup
-            title="Male"
-            voices={maleVoices}
-            selectedVoiceId={selectedVoiceId}
-            recommendedVoiceId={recommendedVoiceId}
-            playingVoiceId={playingVoiceId}
-            onSelect={onSelect}
-            onPreview={onPreview}
-          />
+          {visibleGroups.map((group) => (
+            <VoiceGroup
+              key={group.key}
+              title={group.title}
+              voices={group.voices}
+              selectedVoiceId={selectedVoiceId}
+              recommendedVoiceId={recommendedVoiceId}
+              playingVoiceId={playingVoiceId}
+              onSelect={onSelect}
+              onPreview={onPreview}
+            />
+          ))}
         </Stack>
       </DialogContent>
     </Dialog>

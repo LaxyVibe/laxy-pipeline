@@ -60,7 +60,7 @@ function resolveScriptDraft(text: string, previous: AudioPoiDraft[]): AudioPoiDr
   return [{
     spotId: 'spot_001',
     spotNumber: 1,
-    title: 'Script',
+    title: '',
     scriptText: trimmed,
     excerpt: buildExcerpt(trimmed),
     overrideEnabled: prev0?.overrideEnabled ?? false,
@@ -77,6 +77,7 @@ export function useAudioDirectorController() {
   const txtInputRef = useRef<HTMLInputElement | null>(null);
   const analysisRunRef = useRef(0);
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const isEmbedded = window.self !== window.top;
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -108,6 +109,7 @@ export function useAudioDirectorController() {
   const [itemStates, setItemStates] = useState<Record<string, ItemGenerationState>>({});
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [lastGenerationLatencyMs, setLastGenerationLatencyMs] = useState<number | null>(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisPhase, setAnalysisPhase] = useState(0);
@@ -123,10 +125,37 @@ export function useAudioDirectorController() {
     [customCharacters],
   );
 
+  const resetScriptBoundState = () => {
+    setSessionId(null);
+    setCoreLanguage('en');
+    setEnhancementCache({});
+    setGenerationHistory([]);
+    setAudioFiles([]);
+    setSrtFiles([]);
+    setItemStates({});
+    setGenerationError(null);
+    setLastGenerationLatencyMs(null);
+    setProgressSummary({
+      completed: 0,
+      total: 0,
+      currentLabel: '',
+    });
+  };
+
   useEffect(() => {
     const saved = readStoredAudioDirectorDraft();
     if (!saved) {
       setItems(resolveScriptDraft('', []));
+      return;
+    }
+
+    if (isEmbedded) {
+      resetScriptBoundState();
+      setManuscriptText('');
+      setScriptEnhancementEnabled(saved.scriptEnhancementEnabled ?? false);
+      setCustomCharacters(saved.customCharacters ?? []);
+      setGlobalSettings(saved.globalSettings ?? defaultSettings);
+      setItems([]);
       return;
     }
 
@@ -139,7 +168,7 @@ export function useAudioDirectorController() {
     setEnhancementCache(saved.enhancementCache ?? {});
     setGenerationHistory(saved.generationHistory ?? []);
     setItems(resolveScriptDraft(saved.manuscriptText ?? '', saved.items ?? []));
-  }, [defaultSettings]);
+  }, [defaultSettings, isEmbedded]);
 
   useEffect(() => {
     setItems((previous) => resolveScriptDraft(manuscriptText, previous));
@@ -179,13 +208,13 @@ export function useAudioDirectorController() {
 
   // When embedded in an iframe, advertise readiness and receive the script via postMessage.
   useEffect(() => {
-    const isEmbedded = window.self !== window.top;
     if (!isEmbedded) return;
 
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'laxy:script') {
         const text = typeof event.data.text === 'string' ? event.data.text : '';
+        resetScriptBoundState();
         setManuscriptText(text);
         const detected = detectLanguageCode(text.trim());
         if (detected) setCoreLanguage(detected.code);
@@ -273,7 +302,7 @@ export function useAudioDirectorController() {
         return {
           spotId: item.spotId,
           spotNumber: item.spotNumber,
-          title: item.title,
+          title: '',
           overrideEnabled: item.overrideEnabled,
           settings: {
             ...settings,
@@ -341,7 +370,7 @@ export function useAudioDirectorController() {
         return {
           spotId: item.spotId,
           spotNumber: item.spotNumber,
-          title: item.title,
+          title: '',
           character: {
             id: character.id,
             name: character.name,
@@ -363,7 +392,7 @@ export function useAudioDirectorController() {
             scripts: [{
               spotId: item.spotId,
               spotNumber: item.spotNumber,
-              title: item.title,
+              title: '',
               scriptText: preprocessing.processedText,
             }],
             voiceId: settings.voiceId,
@@ -650,13 +679,13 @@ export function useAudioDirectorController() {
     return nextSessionId;
   };
 
-  const handleVoicePreview = async (voiceId: string) => {
+  const playVoicePreview = async (voiceId: string, forceRestart = false) => {
     if (voiceAudioRef.current) {
       voiceAudioRef.current.pause();
       voiceAudioRef.current = null;
     }
 
-    if (playingVoiceId === voiceId) {
+    if (!forceRestart && playingVoiceId === voiceId) {
       setPlayingVoiceId(null);
       return;
     }
@@ -671,6 +700,14 @@ export function useAudioDirectorController() {
     } catch {
       setPlayingVoiceId(null);
     }
+  };
+
+  const handleVoicePreview = async (voiceId: string) => {
+    await playVoicePreview(voiceId, false);
+  };
+
+  const handleVoicePreviewRestart = async (voiceId: string) => {
+    await playVoicePreview(voiceId, true);
   };
 
   const handleSaveToBackend = async () => {
@@ -725,6 +762,7 @@ export function useAudioDirectorController() {
           enhancedText,
           isEdited: false,
           generatedAt: Date.now(),
+          phoneticOverrides: existing?.phoneticOverrides ?? [],
           validation,
         };
       }
@@ -790,6 +828,33 @@ export function useAudioDirectorController() {
           enhancedText: nextText,
           isEdited: true,
           generatedAt: existing?.generatedAt ?? Date.now(),
+          phoneticOverrides: existing?.phoneticOverrides ?? [],
+          validation,
+        },
+      },
+    }));
+  };
+
+  const handlePhoneticOverridesChange = (
+    language: string,
+    item: AudioPoiDraft,
+    overrides: Array<{ source: string; target: string }>,
+  ) => {
+    const existing = enhancementCache[language]?.[item.spotId];
+    const sourceText = existing?.sourceText ?? item.scriptText;
+    const enhancedText = existing?.enhancedText ?? item.scriptText;
+    const validation = validateEnhancedScript(enhancedText);
+
+    setEnhancementCache((previous) => ({
+      ...previous,
+      [language]: {
+        ...(previous[language] ?? {}),
+        [item.spotId]: {
+          sourceText,
+          enhancedText,
+          isEdited: existing?.isEdited ?? false,
+          generatedAt: existing?.generatedAt ?? Date.now(),
+          phoneticOverrides: overrides,
           validation,
         },
       },
@@ -819,6 +884,7 @@ export function useAudioDirectorController() {
     let nextAudioFiles: LanguageAudio[] = [];
     let nextSrtFiles: LanguageSRT[] = [];
     let completed = 0;
+    const runStartedAt = performance.now();
 
     try {
       const activeSessionId = await persistSessionSnapshot();
@@ -827,10 +893,7 @@ export function useAudioDirectorController() {
         ...previous,
         currentLabel: `Preparing ${langLabel(language)}`,
       }));
-
-      const languageEnhancementEntries = scriptEnhancementEnabled
-        ? await ensureEnhancementEntries(language, items, false)
-        : {};
+      const languageEnhancementEntries = enhancementCache[language] ?? {};
 
       for (const item of items) {
         const settings = getItemSettings(item);
@@ -838,13 +901,14 @@ export function useAudioDirectorController() {
         const voice = getVoice(settings.voiceId);
         const stateKey = buildGenerationStateKey(language, item.spotId);
         const sourceText = item.scriptText;
+        const enhancementEntry = languageEnhancementEntries[item.spotId];
         const effectiveText = scriptEnhancementEnabled
-          ? languageEnhancementEntries[item.spotId]?.enhancedText ?? sourceText
+          ? enhancementEntry?.enhancedText ?? sourceText
           : sourceText;
-        const validation = languageEnhancementEntries[item.spotId]?.validation ?? createEmptyValidation();
+        const validation = enhancementEntry?.validation ?? createEmptyValidation();
 
         if (scriptEnhancementEnabled && !validation.isValid) {
-          throw new Error(`Fix enhancement tags in ${item.title} before generating audio.`);
+          throw new Error('Fix enhancement tags in the polished script before generating audio.');
         }
 
         const preprocessing = preprocessScriptForLanguage(language, effectiveText);
@@ -852,7 +916,7 @@ export function useAudioDirectorController() {
           ...previous,
           [stateKey]: {
             status: 'generating',
-            label: `${item.spotNumber}. ${item.title}`,
+            label: 'Script',
             message: `${langLabel(language)} generation in progress`,
             originalScript: sourceText,
             finalScript: effectiveText,
@@ -860,7 +924,7 @@ export function useAudioDirectorController() {
         }));
         setProgressSummary((previous) => ({
           ...previous,
-          currentLabel: `Generating: ${item.title}`,
+          currentLabel: 'Generating script',
         }));
 
         const response = await generateAudioForLanguage({
@@ -868,7 +932,7 @@ export function useAudioDirectorController() {
           scripts: [{
             spotId: item.spotId,
             spotNumber: item.spotNumber,
-            title: item.title,
+            title: '',
             scriptText: preprocessing.processedText,
           }],
           voiceId: settings.voiceId,
@@ -883,7 +947,7 @@ export function useAudioDirectorController() {
 
         const generatedAudio = response.audioFiles[0];
         if (!generatedAudio?.audioUrl) {
-          throw new Error(`${item.title} did not return a playable audio file.`);
+          throw new Error('The generated script did not return a playable audio file.');
         }
 
         nextAudioFiles = upsertLanguageAudio(nextAudioFiles, language, generatedAudio);
@@ -898,7 +962,7 @@ export function useAudioDirectorController() {
           ...previous,
           [stateKey]: {
             status: 'done',
-            label: `${item.spotNumber}. ${item.title}`,
+            label: 'Script',
             message: preprocessing.preprocessingNotes.join(' ') || 'Ready to review',
             originalScript: sourceText,
             finalScript: effectiveText,
@@ -927,12 +991,39 @@ export function useAudioDirectorController() {
         },
         ...previous,
       ]);
+      setLastGenerationLatencyMs(Math.max(0, Math.round(performance.now() - runStartedAt)));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setGenerationError(`Audio generation failed: ${message}`);
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  const currentScriptText = useMemo(() => {
+    const currentItem = items[0];
+    if (!currentItem) return '';
+    if (!scriptEnhancementEnabled) {
+      return currentItem.scriptText ?? '';
+    }
+    return activeEnhancementEntries[currentItem.spotId]?.enhancedText ?? currentItem.scriptText ?? '';
+  }, [activeEnhancementEntries, items, scriptEnhancementEnabled]);
+
+  const currentScriptLabel = scriptEnhancementEnabled ? 'Polished script' : 'Original script';
+
+  const handleCurrentScriptTextChange = (nextText: string) => {
+    const currentItem = items[0];
+    if (!currentItem) {
+      setManuscriptText(nextText);
+      return;
+    }
+
+    if (scriptEnhancementEnabled) {
+      handleEnhancedScriptChange(coreLanguage, currentItem, nextText);
+      return;
+    }
+
+    setManuscriptText(nextText);
   };
 
   return {
@@ -947,6 +1038,8 @@ export function useAudioDirectorController() {
     configPreviewOpen,
     coreLanguage,
     currentScreen,
+    currentScriptLabel,
+    currentScriptText,
     customCharacters,
     detectedLangLabel,
     designerPrompt,
@@ -963,12 +1056,14 @@ export function useAudioDirectorController() {
     globalSettings,
     generationHistory,
     handleCompiledPromptChange,
+    handleCurrentScriptTextChange,
     handleDeleteCharacter,
     handleDirectorNoteFieldChange,
     handleDownloadConfig,
     handleDraftCharacter,
     handleEnhanceActiveLanguage,
     handleEnhancedScriptChange,
+    handlePhoneticOverridesChange,
     handleGenerateDirectorNote,
     handleGlobalCharacterChange,
     handleGlobalContentVersionChange,
@@ -979,10 +1074,12 @@ export function useAudioDirectorController() {
     handleScriptEnhancementLimitChange,
     handleTxtUpload,
     handleVoicePreview,
+    handleVoicePreviewRestart,
     isAnalyzing,
     isEnhancing,
     isGenerating,
     isGeneratingCharacter,
+    lastGenerationLatencyMs,
     itemStates,
     items,
     maleVoices,

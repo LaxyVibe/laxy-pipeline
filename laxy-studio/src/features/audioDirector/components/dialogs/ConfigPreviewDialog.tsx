@@ -68,15 +68,10 @@ export default function ConfigPreviewDialog(props: Props) {
       <DialogContent dividers>
         <Stack spacing={3}>
           {promptRequests.map((request, index) => {
-            const title = request.title?.trim() || 'Script';
-            const label = request.spotNumber
-              ? `${request.spotNumber}. ${title}`
-              : title;
-
             return (
               <TextField
-                key={request.spotId ?? `${label}-${index}`}
-                label={label}
+                key={request.spotId ?? `script-${index}`}
+                label="Script"
                 multiline
                 minRows={12}
                 fullWidth

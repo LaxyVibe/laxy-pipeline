@@ -1,6 +1,7 @@
-import { useEffect } from 'react';
-import { Box, Chip, Container, Dialog, Stack, Typography } from '@mui/material';
+import CloseIcon from '@mui/icons-material/Close';
+import { Box, Container, Dialog, DialogContent, DialogTitle, IconButton, Stack, Typography } from '@mui/material';
 import { ThemeProvider } from '@mui/material/styles';
+import { useState } from 'react';
 import { useAudioDirectorController } from './useAudioDirectorController';
 import { audioDirectorStyles, audioDirectorTheme } from './theme';
 import AnalysisOverlay from './components/AnalysisOverlay';
@@ -9,120 +10,93 @@ import CharacterPickerDialog from './components/dialogs/CharacterPickerDialog';
 import ConfigPreviewDialog from './components/dialogs/ConfigPreviewDialog';
 import DirectorNoteDialog from './components/dialogs/DirectorNoteDialog';
 import VoicePickerDialog from './components/dialogs/VoicePickerDialog';
-import AudioDirectorConfigRail from './components/panels/AudioDirectorConfigRail';
-import DirectorNoteSection from './components/panels/DirectorNoteSection';
 import GenerationHistoryRail from './components/panels/GenerationHistoryRail';
 import ScriptPolishSection from './components/panels/ScriptPolishSection';
+import TtsScriptSection from './components/panels/TtsScriptSection';
 
 export default function AudioDirectorApp() {
   const controller = useAudioDirectorController();
+  const [scriptPolishOpen, setScriptPolishOpen] = useState(false);
 
   return (
     <ThemeProvider theme={audioDirectorTheme}>
       <Box sx={audioDirectorStyles.page}>
         <Container maxWidth="xl" sx={{ pb: 4 }}>
-          <Stack spacing={3}>
-            <Box sx={audioDirectorStyles.hero}>
-              <Stack spacing={2}>
-                <Typography variant="overline" sx={{ letterSpacing: '0.18em', color: 'inherit', opacity: 0.8 }}>
-                  Audio Director
-                </Typography>
-                <Box>
-                  <Typography variant="h3" sx={{ color: 'inherit' }}>
-                    One-page audio workspace
-                  </Typography>
-                  <Typography variant="body1" sx={{ maxWidth: 760, color: 'rgba(255,255,255,0.86)' }}>
-                    Keep configuration, note editing, script polish, and generation history visible at the same time.
-                  </Typography>
-                </Box>
-
-                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                  <Chip label={`Language: ${controller.coreLanguage.toUpperCase()}`} sx={{ bgcolor: 'rgba(255,255,255,0.12)', color: 'inherit' }} />
-                  <Chip label={`${controller.generationHistory.length} run(s) saved`} sx={{ bgcolor: 'rgba(255,255,255,0.12)', color: 'inherit' }} />
-                  <Chip label={controller.isGenerating ? 'Generating…' : 'Ready'} sx={{ bgcolor: 'rgba(255,255,255,0.12)', color: 'inherit' }} />
-                </Stack>
-              </Stack>
-            </Box>
-
-            <Box
-              sx={{
-                display: 'grid',
-                gap: 2,
-                gridTemplateColumns: {
-                  xs: '1fr',
-                  xl: '320px minmax(0, 1fr) 360px',
-                },
-                alignItems: 'start',
-              }}
-            >
-              <AudioDirectorConfigRail
-                selectedCharacter={controller.selectedCharacter}
-                selectedVoice={controller.selectedVoice}
-                coreLanguage={controller.coreLanguage}
-                estimatedTokens={controller.estimatedTokens}
+          <Box
+            sx={{
+              display: 'grid',
+              gap: 2,
+              gridTemplateColumns: {
+                xs: '1fr',
+                xl: 'minmax(0, 1fr) 360px',
+              },
+              alignItems: 'start',
+            }}
+          >
+            <Stack spacing={2} sx={{ minWidth: 0 }}>
+              <TtsScriptSection
+                scriptText={controller.currentScriptText}
+                compiledPrompt={controller.globalCompiledPrompt}
+                characterAvatar={controller.selectedCharacter.avatar}
+                characterName={controller.selectedCharacter.name}
+                voiceId={controller.selectedVoice.id}
+                voiceName={controller.selectedVoice.name}
+                isGenerating={controller.isGenerating}
+                generateDisabled={controller.currentScriptText.trim().length === 0}
+                onChangeScript={controller.handleCurrentScriptTextChange}
+                onChangeCompiledPrompt={controller.handleCompiledPromptChange}
+                onGenerate={controller.runGeneration}
+                onPreviewVoice={controller.handleVoicePreviewRestart}
                 onOpenCharacterPicker={() => controller.setCharacterPickerOpen(true)}
                 onOpenVoicePicker={() => controller.setVoicePickerOpen(true)}
+                onOpenScriptPolish={() => setScriptPolishOpen(true)}
+                onOpenDirectorNote={() => controller.setDirectorNoteEditorOpen(true)}
               />
+            </Stack>
 
-              <Stack spacing={2} sx={{ minWidth: 0 }}>
-                <Box
-                  sx={{
-                    display: 'grid',
-                    gap: 2,
-                    gridTemplateColumns: {
-                      xs: '1fr',
-                      lg: 'repeat(2, minmax(0, 1fr))',
-                    },
-                    alignItems: 'start',
-                  }}
-                >
-                  <DirectorNoteSection
-                    globalSettings={controller.globalSettings}
-                    selectedCharacter={controller.selectedCharacter}
-                    selectedVoice={controller.selectedVoice}
-                    globalRecommendation={controller.globalRecommendation}
-                    estimatedTokens={controller.estimatedTokens}
-                    saveStatus={controller.saveStatus}
-                    saveMessage={controller.saveMessage}
-                    onOpenConfigPreview={() => controller.setConfigPreviewOpen(true)}
-                    onDownloadConfig={controller.handleDownloadConfig}
-                    onSaveDraft={controller.handleSaveToBackend}
-                    onOpenAdvancedEditor={() => controller.setDirectorNoteEditorOpen(true)}
-                    onContentVersionChange={controller.handleGlobalContentVersionChange}
-                    onScriptEnhancementLimitChange={controller.handleScriptEnhancementLimitChange}
-                    onDirectorNoteFieldChange={controller.handleDirectorNoteFieldChange}
-                  />
-
-                  <ScriptPolishSection
-                    activeEnhancementEntries={controller.activeEnhancementEntries}
-                    coreLanguage={controller.coreLanguage}
-                    generationError={controller.generationError}
-                    getItemSettings={controller.getItemSettings}
-                    isEnhancing={controller.isEnhancing}
-                    isGenerating={controller.isGenerating}
-                    items={controller.items}
-                    onChangeEnhancedScript={controller.handleEnhancedScriptChange}
-                    onEnhanceAll={controller.handleEnhanceActiveLanguage}
-                    onToggleEnhancement={controller.setScriptEnhancementEnabled}
-                    scriptEnhancementEnabled={controller.scriptEnhancementEnabled}
-                  />
-                </Box>
-              </Stack>
-
-              <GenerationHistoryRail
-                audioFiles={controller.audioFiles}
-                generationHistory={controller.generationHistory}
-                generationError={controller.generationError}
-                isGenerating={controller.isGenerating}
-                itemStates={controller.itemStates}
-                items={controller.items}
-                onGenerate={controller.runGeneration}
-                progressSummary={controller.progressSummary}
-                srtFiles={controller.srtFiles}
-              />
-            </Box>
-          </Stack>
+            <GenerationHistoryRail
+              audioFiles={controller.audioFiles}
+              generationHistory={controller.generationHistory}
+              generationError={controller.generationError}
+              isGenerating={controller.isGenerating}
+              itemStates={controller.itemStates}
+              items={controller.items}
+              progressSummary={controller.progressSummary}
+            />
+          </Box>
         </Container>
+
+        <Dialog open={scriptPolishOpen} onClose={() => setScriptPolishOpen(false)} maxWidth="lg" fullWidth>
+          <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Stack>
+              <Typography variant="h6">Script Polish</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Review and refine the polished script without leaving the main workflow.
+              </Typography>
+            </Stack>
+            <IconButton size="small" onClick={() => setScriptPolishOpen(false)}>
+              <CloseIcon fontSize="small" />
+            </IconButton>
+          </DialogTitle>
+          <DialogContent dividers>
+            <ScriptPolishSection
+              activeEnhancementEntries={controller.activeEnhancementEntries}
+              coreLanguage={controller.coreLanguage}
+              generationError={controller.generationError}
+              getItemSettings={controller.getItemSettings}
+              isEnhancing={controller.isEnhancing}
+              isGenerating={controller.isGenerating}
+              items={controller.items}
+              onChangeEnhancedScript={controller.handleEnhancedScriptChange}
+              onChangePhoneticOverrides={controller.handlePhoneticOverridesChange}
+              onEnhanceAll={controller.handleEnhanceActiveLanguage}
+              onToggleEnhancement={controller.setScriptEnhancementEnabled}
+              scriptEnhancementEnabled={controller.scriptEnhancementEnabled}
+              eyebrow="Polish dialog"
+              mode="plain"
+            />
+          </DialogContent>
+        </Dialog>
 
         <CharacterPickerDialog
           characters={controller.allCharacters}

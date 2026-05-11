@@ -81,7 +81,7 @@ test.describe('Audio Director one-page workspace', () => {
     };
 
     await page.addInitScript((draft) => {
-      window.localStorage.setItem('audio-director-draft-v1', JSON.stringify(draft));
+      window.localStorage.setItem('audio-director-draft-v2', JSON.stringify(draft));
     }, seededDraft);
 
     await page.goto('/audio-director');
@@ -89,7 +89,7 @@ test.describe('Audio Director one-page workspace', () => {
     await expect(page.getByRole('heading', { name: 'One-page audio workspace' })).toBeVisible();
     await expect(page.getByText('Result History')).toBeVisible();
     await expect(page.getByRole('button', { name: /Generate audio/ })).toBeVisible();
-    await expect(page.locator('audio').first()).toBeVisible();
+    await expect(page.getByLabel('Play audio').first()).toBeVisible();
 
     await page.getByRole('button', { name: /Character/ }).click();
     await expect(page.getByRole('dialog', { name: 'Select Character' })).toBeVisible();
@@ -107,6 +107,73 @@ test.describe('Audio Director one-page workspace', () => {
     await expect(page.getByLabel('Polished script')).toBeVisible();
 
     await expect(page.getByText('English generation run')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Download SRT' })).toBeVisible();
+    await expect(page.getByText('Paragraph one for the director workspace.')).toBeVisible();
+  });
+
+  test('embedded Audio Director uses the script posted from /tts instead of a stale saved draft', async ({ page }) => {
+    await signIn(page);
+
+    const staleDraft = {
+      manuscriptText: 'Old cached script that should never appear in the iframe.',
+      sessionId: 'stale-session-id',
+      coreLanguage: 'en',
+      scriptEnhancementEnabled: true,
+      globalSettings: {
+        contentVersion: 'standard',
+        scriptEnhancementLimit: 'light',
+        directorNote: {
+          scene: 'An outdated saved scene.',
+          style: 'An outdated saved style.',
+          pacing: 'An outdated saved pacing.',
+          compiledPromptOverride: '',
+          isPromptCustomized: false,
+        },
+      },
+      items: [
+        {
+          spotId: 'spot_001',
+          spotNumber: 1,
+          title: 'Script',
+          scriptText: 'Old cached script that should never appear in the iframe.',
+          excerpt: 'Old cached script that should never appear in the iframe.',
+          overrideEnabled: false,
+        },
+      ],
+      customCharacters: [],
+      enhancementCache: {
+        en: {
+          spot_001: {
+            sourceText: 'Old cached script that should never appear in the iframe.',
+            enhancedText: '[whispering] Old enhanced script from local storage.',
+            isEdited: true,
+            generatedAt: Date.now(),
+            phoneticOverrides: [],
+            validation: {
+              isValid: true,
+              totalTags: 1,
+              issues: [],
+            },
+          },
+        },
+      },
+      generationHistory: [],
+    };
+
+    await page.addInitScript((draft) => {
+      window.localStorage.setItem('audio-director-draft-v1', JSON.stringify(draft));
+    }, staleDraft);
+
+    const postedScript = 'Fresh script from /tts that should replace any cached Audio Director draft.';
+
+    await page.goto('/tts');
+    await page.getByPlaceholder('Paste your script here…').fill(postedScript);
+    await page.getByRole('button', { name: 'Pass to Audio Director' }).click();
+
+    const audioDirectorFrame = page.frameLocator('iframe[title="Audio Director"]');
+    await expect(audioDirectorFrame.getByRole('heading', { name: 'One-page audio workspace' })).toBeVisible();
+    await expect(audioDirectorFrame.getByLabel('Polished script')).toHaveValue(postedScript);
+
+    await audioDirectorFrame.getByRole('tab', { name: 'Original script' }).click();
+    await expect(audioDirectorFrame.getByLabel('Original script')).toHaveValue(postedScript);
   });
 });

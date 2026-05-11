@@ -17,6 +17,7 @@ export type EnhancementEntry = {
   enhancedText: string;
   isEdited: boolean;
   generatedAt: number | null;
+  phoneticOverrides: Array<{ source: string; target: string }>;
   validation: ScriptEnhancementValidation;
 };
 

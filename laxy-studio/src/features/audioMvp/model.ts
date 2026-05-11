@@ -132,7 +132,33 @@ export const SCRIPT_TAG_WHITELIST = [
   '[whispering]',
   '[shouting]',
   '[sarcasm]',
+  '[pause:0.5s]',
+  '[pause:1s]',
+  '[pause:1.5s]',
+  '[phonetic:word|pronunciation]',
 ];
+
+const SCRIPT_TAG_SET = new Set([
+  'sigh',
+  'laughing',
+  'uhm',
+  'short pause',
+  'medium pause',
+  'long pause',
+  'whispering',
+  'shouting',
+  'sarcasm',
+]);
+
+function isValidPauseTag(tag: string): boolean {
+  return /^pause:(0\.5|1|1\.5)s$/i.test(tag.trim());
+}
+
+function isValidPhoneticTag(tag: string): boolean {
+  const match = /^phonetic:([^|]+)\|(.+)$/i.exec(tag.trim());
+  if (!match) return false;
+  return Boolean(match[1].trim()) && Boolean(match[2].trim());
+}
 
 export const AUDIO_MVP_VOICES: AudioMvpVoice[] = [
   {
@@ -528,7 +554,16 @@ export function validateEnhancedScript(text: string): ScriptEnhancementValidatio
           excerpt: buildValidationExcerpt(text, index, closingIndex + 1),
         });
       } else {
-        totalTags += 1;
+        const normalized = content.toLowerCase();
+        if (!SCRIPT_TAG_SET.has(normalized) && !isValidPauseTag(normalized) && !isValidPhoneticTag(normalized)) {
+          issues.push({
+            index: issues.length + 1,
+            message: 'Cue tag is not in the supported format or whitelist.',
+            excerpt: buildValidationExcerpt(text, index, closingIndex + 1),
+          });
+        } else {
+          totalTags += 1;
+        }
       }
 
       index = closingIndex;
