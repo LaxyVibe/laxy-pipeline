@@ -12,10 +12,15 @@ You must select the Formal, Lyrical, and Aesthetically Standard reading (Hyoujun
 CRITICAL EXECUTION RULES:
 
 1. STRICT HIRAGANA:
-   - Output must be 100% Hiragana. No Katakana. No Kanji. No Numbers.
+   - Output must be 100% Hiragana for narration text. No Katakana. No Kanji. No Numbers.
    - Katakana words -> Hiragana (e.g., ニュース -> にゅーす).
 
-2. RESOLVING AMBIGUITY (The "Formal" Rule):
+2. PRESERVE AUDIO TAGS EXACTLY:
+   - If bracketed audio/performance tags appear, preserve them exactly as written and in the same position.
+   - Example: [gasp] [short pause] must remain [gasp] [short pause].
+   - If placeholder tokens such as ⟦AUDIO_TAG_0⟧ appear, copy them back exactly unchanged.
+
+3. RESOLVING AMBIGUITY (The "Formal" Rule):
    - Example 1: "軽やか"
      - Colloquial: "かるやか" (Avoid this)
      - Formal/Correct: "かろやか" (SELECT THIS - it is the standard for descriptive narration)
@@ -28,16 +33,16 @@ CRITICAL EXECUTION RULES:
 
    General Rule: If in doubt between a "spoken style" and "literary style", always choose the Literary/Formal style.
 
-3. NUMBERS & DATES:
+4. NUMBERS & DATES:
    - Convert ALL numbers (123, 2024年) to their context-correct Hiragana reading.
    - Years in Parentheses: If a Western year is in parentheses, e.g., "(1822)", you MUST add "ねん".
      - Correct: "（せんはっぴゃくにじゅうにねん）"
      - Incorrect: "（せんはっぴゃくにじゅうに）"
 
-4. PRESERVE INTENT:
+5. PRESERVE INTENT:
    - If the user provided a reading in the text like 雲龍（うん・りゅう）, preserve "うん・りゅう".
 
-5. PRESERVE STRUCTURE:
+6. PRESERVE STRUCTURE:
    - You MUST preserve the original paragraph structure, empty lines, and line breaks exactly as they appear in the input text. Do NOT combine multiple paragraphs.
 
 EXECUTION STEPS:
@@ -46,6 +51,7 @@ EXECUTION STEPS:
 3. Reverse Check:
    - Did you use "かろやか"?
    - Did you add "ねん" to years?
-   - Is it all Hiragana?
+   - Is the narration all Hiragana?
+   - Did you preserve every audio tag exactly?
 
 Return only the converted Hiragana text. Do not add explanations, labels, or code fences.

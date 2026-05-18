@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import wave
 from typing import Any
@@ -1013,13 +1014,14 @@ class PipelineExecutor:
         """Convert Japanese narration text into all-Hiragana reading text."""
         prompt_text = load_prompt("ja_hiragana_narration")
         model = MODELS["flash"]
+        masked_script_content, tag_placeholders = self._mask_audio_tags_for_hiragana(script_content)
 
         response = await _retry_generate_content(
             self._client,
             timeout_seconds=self._get_step_timeout_seconds("guide_script_enhance"),
             retry_context={"operation": "generate_japanese_hiragana"},
             model=model,
-            contents=script_content,
+            contents=masked_script_content,
             config=genai.types.GenerateContentConfig(
                 system_instruction=prompt_text,
                 temperature=0.2,
@@ -1035,7 +1037,28 @@ class PipelineExecutor:
                 hiragana = hiragana[:-3]
             hiragana = hiragana.strip()
 
+        hiragana = self._restore_audio_tags_from_hiragana(hiragana, tag_placeholders)
         return {"success": True, "hiraganaText": hiragana}
+
+    @staticmethod
+    def _mask_audio_tags_for_hiragana(text: str) -> tuple[str, dict[str, str]]:
+        """Replace bracketed audio tags with stable placeholders before Hiragana conversion."""
+        tag_placeholders: dict[str, str] = {}
+
+        def _replace(match: re.Match[str]) -> str:
+            placeholder = f"⟦AUDIO_TAG_{len(tag_placeholders)}⟧"
+            tag_placeholders[placeholder] = match.group(0)
+            return placeholder
+
+        masked = re.sub(r"\[[^\]\r\n]+\]", _replace, text)
+        return masked, tag_placeholders
+
+    @staticmethod
+    def _restore_audio_tags_from_hiragana(text: str, tag_placeholders: dict[str, str]) -> str:
+        restored = text
+        for placeholder, original_tag in tag_placeholders.items():
+            restored = restored.replace(placeholder, original_tag)
+        return restored
 
     # ── Standalone character generation ──
 

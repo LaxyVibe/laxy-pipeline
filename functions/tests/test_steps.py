@@ -524,6 +524,42 @@ class TestTtsPromptBuilder:
         assert "Pacing: Steady." in prompt
 
 
+class TestJapaneseHiraganaConversion:
+    def test_mask_and_restore_audio_tags_for_hiragana(self, executor):
+        masked, tag_placeholders = executor._mask_audio_tags_for_hiragana(
+            "[gasp] [amazed] これは... [short pause] いくらですか？"
+        )
+
+        assert masked == "⟦AUDIO_TAG_0⟧ ⟦AUDIO_TAG_1⟧ これは... ⟦AUDIO_TAG_2⟧ いくらですか？"
+        restored = executor._restore_audio_tags_from_hiragana(
+            "⟦AUDIO_TAG_0⟧ ⟦AUDIO_TAG_1⟧ これは... ⟦AUDIO_TAG_2⟧ いくらですか？",
+            tag_placeholders,
+        )
+        assert restored == "[gasp] [amazed] これは... [short pause] いくらですか？"
+
+    @pytest.mark.asyncio
+    async def test_generate_japanese_hiragana_preserves_audio_tags(self, executor):
+        response = _make_genai_response(
+            "⟦AUDIO_TAG_0⟧ ⟦AUDIO_TAG_1⟧ これは... ⟦AUDIO_TAG_2⟧ いくらですか？"
+        )
+
+        with patch("agents.pipeline_agent.load_prompt", return_value="prompt"), patch(
+            "agents.pipeline_agent._retry_generate_content",
+            new=AsyncMock(return_value=response),
+        ) as mock_retry:
+            result = await executor.generate_japanese_hiragana(
+                "[gasp] [amazed] これは... [short pause] いくらですか？"
+            )
+
+        assert result == {
+            "success": True,
+            "hiraganaText": "[gasp] [amazed] これは... [short pause] いくらですか？",
+        }
+        assert mock_retry.await_args.kwargs["contents"] == (
+            "⟦AUDIO_TAG_0⟧ ⟦AUDIO_TAG_1⟧ これは... ⟦AUDIO_TAG_2⟧ いくらですか？"
+        )
+
+
 # ── LLM step execution tests ─────────────────────────────────────────────
 
 
