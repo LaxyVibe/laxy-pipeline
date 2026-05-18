@@ -524,6 +524,45 @@ class TestToolStepExecution:
         executor._client.aio.models.generate_content.assert_called_once()
 
 
+class TestStandaloneAudioGeneration:
+    @pytest.mark.asyncio
+    async def test_generate_audio_reuses_per_language_generator(self, executor):
+        executor.generate_audio_for_language = AsyncMock(side_effect=[
+            {
+                "lang": "en",
+                "audioFiles": [{"lang": "en", "spotId": "spot_001", "audioUrl": "https://example.com/en.mp3"}],
+                "srtFiles": [{"lang": "en", "spotId": "spot_001", "rawSrt": "1"}],
+            },
+            {
+                "lang": "ja",
+                "audioFiles": [{"lang": "ja", "spotId": "spot_001", "audioUrl": "https://example.com/ja.mp3"}],
+                "srtFiles": [{"lang": "ja", "spotId": "spot_001", "rawSrt": "1"}],
+            },
+        ])
+
+        result = await executor.generate_audio(
+            session_id="audio-session-1",
+            scripts=[{"spotId": "spot_001", "spotNumber": 1, "title": "Spot 1", "scriptText": "Hello"}],
+            voice_id="Aoede",
+            languages=["en", "ja"],
+            director_note={"scene": "calm"},
+            translations={"ja": [{"spotId": "spot_001", "translatedText": "こんにちは"}]},
+        )
+
+        assert executor.generate_audio_for_language.await_count == 2
+        first_call = executor.generate_audio_for_language.await_args_list[0].kwargs
+        second_call = executor.generate_audio_for_language.await_args_list[1].kwargs
+        assert first_call["language"] == "en"
+        assert first_call["translations"] is None
+        assert second_call["language"] == "ja"
+        assert second_call["translations"] == [{"spotId": "spot_001", "translatedText": "こんにちは"}]
+        assert result["success"] is True
+        assert len(result["audioFiles"]) == 2
+        assert len(result["srtFiles"]) == 2
+        assert result["totalAudioFiles"] == 2
+        assert result["totalSrtFiles"] == 2
+
+
 # ── Pipeline step ordering tests ──────────────────────────────────────────
 
 

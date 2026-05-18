@@ -1244,168 +1244,18 @@ class PipelineExecutor:
         audio_files: list[dict[str, Any]] = []
         srt_files: list[dict[str, Any]] = []
 
-        bucket = fb_storage.bucket()
-
         for lang in languages:
-            # Build a lookup of translated texts for this language
-            lang_translations: dict[str, str] = {}
-            if translations and lang in translations:
-                for t in translations[lang]:
-                    spot_id_key = t.get("spotId", "")
-                    translated = t.get("translatedText", "")
-                    if spot_id_key and translated:
-                        lang_translations[spot_id_key] = translated
-
-            for script in scripts:
-                spot_id = script.get("spotId", f"spot_{script.get('spotNumber', 0):03d}")
-                spot_number = script.get("spotNumber", 0)
-                title = script.get("title", "")
-                # Use translated text for this language if available,
-                # otherwise fall back to the core-language scriptText
-                text = lang_translations.get(spot_id, "") or script.get("scriptText", "")
-
-                if not text.strip():
-                    continue
-
-                # Build TTS prompt with director note context.
-                tts_text = self._build_tts_text(text, director_note)
-
-                try:
-                    # Call Gemini TTS (with retry for rate limits)
-                    response = await _retry_generate_content(
-                        self._client,
-                        timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
-                        retry_context={
-                            "operation": "audio_generate",
-                            "step_id": "s9_audio_gen",
-                            "session_id": session_id,
-                            "language": lang,
-                            "spot_id": spot_id,
-                        },
-                        retry_tracker=retry_tracker,
-                        model=MODELS["tts"],
-                        contents=tts_text,
-                        config=genai_types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=genai_types.SpeechConfig(
-                                voice_config=genai_types.VoiceConfig(
-                                    prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                                        voice_name=voice_id,
-                                    )
-                                )
-                            ),
-                        ),
-                    )
-
-                    # Extract audio bytes from response
-                    audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
-                    if not audio_data and self._is_prohibited_content_block(extraction_error):
-                        logger.warning(
-                            "Gemini TTS blocked directed prompt for %s/%s; retrying with transcript-only fallback",
-                            lang,
-                            spot_id,
-                        )
-                        response = await _retry_generate_content(
-                            self._client,
-                            timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
-                            retry_context={
-                                "operation": "audio_generate_fallback",
-                                "step_id": "s9_audio_gen",
-                                "session_id": session_id,
-                                "language": lang,
-                                "spot_id": spot_id,
-                            },
-                            retry_tracker=retry_tracker,
-                            model=MODELS["tts"],
-                            contents=text,
-                            config=genai_types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=genai_types.SpeechConfig(
-                                    voice_config=genai_types.VoiceConfig(
-                                        prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                                            voice_name=voice_id,
-                                        )
-                                    )
-                                ),
-                            ),
-                        )
-                        audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
-
-                    if not audio_data:
-                        raise RuntimeError(extraction_error or "No audio data returned from Gemini TTS response")
-
-                    output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
-                        self._prepare_audio_output(audio_data, mime_type)
-                    )
-
-                    # Upload to Firebase Storage
-                    storage_path = f"audio/{session_id}/{lang}/{spot_id}.{output_extension}"
-                    download_token = str(uuid4())
-                    blob = bucket.blob(storage_path)
-                    blob.metadata = {"firebaseStorageDownloadTokens": download_token}
-                    blob.upload_from_string(output_audio_data, content_type=output_mime_type)
-
-                    # Build a download URL that works in both emulator and production
-                    storage_emulator = os.environ.get("FIREBASE_STORAGE_EMULATOR_HOST") or os.environ.get("STORAGE_EMULATOR_HOST")
-                    if storage_emulator:
-                        host = storage_emulator if storage_emulator.startswith("http") else f"http://{storage_emulator}"
-                        encoded_path = storage_path.replace("/", "%2F")
-                        audio_url = f"{host}/v0/b/{bucket.name}/o/{encoded_path}?alt=media&token={download_token}"
-                    else:
-                        blob.make_public()
-                        audio_url = blob.public_url
-
-                    logger.info(
-                        f"TTS generated: {lang}/{spot_id} — {len(output_audio_data)} bytes, "
-                        f"{duration_ms}ms → {storage_path}"
-                    )
-
-                    audio_files.append({
-                        "lang": lang,
-                        "spotId": spot_id,
-                        "spotNumber": spot_number,
-                        "title": title,
-                        "audioUrl": audio_url,
-                        "durationMs": duration_ms,
-                        "voiceId": voice_id,
-                        "model": MODELS["tts"],
-                    })
-
-                    # Generate alignment-accurate SRT for this spot+lang.
-                    srt_entries = await self._generate_aligned_srt_entries(
-                        text=text,
-                        audio_data=alignment_audio_data,
-                        language=lang,
-                        duration_ms=duration_ms,
-                    )
-                    raw_srt = tools.format_srt(srt_entries)
-                    srt_files.append({
-                        "lang": lang,
-                        "spotId": spot_id,
-                        "entries": srt_entries,
-                        "rawSrt": raw_srt,
-                    })
-
-                except audio_alignment.AlignmentError as e:
-                    logger.error(
-                        "Alignment failed for %s/%s: %s",
-                        lang,
-                        spot_id,
-                        e,
-                        exc_info=True,
-                    )
-                    raise RuntimeError(f"ALIGNMENT_FAILED:{lang}/{spot_id}:{e}") from e
-                except Exception as e:
-                    logger.error(f"TTS failed for {lang}/{spot_id}: {e}", exc_info=True)
-                    audio_files.append({
-                        "lang": lang,
-                        "spotId": spot_id,
-                        "spotNumber": spot_number,
-                        "title": title,
-                        "audioUrl": "",
-                        "durationMs": 0,
-                        "error": self._format_audio_generation_error(e),
-                    })
+            result = await self.generate_audio_for_language(
+                session_id=session_id,
+                scripts=scripts,
+                voice_id=voice_id,
+                language=lang,
+                director_note=director_note,
+                translations=translations.get(lang) if translations else None,
+                retry_tracker=retry_tracker,
+            )
+            audio_files.extend(result.get("audioFiles", []))
+            srt_files.extend(result.get("srtFiles", []))
 
         return {
             "success": True,
