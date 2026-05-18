@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateEnhancedScript } from './model';
+import { clearCompiledPromptCustomization, validateEnhancedScript } from './model';
 
 describe('validateEnhancedScript', () => {
   it('accepts creative Gemini TTS audio tags when brackets are well formed', () => {
@@ -20,5 +20,25 @@ describe('validateEnhancedScript', () => {
     const broken = validateEnhancedScript('[whispers Hello');
     expect(broken.isValid).toBe(false);
     expect(broken.issues[0]?.message).toBe('Cue tag is missing a closing bracket.');
+  });
+});
+
+describe('clearCompiledPromptCustomization', () => {
+  it('keeps scene style and pacing while clearing stale compiled prompt override', () => {
+    const result = clearCompiledPromptCustomization({
+      scene: 'Gallery',
+      style: 'Warm',
+      pacing: 'Slow',
+      compiledPromptOverride: 'Old character prompt',
+      isPromptCustomized: true,
+    });
+
+    expect(result).toEqual({
+      scene: 'Gallery',
+      style: 'Warm',
+      pacing: 'Slow',
+      compiledPromptOverride: '',
+      isPromptCustomized: false,
+    });
   });
 });

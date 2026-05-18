@@ -12,6 +12,7 @@ import { SUPPORTED_LANGUAGES, langLabel, type LanguageAudio, type LanguageSRT } 
 import {
   AUDIO_MVP_VOICES,
   buildDirectorPayload,
+  clearCompiledPromptCustomization,
   buildExcerpt,
   createDefaultDirectorNote,
   createDefaultSettings,
@@ -515,6 +516,7 @@ export function useAudioDirectorController() {
       ...previous,
       characterId,
       voiceId: recommendation.recommendedVoiceId,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
     }));
   };
 
@@ -522,6 +524,7 @@ export function useAudioDirectorController() {
     setGlobalSettings((previous) => ({
       ...previous,
       voiceId,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
     }));
   };
 
@@ -648,6 +651,7 @@ export function useAudioDirectorController() {
       ...previous,
       characterId: nextCharacter.id,
       voiceId: recommendation.recommendedVoiceId,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
     }));
 
     closeCharacterCreator();

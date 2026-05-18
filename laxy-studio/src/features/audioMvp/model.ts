@@ -280,6 +280,16 @@ export function createDefaultDirectorNote(
   };
 }
 
+export function clearCompiledPromptCustomization(
+  directorNote: DirectorNoteDraft,
+): DirectorNoteDraft {
+  return {
+    ...directorNote,
+    compiledPromptOverride: '',
+    isPromptCustomized: false,
+  };
+}
+
 export function createDefaultSettings(character: AudioMvpCharacter): AudioGuideSettings {
   const fallbackVoiceId = character.recommendedVoiceId ?? AUDIO_MVP_VOICES[0].id;
   return {
