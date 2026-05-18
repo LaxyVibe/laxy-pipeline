@@ -7,7 +7,7 @@ import {
   generateCharacter,
   generateDirectorNote,
 } from '../../api';
-import { langLabel, type LanguageAudio, type LanguageSRT } from '../../types/entity';
+import { SUPPORTED_LANGUAGES, langLabel, type LanguageAudio, type LanguageSRT } from '../../types/entity';
 import {
   AUDIO_MVP_VOICES,
   buildDirectorPayload,
@@ -52,6 +52,8 @@ import {
   writeLocalStorage,
 } from './utils';
 import { AUDIO_DIRECTOR_WIZARD_STEPS } from './wizard';
+
+const SUPPORTED_LANGUAGE_CODES = new Set<string>(SUPPORTED_LANGUAGES.map((language) => language.code));
 
 function resolveScriptDraft(text: string, previous: AudioPoiDraft[]): AudioPoiDraft[] {
   const trimmed = text.trim();
@@ -214,10 +216,17 @@ export function useAudioDirectorController() {
       if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'laxy:script') {
         const text = typeof event.data.text === 'string' ? event.data.text : '';
+        const manualLanguage = typeof event.data.language === 'string' && SUPPORTED_LANGUAGE_CODES.has(event.data.language)
+          ? event.data.language
+          : null;
         resetScriptBoundState();
         setManuscriptText(text);
-        const detected = detectLanguageCode(text.trim());
-        if (detected) setCoreLanguage(detected.code);
+        if (manualLanguage) {
+          setCoreLanguage(manualLanguage);
+        } else {
+          const detected = detectLanguageCode(text.trim());
+          if (detected) setCoreLanguage(detected.code);
+        }
         setSearchParams({ screen: 'guide-settings' });
       }
     };
@@ -947,7 +956,9 @@ export function useAudioDirectorController() {
 
         const generatedAudio = response.audioFiles[0];
         if (!generatedAudio?.audioUrl) {
-          throw new Error('The generated script did not return a playable audio file.');
+          throw new Error(
+            generatedAudio?.error?.trim() || 'The generated script did not return a playable audio file.',
+          );
         }
 
         nextAudioFiles = upsertLanguageAudio(nextAudioFiles, language, generatedAudio);

@@ -182,17 +182,17 @@ export const audioDirectorStyles = {
     flexWrap: 'wrap',
   },
   sectionCard: {
-    borderRadius: 4,
+    borderRadius: '16px',
   },
   nestedPanel: {
     p: 2,
-    borderRadius: 4,
+    borderRadius: '14px',
     border: `1px solid ${alpha(audioDirectorTokens.colors.ink, 0.08)}`,
     backgroundColor: alpha(audioDirectorTokens.colors.ivory, 0.92),
   },
   mutedPanel: {
     p: 2,
-    borderRadius: 4,
+    borderRadius: '14px',
     border: `1px solid ${alpha(audioDirectorTokens.colors.forest, 0.10)}`,
     backgroundColor: '#f9f4ea',
   },

@@ -49,7 +49,7 @@ import {
   CONTENT_VERSION_OPTIONS,
   PRESET_AUDIO_CHARACTERS,
   SCRIPT_ENHANCEMENT_OPTIONS,
-  SCRIPT_TAG_WHITELIST,
+  SCRIPT_TAG_EXAMPLES,
   buildDirectorPayload,
   createDefaultDirectorNote,
   createDefaultSettings,
@@ -1118,7 +1118,7 @@ export default function AudioMvpPage() {
                       </Stack>
 
                       <Alert severity="info">
-                        Allowed stable tags: {SCRIPT_TAG_WHITELIST.join(', ')}
+                        Example audio tags: {SCRIPT_TAG_EXAMPLES.join(', ')}
                       </Alert>
 
                       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>

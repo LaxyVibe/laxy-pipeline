@@ -1,9 +1,11 @@
 import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
+import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Box,
+  Button,
   IconButton,
   LinearProgress,
   Paper,
@@ -35,16 +37,23 @@ type Props = {
   };
   generationError: string | null;
   isGenerating: boolean;
+  onChooseAudio?: (selection: { audioUrl: string; scriptText: string }) => void;
 };
 
 type HistoryRow = {
   id: string;
+  downloadName: string;
   scriptText: string;
   audioUrl: string;
 };
 
+function sanitizeFilenamePart(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '');
+  return normalized || 'audio';
+}
+
 export default function GenerationHistoryRail(props: Props) {
-  const { items, generationHistory, audioFiles, itemStates, progressSummary, generationError, isGenerating } = props;
+  const { items, generationHistory, audioFiles, itemStates, progressSummary, generationError, isGenerating, onChooseAudio } = props;
 
   const itemLookup = useMemo(() => new Map(items.map((item) => [item.spotId, item])), [items]);
   const rows = useMemo<HistoryRow[]>(
@@ -58,6 +67,12 @@ export default function GenerationHistoryRail(props: Props) {
 
             return {
               id: `${run.runId}-${languageAudio.lang}-${spot.spotId}-${spot.audioUrl}`,
+              downloadName: [
+                'audio-director',
+                sanitizeFilenamePart(languageAudio.lang),
+                `spot-${String(spot.spotNumber ?? sourceItem?.spotNumber ?? 0).padStart(3, '0')}`,
+                sanitizeFilenamePart(spot.title || sourceItem?.title || ''),
+              ].join('-') + '.mp3',
               scriptText,
               audioUrl: spot.audioUrl,
             };
@@ -72,31 +87,17 @@ export default function GenerationHistoryRail(props: Props) {
     <Paper
       elevation={0}
       sx={{
-        p: 2,
+        p: { xs: 2, md: 2.5 },
         borderRadius: 5,
         border: '1px solid rgba(31, 43, 38, 0.10)',
         bgcolor: 'rgba(255, 255, 255, 0.88)',
         backdropFilter: 'blur(12px)',
-        position: { xl: 'sticky' },
-        top: { xl: 24 },
         display: 'flex',
         flexDirection: 'column',
-        minHeight: { xl: 'calc(100vh - 48px)' },
+        width: '100%',
       }}
     >
       <Stack spacing={2} sx={{ flex: 1, minHeight: 0 }}>
-        <Box>
-          <Typography variant="overline" sx={{ letterSpacing: '0.18em', color: 'text.secondary' }}>
-            Result History
-          </Typography>
-          <Typography variant="h6" fontWeight={700}>
-            Generated audio
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Review generated script audio in a compact list.
-          </Typography>
-        </Box>
-
         {generationError ? <Alert severity="error">{generationError}</Alert> : null}
 
         {isShowingProgress ? (
@@ -140,6 +141,12 @@ export default function GenerationHistoryRail(props: Props) {
                     <TableCell sx={{ py: 1.25, width: 72, fontWeight: 700 }} align="center">
                       Play
                     </TableCell>
+                    <TableCell sx={{ py: 1.25, width: 88, fontWeight: 700 }} align="center">
+                      Download
+                    </TableCell>
+                    <TableCell sx={{ py: 1.25, width: 112, fontWeight: 700 }} align="center">
+                      Choose
+                    </TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -152,6 +159,16 @@ export default function GenerationHistoryRail(props: Props) {
                       </TableCell>
                       <TableCell sx={{ py: 0.5 }} align="center">
                         <HistoryAudioButton audioUrl={row.audioUrl} />
+                      </TableCell>
+                      <TableCell sx={{ py: 0.5 }} align="center">
+                        <HistoryDownloadButton audioUrl={row.audioUrl} downloadName={row.downloadName} />
+                      </TableCell>
+                      <TableCell sx={{ py: 0.5 }} align="center">
+                        <HistoryChooseButton
+                          audioUrl={row.audioUrl}
+                          scriptText={row.scriptText}
+                          onChooseAudio={onChooseAudio}
+                        />
                       </TableCell>
                     </TableRow>
                   ))}
@@ -212,5 +229,44 @@ function HistoryAudioButton(props: { audioUrl: string }) {
         {isPlaying ? <PauseCircleOutlineIcon /> : <PlayCircleOutlineIcon />}
       </IconButton>
     </Tooltip>
+  );
+}
+
+function HistoryDownloadButton(props: { audioUrl: string; downloadName: string }) {
+  const { audioUrl, downloadName } = props;
+
+  return (
+    <Tooltip title="Download audio">
+      <IconButton
+        aria-label="Download audio"
+        component="a"
+        href={audioUrl}
+        download={downloadName}
+        target="_blank"
+        rel="noreferrer"
+        size="small"
+      >
+        <DownloadOutlinedIcon />
+      </IconButton>
+    </Tooltip>
+  );
+}
+
+function HistoryChooseButton(props: {
+  audioUrl: string;
+  scriptText: string;
+  onChooseAudio?: (selection: { audioUrl: string; scriptText: string }) => void;
+}) {
+  const { audioUrl, scriptText, onChooseAudio } = props;
+
+  return (
+    <Button
+      variant="outlined"
+      size="small"
+      disabled={!onChooseAudio}
+      onClick={() => onChooseAudio?.({ audioUrl, scriptText })}
+    >
+      Choose
+    </Button>
   );
 }

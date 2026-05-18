@@ -244,6 +244,63 @@ class TestTtsAudioExtraction:
         assert mime_type == "audio/mp3"
         assert error is None
 
+    def test_extract_audio_inline_data_converts_bytearray_to_bytes(self, executor):
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                inline_data=SimpleNamespace(data=bytearray(b"abc"), mime_type="audio/mpeg")
+                            )
+                        ]
+                    )
+                )
+            ],
+            prompt_feedback=None,
+            text=None,
+        )
+
+        audio_data, mime_type, error = executor._extract_audio_inline_data(response)
+        assert audio_data == b"abc"
+        assert isinstance(audio_data, bytes)
+        assert mime_type == "audio/mpeg"
+        assert error is None
+
+    def test_extract_audio_inline_data_reports_data_access_failure(self, executor):
+        class BrokenInlineData:
+            mime_type = "audio/mpeg"
+
+            @property
+            def data(self):
+                raise ValueError("bytearray(b'abc') could not be converted to bytes")
+
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(inline_data=BrokenInlineData())
+                        ]
+                    )
+                )
+            ],
+            prompt_feedback=None,
+            text=None,
+        )
+
+        audio_data, mime_type, error = executor._extract_audio_inline_data(response)
+        assert audio_data is None
+        assert mime_type == "audio/wav"
+        assert error == "The TTS provider returned audio in an unreadable format."
+
+    def test_format_audio_generation_error_sanitizes_raw_audio_dump(self, executor):
+        error = executor._format_audio_generation_error(
+            "bytearray(b'\\xff\\xf3...LAME3.100...') could not be converted to bytes"
+        )
+
+        assert error == "The TTS provider returned audio in an unreadable format."
+
     def test_extract_audio_inline_data_missing_parts_returns_descriptive_error(self, executor):
         response = SimpleNamespace(
             candidates=[
@@ -262,6 +319,32 @@ class TestTtsAudioExtraction:
         assert error is not None
         assert "No audio content returned" in error
         assert "block_reason=SAFETY" in error
+
+
+class TestTtsAudioOutputPreparation:
+    def test_prepare_audio_output_keeps_mp3_and_skips_alignment(self, executor):
+        output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
+            executor._prepare_audio_output(bytearray(b"ID3fake-mp3"), "audio/mpeg")
+        )
+
+        assert output_audio_data == b"ID3fake-mp3"
+        assert output_mime_type == "audio/mpeg"
+        assert output_extension == "mp3"
+        assert alignment_audio_data is None
+        assert duration_ms >= 0
+
+    @pytest.mark.asyncio
+    async def test_generate_aligned_srt_entries_falls_back_without_alignment_audio(self, executor):
+        with patch("agents.pipeline_agent.tools.srt_generate_for_text", return_value=[{"index": 1}]) as mock_srt:
+            result = await executor._generate_aligned_srt_entries(
+                text="hello world",
+                audio_data=None,
+                language="en",
+                duration_ms=1000,
+            )
+
+        assert result == [{"index": 1}]
+        mock_srt.assert_called_once()
 
 
 class TestTtsPromptBuilder:

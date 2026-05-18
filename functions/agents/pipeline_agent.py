@@ -1139,21 +1139,18 @@ class PipelineExecutor:
                     )
                     audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
 
-                if not audio_data:
-                    raise RuntimeError(extraction_error or "No audio data returned from Gemini TTS response")
+                    if not audio_data:
+                        raise RuntimeError(extraction_error or "No audio data returned from Gemini TTS response")
 
-                if self._mime_indicates_raw_pcm(mime_type):
-                    sample_rate = self._extract_sample_rate_from_mime(mime_type, default=24000)
-                    audio_data = self._pcm_to_wav(audio_data, sample_rate=sample_rate)
-                    mime_type = "audio/wav"
+                output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
+                    self._prepare_audio_output(audio_data, mime_type)
+                )
 
-                duration_ms = self._estimate_duration_ms(audio_data, mime_type)
-
-                storage_path = f"audio/{session_id}/{language}/{spot_id}.wav"
+                storage_path = f"audio/{session_id}/{language}/{spot_id}.{output_extension}"
                 download_token = str(uuid4())
                 blob = bucket.blob(storage_path)
                 blob.metadata = {"firebaseStorageDownloadTokens": download_token}
-                blob.upload_from_string(audio_data, content_type="audio/wav")
+                blob.upload_from_string(output_audio_data, content_type=output_mime_type)
 
                 storage_emulator = os.environ.get("FIREBASE_STORAGE_EMULATOR_HOST") or os.environ.get("STORAGE_EMULATOR_HOST")
                 if storage_emulator:
@@ -1164,7 +1161,14 @@ class PipelineExecutor:
                     blob.make_public()
                     audio_url = blob.public_url
 
-                logger.info(f"TTS generated: {language}/{spot_id} — {len(audio_data)} bytes, {duration_ms}ms")
+                logger.info(
+                    "TTS generated: %s/%s — %s bytes, %sms → %s",
+                    language,
+                    spot_id,
+                    len(output_audio_data),
+                    duration_ms,
+                    storage_path,
+                )
 
                 audio_files.append({
                     "lang": language,
@@ -1179,7 +1183,7 @@ class PipelineExecutor:
 
                 srt_entries = await self._generate_aligned_srt_entries(
                     text=text,
-                    audio_data=audio_data,
+                    audio_data=alignment_audio_data,
                     language=language,
                     duration_ms=duration_ms,
                 )
@@ -1209,7 +1213,7 @@ class PipelineExecutor:
                     "title": title,
                     "audioUrl": "",
                     "durationMs": 0,
-                    "error": str(e),
+                    "error": self._format_audio_generation_error(e),
                 })
 
         return {
@@ -1330,21 +1334,16 @@ class PipelineExecutor:
                     if not audio_data:
                         raise RuntimeError(extraction_error or "No audio data returned from Gemini TTS response")
 
-                    # Convert raw PCM to WAV if needed
-                    if self._mime_indicates_raw_pcm(mime_type):
-                        sample_rate = self._extract_sample_rate_from_mime(mime_type, default=24000)
-                        audio_data = self._pcm_to_wav(audio_data, sample_rate=sample_rate)
-                        mime_type = "audio/wav"
-
-                    # Compute duration from audio bytes
-                    duration_ms = self._estimate_duration_ms(audio_data, mime_type)
+                    output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
+                        self._prepare_audio_output(audio_data, mime_type)
+                    )
 
                     # Upload to Firebase Storage
-                    storage_path = f"audio/{session_id}/{lang}/{spot_id}.wav"
+                    storage_path = f"audio/{session_id}/{lang}/{spot_id}.{output_extension}"
                     download_token = str(uuid4())
                     blob = bucket.blob(storage_path)
                     blob.metadata = {"firebaseStorageDownloadTokens": download_token}
-                    blob.upload_from_string(audio_data, content_type="audio/wav")
+                    blob.upload_from_string(output_audio_data, content_type=output_mime_type)
 
                     # Build a download URL that works in both emulator and production
                     storage_emulator = os.environ.get("FIREBASE_STORAGE_EMULATOR_HOST") or os.environ.get("STORAGE_EMULATOR_HOST")
@@ -1357,7 +1356,7 @@ class PipelineExecutor:
                         audio_url = blob.public_url
 
                     logger.info(
-                        f"TTS generated: {lang}/{spot_id} — {len(audio_data)} bytes, "
+                        f"TTS generated: {lang}/{spot_id} — {len(output_audio_data)} bytes, "
                         f"{duration_ms}ms → {storage_path}"
                     )
 
@@ -1375,7 +1374,7 @@ class PipelineExecutor:
                     # Generate alignment-accurate SRT for this spot+lang.
                     srt_entries = await self._generate_aligned_srt_entries(
                         text=text,
-                        audio_data=audio_data,
+                        audio_data=alignment_audio_data,
                         language=lang,
                         duration_ms=duration_ms,
                     )
@@ -1405,7 +1404,7 @@ class PipelineExecutor:
                         "title": title,
                         "audioUrl": "",
                         "durationMs": 0,
-                        "error": str(e),
+                        "error": self._format_audio_generation_error(e),
                     })
 
         return {
@@ -1542,12 +1541,19 @@ class PipelineExecutor:
         self,
         *,
         text: str,
-        audio_data: bytes,
+        audio_data: bytes | None,
         language: str,
         duration_ms: int,
     ) -> list[dict[str, Any]]:
         alignment_text = audio_alignment.strip_performance_tags(text) or text
         duration_sec = max(0.001, duration_ms / 1000.0)
+        if not audio_data:
+            logger.info(
+                "No LINEAR16-safe alignment audio available for %s; using rule-based subtitle fallback",
+                language,
+            )
+            return tools.srt_generate_for_text(alignment_text, duration_sec)
+
         timeout_seconds = min(
             self._get_step_timeout_seconds("s9_audio_gen"),
             ALIGNMENT_TIMEOUT_SECONDS,
@@ -1741,6 +1747,80 @@ class PipelineExecutor:
         return buf.getvalue()
 
     @staticmethod
+    def _pcm_to_mp3(
+        pcm_data: bytes,
+        *,
+        sample_rate: int = 24000,
+        channels: int = 1,
+        bit_rate_kbps: int = 64,
+    ) -> bytes:
+        """Encode 16-bit PCM bytes to MP3 while preserving the target sample rate."""
+        try:
+            import lameenc  # type: ignore[import-not-found]
+        except Exception as exc:  # pragma: no cover - dependency availability is env-dependent
+            raise RuntimeError("MP3 encoding dependency is missing; install lameenc") from exc
+
+        encoder = lameenc.Encoder()
+        encoder.set_bit_rate(bit_rate_kbps)
+        encoder.set_in_sample_rate(sample_rate)
+        encoder.set_channels(channels)
+        if hasattr(encoder, "set_out_sample_rate"):
+            encoder.set_out_sample_rate(sample_rate)
+        encoder.set_quality(2)
+        mp3_data = encoder.encode(pcm_data)
+        mp3_data += encoder.flush()
+        return mp3_data
+
+    @staticmethod
+    def _wav_to_pcm(wav_data: bytes) -> tuple[bytes, int, int, int]:
+        """Extract PCM frames and format metadata from a WAV payload."""
+        with wave.open(io.BytesIO(wav_data), "rb") as wf:
+            return (
+                wf.readframes(wf.getnframes()),
+                wf.getframerate(),
+                wf.getnchannels(),
+                wf.getsampwidth(),
+            )
+
+    @classmethod
+    def _prepare_audio_output(
+        cls,
+        audio_data: bytes | bytearray | memoryview,
+        mime_type: str,
+    ) -> tuple[bytes, str, str, bytes | None, int]:
+        """Prepare downloadable output bytes while keeping alignment-safe audio bytes."""
+        normalized_audio_data = bytes(audio_data)
+        base_mime_type = (mime_type or "").split(";", 1)[0].strip().lower()
+
+        if cls._mime_indicates_raw_pcm(mime_type):
+            sample_rate = cls._extract_sample_rate_from_mime(mime_type, default=24000)
+            alignment_audio_data = cls._pcm_to_wav(normalized_audio_data, sample_rate=sample_rate)
+            output_audio_data = cls._pcm_to_mp3(normalized_audio_data, sample_rate=sample_rate)
+            duration_ms = cls._estimate_duration_ms(alignment_audio_data, "audio/wav")
+            return output_audio_data, "audio/mpeg", "mp3", alignment_audio_data, duration_ms
+
+        if base_mime_type in {"audio/mpeg", "audio/mp3"}:
+            duration_ms = cls._estimate_duration_ms(normalized_audio_data, "audio/mpeg")
+            # Google Speech alignment expects LINEAR16 input, so direct MP3
+            # responses must skip STT alignment and use subtitle fallback.
+            return normalized_audio_data, "audio/mpeg", "mp3", None, duration_ms
+
+        if base_mime_type in {"audio/wav", "audio/x-wav"}:
+            duration_ms = cls._estimate_duration_ms(normalized_audio_data, "audio/wav")
+            pcm_data, sample_rate, channels, sample_width = cls._wav_to_pcm(normalized_audio_data)
+            if sample_width != 2:
+                raise RuntimeError(f"Unsupported WAV sample width for MP3 conversion: {sample_width}")
+            output_audio_data = cls._pcm_to_mp3(
+                pcm_data,
+                sample_rate=sample_rate,
+                channels=channels,
+            )
+            return output_audio_data, "audio/mpeg", "mp3", normalized_audio_data, duration_ms
+
+        duration_ms = cls._estimate_duration_ms(normalized_audio_data, mime_type)
+        return normalized_audio_data, mime_type or "application/octet-stream", "bin", None, duration_ms
+
+    @staticmethod
     def _extract_sample_rate_from_mime(mime_type: str, default: int = 24000) -> int:
         """Extract sample rate (Hz) from mime strings like 'audio/L16;rate=24000'."""
         if not mime_type:
@@ -1781,6 +1861,31 @@ class PipelineExecutor:
         return int(len(audio_data) / (24000 * 2) * 1000)
 
     @staticmethod
+    def _format_audio_generation_error(error: Any) -> str:
+        """Normalize audio generation errors before they reach API responses."""
+        raw_message = str(error or "").strip()
+        if not raw_message:
+            return "Audio generation failed."
+
+        compact_message = " ".join(raw_message.split())
+        lowered = compact_message.lower()
+
+        if "could not be converted to bytes" in lowered:
+            return "The TTS provider returned audio in an unreadable format."
+        if "audio payload could not be read" in lowered:
+            return "The TTS provider returned audio that could not be read."
+        if "no audio data returned from gemini tts response" in lowered:
+            return "The TTS provider did not return any playable audio."
+        if PipelineExecutor._is_prohibited_content_block(compact_message):
+            return "The TTS provider blocked this audio prompt."
+
+        raw_audio_markers = ("bytearray(", "lame3.", "\\xff\\xf3", "b'\\xff", 'b"\\xff')
+        if any(marker in lowered for marker in raw_audio_markers) or len(compact_message) > 240:
+            return "The TTS provider returned audio in an unreadable format."
+
+        return compact_message
+
+    @staticmethod
     def _extract_audio_inline_data(response: Any) -> tuple[bytes | None, str, str | None]:
         """Extract first inline audio payload from Gemini response candidates."""
         candidates = getattr(response, "candidates", None) or []
@@ -1792,11 +1897,23 @@ class PipelineExecutor:
                 continue
             for part in parts:
                 inline_data = getattr(part, "inline_data", None)
-                data = getattr(inline_data, "data", None) if inline_data is not None else None
+                if inline_data is None:
+                    continue
+                try:
+                    data = getattr(inline_data, "data", None)
+                    mime_type = getattr(inline_data, "mime_type", None) or "audio/wav"
+                except Exception as exc:
+                    return None, "audio/wav", PipelineExecutor._format_audio_generation_error(
+                        f"Audio payload could not be read: {exc}"
+                    )
                 if not data:
                     continue
-                mime_type = getattr(inline_data, "mime_type", None) or "audio/wav"
-                return data, mime_type, None
+                try:
+                    return bytes(data), mime_type, None
+                except Exception as exc:
+                    return None, mime_type, PipelineExecutor._format_audio_generation_error(
+                        f"Audio payload could not be converted to bytes: {exc}"
+                    )
 
         details: list[str] = []
         prompt_feedback = getattr(response, "prompt_feedback", None)

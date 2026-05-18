@@ -122,7 +122,7 @@ export const SCRIPT_ENHANCEMENT_OPTIONS: Array<{
   },
 ];
 
-export const SCRIPT_TAG_WHITELIST = [
+export const SCRIPT_TAG_EXAMPLES = [
   '[sigh]',
   '[laughing]',
   '[uhm]',
@@ -137,28 +137,6 @@ export const SCRIPT_TAG_WHITELIST = [
   '[pause:1.5s]',
   '[phonetic:word|pronunciation]',
 ];
-
-const SCRIPT_TAG_SET = new Set([
-  'sigh',
-  'laughing',
-  'uhm',
-  'short pause',
-  'medium pause',
-  'long pause',
-  'whispering',
-  'shouting',
-  'sarcasm',
-]);
-
-function isValidPauseTag(tag: string): boolean {
-  return /^pause:(0\.5|1|1\.5)s$/i.test(tag.trim());
-}
-
-function isValidPhoneticTag(tag: string): boolean {
-  const match = /^phonetic:([^|]+)\|(.+)$/i.exec(tag.trim());
-  if (!match) return false;
-  return Boolean(match[1].trim()) && Boolean(match[2].trim());
-}
 
 export const AUDIO_MVP_VOICES: AudioMvpVoice[] = [
   {
@@ -487,9 +465,9 @@ export function scriptEnhancementInstruction(limit: ScriptEnhancementLimit): str
     return 'Do not add any bracket tags. Read the text naturally as written.';
   }
   if (limit === 'light') {
-    return `Use bracket tags sparingly from this cue palette when they materially improve delivery: ${SCRIPT_TAG_WHITELIST.join(', ')}. There is no hard per-sentence cap, but keep the script readable and avoid cue clutter.`;
+    return `Use bracket tags sparingly when they materially improve delivery. Example tags: ${SCRIPT_TAG_EXAMPLES.join(', ')}. There is no fixed tag whitelist, but keep the script readable and avoid cue clutter.`;
   }
-  return `Use bracket tags expressively when they sharpen performance. Prefer natural, readable cues from this palette: ${SCRIPT_TAG_WHITELIST.join(', ')}. There is no hard per-sentence cap, but avoid stacking cues so densely that the script becomes hard to follow.`;
+  return `Use bracket tags expressively when they sharpen performance. Example tags: ${SCRIPT_TAG_EXAMPLES.join(', ')}. There is no fixed tag whitelist, but avoid stacking cues so densely that the script becomes hard to follow.`;
 }
 
 export function describeScriptEnhancementLimit(limit: ScriptEnhancementLimit): string {
@@ -554,16 +532,7 @@ export function validateEnhancedScript(text: string): ScriptEnhancementValidatio
           excerpt: buildValidationExcerpt(text, index, closingIndex + 1),
         });
       } else {
-        const normalized = content.toLowerCase();
-        if (!SCRIPT_TAG_SET.has(normalized) && !isValidPauseTag(normalized) && !isValidPhoneticTag(normalized)) {
-          issues.push({
-            index: issues.length + 1,
-            message: 'Cue tag is not in the supported format or whitelist.',
-            excerpt: buildValidationExcerpt(text, index, closingIndex + 1),
-          });
-        } else {
-          totalTags += 1;
-        }
+        totalTags += 1;
       }
 
       index = closingIndex;

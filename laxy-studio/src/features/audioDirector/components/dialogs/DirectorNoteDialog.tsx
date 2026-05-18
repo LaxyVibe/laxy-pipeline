@@ -17,7 +17,7 @@ import {
 import {
   CONTENT_VERSION_OPTIONS,
   SCRIPT_ENHANCEMENT_OPTIONS,
-  SCRIPT_TAG_WHITELIST,
+  SCRIPT_TAG_EXAMPLES,
   type AudioGuideSettings,
   type ContentVersion,
   type ScriptEnhancementLimit,
@@ -136,7 +136,7 @@ export default function DirectorNoteDialog(props: Props) {
           </Box>
 
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-            {SCRIPT_TAG_WHITELIST.map((tag) => (
+            {SCRIPT_TAG_EXAMPLES.map((tag) => (
               <Chip key={tag} label={tag} size="small" variant="outlined" />
             ))}
           </Stack>

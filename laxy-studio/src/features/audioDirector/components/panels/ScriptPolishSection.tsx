@@ -65,15 +65,18 @@ export default function ScriptPolishSection(props: Props) {
   } = props;
 
   const hasEnhancement = Object.keys(activeEnhancementEntries).length > 0;
+  const showEmbeddedHeader = mode !== 'plain';
   const content = (
     <Stack spacing={2.5}>
       <Stack spacing={2}>
-        <AudioDirectorSectionHeader
-          icon={<AutoAwesomeIcon />}
-          title="Script polish"
-          body="Review the original transcript and the polished version side by side through tabs."
-          eyebrow={eyebrow}
-        />
+        {showEmbeddedHeader ? (
+          <AudioDirectorSectionHeader
+            icon={<AutoAwesomeIcon />}
+            title="Script polish"
+            body="Review the original transcript and the polished version side by side through tabs."
+            eyebrow={eyebrow}
+          />
+        ) : null}
 
         <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
           <Chip label={`Language: ${langLabel(coreLanguage)}`} variant="outlined" />
