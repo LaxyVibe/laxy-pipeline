@@ -55,15 +55,21 @@ export default function AudioDirectorApp() {
               voiceId={controller.selectedVoice.id}
               voiceName={controller.selectedVoice.name}
               isGenerating={controller.isGenerating}
+              isGeneratingJapaneseReading={controller.isGeneratingJapaneseReading}
               generateDisabled={controller.currentScriptText.trim().length === 0}
+              japaneseReadingStale={controller.currentJapaneseReadingStale}
+              japaneseReadingText={controller.currentJapaneseReadingText}
               onChangeScript={controller.handleCurrentScriptTextChange}
+              onChangeJapaneseReading={controller.handleJapaneseReadingTextChange}
               onChangeCompiledPrompt={controller.handleCompiledPromptChange}
               onGenerate={controller.runGeneration}
+              onGenerateJapaneseReading={controller.handleGenerateJapaneseReading}
               onPreviewVoice={controller.handleVoicePreviewRestart}
               onOpenCharacterPicker={() => controller.setCharacterPickerOpen(true)}
               onOpenVoicePicker={() => controller.setVoicePickerOpen(true)}
                 onOpenScriptPolish={() => setScriptPolishOpen(true)}
                 onOpenDirectorNote={() => controller.setDirectorNoteEditorOpen(true)}
+              showJapaneseReading={controller.coreLanguage === 'ja'}
               />
             <DeployVersionFooter align="left" compact />
           </Stack>

@@ -8,6 +8,7 @@ from contracts.pipeline_contract import (
     AudioSessionBootstrapRequest,
     AudioGenerateLanguageRequest,
     AudioGenerateRequest,
+    GenerateJapaneseHiraganaRequest,
     PublishGuideRequest,
     PublishStatusRequest,
     PipelineResumeRequest,
@@ -150,6 +151,16 @@ def test_audio_session_bootstrap_request_accepts_context() -> None:
     })
     assert payload.sessionId == "audio-1"
     assert payload.context == {"tenantId": "tenant-1", "flow": "audio-mvp"}
+
+
+def test_generate_japanese_hiragana_request_requires_script_content() -> None:
+    with pytest.raises(ValidationError):
+        GenerateJapaneseHiraganaRequest.model_validate({})
+
+    payload = GenerateJapaneseHiraganaRequest.model_validate({
+        "scriptContent": "明日、軽やかに風景を描く。",
+    })
+    assert payload.scriptContent == "明日、軽やかに風景を描く。"
 
 
 def test_translate_language_request_requires_target_and_core_language() -> None:

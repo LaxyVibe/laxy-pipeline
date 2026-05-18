@@ -1008,6 +1008,49 @@ export async function enhanceScript(
 }
 
 
+// ── Japanese Hiragana Narration Conversion ──
+
+export interface GenerateJapaneseHiraganaRequest {
+  scriptContent: string;
+}
+
+export interface GenerateJapaneseHiraganaResponse {
+  success: boolean;
+  hiraganaText: string;
+}
+
+export async function generateJapaneseHiragana(
+  request: GenerateJapaneseHiraganaRequest,
+): Promise<GenerateJapaneseHiraganaResponse> {
+  const trace = createRequestTraceContext('pipeline.generate_japanese_hiragana');
+  const res = await fetchWithTrace(`${pipelineUrl('generate-japanese-hiragana')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  }, trace);
+  await assertOkOrThrow(res);
+  const payload = await readJsonSafely(res);
+  if (payload == null) {
+    throw new ApiRequestError({
+      status: 502,
+      code: 'INVALID_JSON_RESPONSE',
+      message: 'Invalid JSON response body',
+      retryable: true,
+    });
+  }
+  const data = payload as GenerateJapaneseHiraganaResponse;
+  if (!data.hiraganaText && data.hiraganaText !== '') {
+    throw new ApiRequestError({
+      status: 502,
+      code: 'INVALID_RESPONSE_SHAPE',
+      message: 'Missing hiraganaText in response',
+      retryable: true,
+    });
+  }
+  return data;
+}
+
+
 // ── Character Generation AI ──
 
 export interface GenerateCharacterRequest {

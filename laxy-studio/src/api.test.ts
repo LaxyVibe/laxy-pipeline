@@ -490,6 +490,51 @@ describe('bootstrapAudioSession', () => {
   });
 });
 
+describe('generateJapaneseHiragana', () => {
+  it('calls generate-japanese-hiragana endpoint', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        hiraganaText: 'あす、かろやかにふうけいをえがく。',
+      }),
+    });
+
+    const { generateJapaneseHiragana } = await import('./api');
+    const result = await generateJapaneseHiragana({
+      scriptContent: '明日、軽やかに風景を描く。',
+    });
+
+    const calledUrl = String((global.fetch as any).mock.calls[0][0]);
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(calledUrl).toMatch(/\/pipeline\/generate-japanese-hiragana|generate-japanese-hiragana-/);
+    expect(body.scriptContent).toBe('明日、軽やかに風景を描く。');
+    expect(result.hiraganaText).toBe('あす、かろやかにふうけいをえがく。');
+  });
+
+  it('rejects invalid Japanese Hiragana response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+      }),
+    });
+
+    const { generateJapaneseHiragana } = await import('./api');
+    await expect(
+      generateJapaneseHiragana({
+        scriptContent: '明日、軽やかに風景を描く。',
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SHAPE',
+    });
+  });
+});
+
 describe('API error normalization', () => {
   it('surfaces structured backend error envelope fields', async () => {
     global.fetch = vi.fn().mockResolvedValue({

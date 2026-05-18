@@ -6,6 +6,7 @@ import {
   generateAudioForLanguage,
   generateCharacter,
   generateDirectorNote,
+  generateJapaneseHiragana,
 } from '../../api';
 import { SUPPORTED_LANGUAGES, langLabel, type LanguageAudio, type LanguageSRT } from '../../types/entity';
 import {
@@ -31,6 +32,7 @@ import type {
   EnhancementEntry,
   GenerationHistoryEntry,
   ItemGenerationState,
+  JapaneseReadingEntry,
   SaveStatus,
   WizardScreen,
 } from './types';
@@ -103,6 +105,7 @@ export function useAudioDirectorController() {
   const [coreLanguage, setCoreLanguage] = useState('en');
   const [scriptEnhancementEnabled, setScriptEnhancementEnabled] = useState(false);
   const [enhancementCache, setEnhancementCache] = useState<Record<string, Record<string, EnhancementEntry>>>({});
+  const [readingAssistCache, setReadingAssistCache] = useState<Record<string, Record<string, JapaneseReadingEntry>>>({});
   const defaultSettings = useMemo(() => createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]), []);
   const [globalSettings, setGlobalSettings] = useState<AudioGuideSettings>(defaultSettings);
   const [audioFiles, setAudioFiles] = useState<LanguageAudio[]>([]);
@@ -111,6 +114,7 @@ export function useAudioDirectorController() {
   const [itemStates, setItemStates] = useState<Record<string, ItemGenerationState>>({});
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingJapaneseReading, setIsGeneratingJapaneseReading] = useState(false);
   const [lastGenerationLatencyMs, setLastGenerationLatencyMs] = useState<number | null>(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -131,6 +135,7 @@ export function useAudioDirectorController() {
     setSessionId(null);
     setCoreLanguage('en');
     setEnhancementCache({});
+    setReadingAssistCache({});
     setGenerationHistory([]);
     setAudioFiles([]);
     setSrtFiles([]);
@@ -157,6 +162,7 @@ export function useAudioDirectorController() {
       setScriptEnhancementEnabled(saved.scriptEnhancementEnabled ?? false);
       setCustomCharacters(saved.customCharacters ?? []);
       setGlobalSettings(saved.globalSettings ?? defaultSettings);
+      setReadingAssistCache(saved.readingAssistCache ?? {});
       setItems([]);
       return;
     }
@@ -168,6 +174,7 @@ export function useAudioDirectorController() {
     setCustomCharacters(saved.customCharacters ?? []);
     setGlobalSettings(saved.globalSettings ?? defaultSettings);
     setEnhancementCache(saved.enhancementCache ?? {});
+    setReadingAssistCache(saved.readingAssistCache ?? {});
     setGenerationHistory(saved.generationHistory ?? []);
     setItems(resolveScriptDraft(saved.manuscriptText ?? '', saved.items ?? []));
   }, [defaultSettings, isEmbedded]);
@@ -186,6 +193,7 @@ export function useAudioDirectorController() {
       items,
       customCharacters,
       enhancementCache,
+      readingAssistCache,
       generationHistory,
     } satisfies AudioDirectorDraft);
   }, [
@@ -196,6 +204,7 @@ export function useAudioDirectorController() {
     generationHistory,
     items,
     manuscriptText,
+    readingAssistCache,
     scriptEnhancementEnabled,
     sessionId,
   ]);
@@ -365,7 +374,11 @@ export function useAudioDirectorController() {
         const effectiveText = scriptEnhancementEnabled
           ? enhancementCache[coreLanguage]?.[item.spotId]?.enhancedText ?? sourceText
           : sourceText;
-        const preprocessing = preprocessScriptForLanguage(coreLanguage, effectiveText);
+        const japaneseReadingEntry = coreLanguage === 'ja' ? readingAssistCache[coreLanguage]?.[item.spotId] : undefined;
+        const ttsSourceText = japaneseReadingEntry && japaneseReadingEntry.sourceText === effectiveText
+          ? japaneseReadingEntry.hiraganaText
+          : effectiveText;
+        const preprocessing = preprocessScriptForLanguage(coreLanguage, ttsSourceText);
         const directorPayload = buildDirectorPayload({
           settings,
           character,
@@ -392,6 +405,7 @@ export function useAudioDirectorController() {
           script: {
             originalText: sourceText,
             effectiveText,
+            ttsSourceText,
             processedText: preprocessing.processedText,
             preprocessingNotes: preprocessing.preprocessingNotes,
           },
@@ -430,6 +444,7 @@ export function useAudioDirectorController() {
       enhancementCache,
       globalSettings,
       items,
+      readingAssistCache,
       scriptEnhancementEnabled,
       selectedCharacter,
       sessionId,
@@ -437,6 +452,7 @@ export function useAudioDirectorController() {
   );
 
   const activeEnhancementEntries = enhancementCache[coreLanguage] ?? {};
+  const activeReadingEntries = readingAssistCache[coreLanguage] ?? {};
   const currentScreen: WizardScreen = isWizardScreen(searchParams.get('screen'))
     ? searchParams.get('screen') as WizardScreen
     : 'guide-settings';
@@ -870,6 +886,47 @@ export function useAudioDirectorController() {
     }));
   };
 
+  const setJapaneseReadingEntry = (
+    language: string,
+    item: AudioPoiDraft,
+    sourceText: string,
+    hiraganaText: string,
+    isEdited: boolean,
+  ) => {
+    const nextEntry: JapaneseReadingEntry = {
+      sourceText,
+      hiraganaText,
+      isEdited,
+      generatedAt: Date.now(),
+    };
+    setReadingAssistCache((previous) => ({
+      ...previous,
+      [language]: {
+        ...(previous[language] ?? {}),
+        [item.spotId]: nextEntry,
+      },
+    }));
+    return nextEntry;
+  };
+
+  const ensureJapaneseReadingEntry = async (
+    language: string,
+    item: AudioPoiDraft,
+    sourceText: string,
+  ): Promise<JapaneseReadingEntry | null> => {
+    if (language !== 'ja') return null;
+
+    const existing = readingAssistCache[language]?.[item.spotId];
+    if (existing && existing.sourceText === sourceText && existing.hiraganaText.trim()) {
+      return existing;
+    }
+
+    const result = await generateJapaneseHiragana({
+      scriptContent: sourceText,
+    });
+    return setJapaneseReadingEntry(language, item, sourceText, result.hiraganaText.trim(), false);
+  };
+
   const runGeneration = async () => {
     if (items.length === 0) {
       setGenerationError('Add guide text first to prepare audio.');
@@ -920,7 +977,11 @@ export function useAudioDirectorController() {
           throw new Error('Fix enhancement tags in the polished script before generating audio.');
         }
 
-        const preprocessing = preprocessScriptForLanguage(language, effectiveText);
+        const japaneseReadingEntry = await ensureJapaneseReadingEntry(language, item, effectiveText);
+        const ttsSourceText = language === 'ja'
+          ? japaneseReadingEntry?.hiraganaText?.trim() || effectiveText
+          : effectiveText;
+        const preprocessing = preprocessScriptForLanguage(language, ttsSourceText);
         setItemStates((previous) => ({
           ...previous,
           [stateKey]: {
@@ -928,7 +989,7 @@ export function useAudioDirectorController() {
             label: 'Script',
             message: `${langLabel(language)} generation in progress`,
             originalScript: sourceText,
-            finalScript: effectiveText,
+            finalScript: ttsSourceText,
           },
         }));
         setProgressSummary((previous) => ({
@@ -974,9 +1035,11 @@ export function useAudioDirectorController() {
           [stateKey]: {
             status: 'done',
             label: 'Script',
-            message: preprocessing.preprocessingNotes.join(' ') || 'Ready to review',
+            message: language === 'ja'
+              ? 'Japanese Hiragana reading applied before TTS.'
+              : preprocessing.preprocessingNotes.join(' ') || 'Ready to review',
             originalScript: sourceText,
-            finalScript: effectiveText,
+            finalScript: ttsSourceText,
           },
         }));
         setProgressSummary((previous) => ({
@@ -1021,9 +1084,18 @@ export function useAudioDirectorController() {
   }, [activeEnhancementEntries, items, scriptEnhancementEnabled]);
 
   const currentScriptLabel = scriptEnhancementEnabled ? 'Polished script' : 'Original script';
+  const currentItem = items[0];
+  const currentJapaneseReadingEntry = useMemo(() => {
+    if (coreLanguage !== 'ja' || !currentItem) return undefined;
+    return activeReadingEntries[currentItem.spotId];
+  }, [activeReadingEntries, coreLanguage, currentItem]);
+  const currentJapaneseReadingText = currentJapaneseReadingEntry?.hiraganaText ?? '';
+  const currentJapaneseReadingStale = coreLanguage === 'ja'
+    && Boolean(currentItem)
+    && Boolean(currentJapaneseReadingEntry)
+    && (currentJapaneseReadingEntry?.sourceText ?? '') !== currentScriptText;
 
   const handleCurrentScriptTextChange = (nextText: string) => {
-    const currentItem = items[0];
     if (!currentItem) {
       setManuscriptText(nextText);
       return;
@@ -1037,8 +1109,41 @@ export function useAudioDirectorController() {
     setManuscriptText(nextText);
   };
 
+  const handleJapaneseReadingTextChange = (nextText: string) => {
+    if (coreLanguage !== 'ja' || !currentItem) return;
+    setJapaneseReadingEntry(coreLanguage, currentItem, currentScriptText, nextText, true);
+  };
+
+  const handleGenerateJapaneseReading = async () => {
+    if (coreLanguage !== 'ja' || !currentItem || !currentScriptText.trim()) return;
+
+    const existing = activeReadingEntries[currentItem.spotId];
+    if (
+      existing?.isEdited
+      && existing.sourceText === currentScriptText
+      && !window.confirm('Regenerating the Hiragana reading will overwrite your manual reading edits. Continue?')
+    ) {
+      return;
+    }
+
+    setGenerationError(null);
+    setIsGeneratingJapaneseReading(true);
+    try {
+      const result = await generateJapaneseHiragana({
+        scriptContent: currentScriptText,
+      });
+      setJapaneseReadingEntry(coreLanguage, currentItem, currentScriptText, result.hiraganaText.trim(), false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setGenerationError(`Japanese reading conversion failed: ${message}`);
+    } finally {
+      setIsGeneratingJapaneseReading(false);
+    }
+  };
+
   return {
     activeEnhancementEntries,
+    activeReadingEntries,
     allCharacters,
     analysisPhase,
     audioFiles,
@@ -1049,6 +1154,8 @@ export function useAudioDirectorController() {
     configPreviewOpen,
     coreLanguage,
     currentScreen,
+    currentJapaneseReadingStale,
+    currentJapaneseReadingText,
     currentScriptLabel,
     currentScriptText,
     customCharacters,
@@ -1074,11 +1181,13 @@ export function useAudioDirectorController() {
     handleDraftCharacter,
     handleEnhanceActiveLanguage,
     handleEnhancedScriptChange,
+    handleGenerateJapaneseReading,
     handlePhoneticOverridesChange,
     handleGenerateDirectorNote,
     handleGlobalCharacterChange,
     handleGlobalContentVersionChange,
     handleGlobalVoiceChange,
+    handleJapaneseReadingTextChange,
     handleNavigate,
     handleSaveCharacter,
     handleSaveToBackend,
@@ -1089,6 +1198,7 @@ export function useAudioDirectorController() {
     isAnalyzing,
     isEnhancing,
     isGenerating,
+    isGeneratingJapaneseReading,
     isGeneratingCharacter,
     lastGenerationLatencyMs,
     itemStates,

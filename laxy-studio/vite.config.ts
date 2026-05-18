@@ -62,6 +62,11 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: () => `/${GCP_PROJECT}/${GCP_REGION}/translate_language`,
         },
+        '/pipeline/generate-japanese-hiragana': {
+          target: 'http://127.0.0.1:5001',
+          changeOrigin: true,
+          rewrite: () => `/${GCP_PROJECT}/${GCP_REGION}/generate_japanese_hiragana`,
+        },
         '/pipeline': {
           target: 'http://127.0.0.1:5001',
           changeOrigin: true,

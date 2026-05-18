@@ -91,6 +91,10 @@ class EnhanceScriptRequest(BaseModel):
     contextDirective: str | None = None
 
 
+class GenerateJapaneseHiraganaRequest(BaseModel):
+    scriptContent: str = Field(min_length=1)
+
+
 class GenerateCharacterRequest(BaseModel):
     designerPrompt: str = Field(min_length=1)
 

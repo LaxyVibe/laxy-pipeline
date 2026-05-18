@@ -64,6 +64,10 @@
         "function": "enhance_script"
       },
       {
+        "source": "/pipeline/generate-japanese-hiragana",
+        "function": "generate_japanese_hiragana"
+      },
+      {
         "source": "/pipeline/generate-character",
         "function": "generate_character"
       },

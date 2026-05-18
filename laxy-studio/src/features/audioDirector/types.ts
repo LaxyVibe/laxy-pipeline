@@ -21,6 +21,13 @@ export type EnhancementEntry = {
   validation: ScriptEnhancementValidation;
 };
 
+export type JapaneseReadingEntry = {
+  sourceText: string;
+  hiraganaText: string;
+  isEdited: boolean;
+  generatedAt: number | null;
+};
+
 export type ItemGenerationState = {
   status: ProgressStatus;
   label?: string;
@@ -39,6 +46,7 @@ export type AudioDirectorDraft = {
   items: AudioPoiDraft[];
   customCharacters: AudioMvpCharacter[];
   enhancementCache: Record<string, Record<string, EnhancementEntry>>;
+  readingAssistCache: Record<string, Record<string, JapaneseReadingEntry>>;
   generationHistory: GenerationHistoryEntry[];
 };
 

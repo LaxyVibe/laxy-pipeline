@@ -4,12 +4,14 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import LocalMoviesOutlinedIcon from '@mui/icons-material/LocalMoviesOutlined';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
 import SwapHorizOutlinedIcon from '@mui/icons-material/SwapHorizOutlined';
+import TranslateOutlinedIcon from '@mui/icons-material/TranslateOutlined';
 import {
   Box,
   Button,
   ButtonBase,
   Card,
   CardContent,
+  Chip,
   IconButton,
   Stack,
   TextField,
@@ -26,15 +28,21 @@ type Props = {
   voiceId: string;
   voiceName: string;
   isGenerating: boolean;
+  isGeneratingJapaneseReading?: boolean;
   generateDisabled?: boolean;
+  japaneseReadingStale?: boolean;
+  japaneseReadingText?: string;
   onChangeScript: (nextText: string) => void;
+  onChangeJapaneseReading?: (nextText: string) => void;
   onChangeCompiledPrompt: (nextText: string) => void;
   onGenerate: () => void;
+  onGenerateJapaneseReading?: () => void;
   onPreviewVoice: (voiceId: string) => void;
   onOpenCharacterPicker: () => void;
   onOpenVoicePicker: () => void;
   onOpenScriptPolish: () => void;
   onOpenDirectorNote: () => void;
+  showJapaneseReading?: boolean;
 };
 
 export default function TtsScriptSection(props: Props) {
@@ -46,19 +54,29 @@ export default function TtsScriptSection(props: Props) {
     voiceId,
     voiceName,
     isGenerating,
+    isGeneratingJapaneseReading = false,
     generateDisabled = false,
+    japaneseReadingStale = false,
+    japaneseReadingText = '',
     onChangeScript,
+    onChangeJapaneseReading,
     onChangeCompiledPrompt,
     onGenerate,
+    onGenerateJapaneseReading,
     onPreviewVoice,
     onOpenCharacterPicker,
     onOpenVoicePicker,
     onOpenScriptPolish,
     onOpenDirectorNote,
+    showJapaneseReading = false,
   } = props;
 
   const [manualEditEnabled, setManualEditEnabled] = useState(false);
   const editorHeight = { xs: 320, md: 380, xl: 420 };
+  const primaryEditorHeight = showJapaneseReading
+    ? { xs: 180, md: 205, xl: 230 }
+    : editorHeight;
+  const readingEditorHeight = { xs: 110, md: 125, xl: 140 };
   const scrollingTextFieldSx = {
     flex: 1,
     minHeight: 0,
@@ -281,10 +299,25 @@ export default function TtsScriptSection(props: Props) {
                     <AutoAwesomeIcon />
                   </IconButton>
                 </Tooltip>
+
+                {showJapaneseReading ? (
+                  <Tooltip title={isGeneratingJapaneseReading ? 'Generating Hiragana reading…' : 'Generate Hiragana reading'}>
+                    <span>
+                      <IconButton
+                        onClick={onGenerateJapaneseReading}
+                        aria-label="Generate Hiragana reading"
+                        color={japaneseReadingText.trim() ? 'primary' : 'default'}
+                        disabled={!scriptText.trim() || isGeneratingJapaneseReading || !onGenerateJapaneseReading}
+                      >
+                        <TranslateOutlinedIcon />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                ) : null}
               </Stack>
 
               <Stack spacing={1.25} sx={{ minHeight: 0 }}>
-                <Box sx={{ height: editorHeight, minHeight: editorHeight, display: 'flex' }}>
+                <Box sx={{ height: primaryEditorHeight, minHeight: primaryEditorHeight, display: 'flex' }}>
                   <TextField
                     multiline
                     minRows={1}
@@ -295,6 +328,44 @@ export default function TtsScriptSection(props: Props) {
                     sx={scrollingTextFieldSx}
                   />
                 </Box>
+
+                {showJapaneseReading ? (
+                  <Stack spacing={0.75}>
+                    <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+                      <Typography variant="caption" color="text.secondary" sx={{ letterSpacing: '0.08em' }}>
+                        Japanese narration reading
+                      </Typography>
+                      <Chip
+                        size="small"
+                        color={japaneseReadingStale ? 'warning' : japaneseReadingText.trim() ? 'primary' : 'default'}
+                        variant="outlined"
+                        label={
+                          japaneseReadingStale
+                            ? 'Needs refresh'
+                            : japaneseReadingText.trim()
+                              ? 'Ready for TTS'
+                              : 'Not generated yet'
+                        }
+                      />
+                    </Stack>
+
+                    <Box sx={{ height: readingEditorHeight, minHeight: readingEditorHeight, display: 'flex' }}>
+                      <TextField
+                        multiline
+                        minRows={1}
+                        fullWidth
+                        value={japaneseReadingText}
+                        onChange={(event) => onChangeJapaneseReading?.(event.target.value)}
+                        placeholder="Generate Hiragana reading, then adjust pronunciation here if needed."
+                        sx={scrollingTextFieldSx}
+                      />
+                    </Box>
+
+                    <Typography variant="caption" color="text.secondary">
+                      Audio generation will use this Hiragana reading for Japanese TTS when available.
+                    </Typography>
+                  </Stack>
+                ) : null}
 
                 <Stack direction="row" justifyContent="flex-end">
                   <Button

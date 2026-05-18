@@ -182,6 +182,9 @@ function normalizeAudioDirectorDraft(
     enhancementCache: !dropScriptBoundState && value.enhancementCache && typeof value.enhancementCache === 'object'
       ? value.enhancementCache
       : {},
+    readingAssistCache: !dropScriptBoundState && value.readingAssistCache && typeof value.readingAssistCache === 'object'
+      ? value.readingAssistCache
+      : {},
     generationHistory: !dropScriptBoundState && Array.isArray(value.generationHistory)
       ? value.generationHistory
       : [],

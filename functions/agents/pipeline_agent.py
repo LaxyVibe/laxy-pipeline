@@ -1006,6 +1006,37 @@ class PipelineExecutor:
 
         return {"success": True, "enhancedScript": enhanced}
 
+    async def generate_japanese_hiragana(
+        self,
+        script_content: str,
+    ) -> dict[str, Any]:
+        """Convert Japanese narration text into all-Hiragana reading text."""
+        prompt_text = load_prompt("ja_hiragana_narration")
+        model = MODELS["flash"]
+
+        response = await _retry_generate_content(
+            self._client,
+            timeout_seconds=self._get_step_timeout_seconds("guide_script_enhance"),
+            retry_context={"operation": "generate_japanese_hiragana"},
+            model=model,
+            contents=script_content,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                temperature=0.2,
+                response_mime_type="text/plain",
+            ),
+        )
+
+        text = response.text if response.text else ""
+        hiragana = text.strip()
+        if hiragana.startswith("```"):
+            hiragana = hiragana.split("\n", 1)[1] if "\n" in hiragana else hiragana[3:]
+            if hiragana.endswith("```"):
+                hiragana = hiragana[:-3]
+            hiragana = hiragana.strip()
+
+        return {"success": True, "hiraganaText": hiragana}
+
     # ── Standalone character generation ──
 
     async def generate_character(

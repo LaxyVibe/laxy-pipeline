@@ -51,6 +51,7 @@ from contracts.pipeline_contract import (
     AudioGenerateLanguageRequest,
     AudioGenerateRequest,
     EnhanceScriptRequest,
+    GenerateJapaneseHiraganaRequest,
     GenerateCharacterRequest,
     GenerateDirectorNoteRequest,
     PublishGuideRequest,
@@ -2167,6 +2168,91 @@ def enhance_script(req: https_fn.Request) -> https_fn.Response:
                 "Script enhancement failed",
                 500,
                 code="SCRIPT_ENHANCEMENT_FAILED",
+                details=str(e),
+                retryable=True,
+            )
+    finally:
+        _clear_request_context(context_token)
+
+
+@https_fn.on_request(
+    memory=options.MemoryOption.GB_1,
+    timeout_sec=120,
+    region="us-central1",
+)
+def generate_japanese_hiragana(req: https_fn.Request) -> https_fn.Response:
+    """
+    Convert Japanese script text into standard Hiragana narration reading.
+
+    Request body:
+    {
+        "scriptContent": "明日、軽やかに風景を描く。"
+    }
+
+    Response:
+    {
+        "success": true,
+        "hiraganaText": "あす、かろやかにふうけいをえがく。"
+    }
+    """
+    if req.method == "OPTIONS":
+        return https_fn.Response("", status=204, headers=_cors_headers())
+
+    context_token = _set_request_context(req, endpoint="generate_japanese_hiragana")
+    try:
+        if req.method != "POST":
+            return _error_response("Method not allowed", 405, code="METHOD_NOT_ALLOWED")
+
+        auth_context, auth_error = _authorise_admin_request(req, require_tenant_scope=False)
+        if auth_error:
+            _write_audit_log(
+                "pipeline.generate_japanese_hiragana.denied",
+                resource="japanese_hiragana_generation",
+                details={"reason": "auth_failed"},
+                success=False,
+            )
+            return auth_error
+
+        try:
+            body = req.get_json(silent=True) or {}
+        except Exception:
+            return _error_response("Invalid JSON body", code="INVALID_JSON_BODY")
+
+        try:
+            payload = GenerateJapaneseHiraganaRequest.model_validate(body)
+        except ValidationError as e:
+            return _error_response(
+                "Invalid request body",
+                code="INVALID_REQUEST_BODY",
+                details=e.errors(),
+            )
+
+        try:
+            executor = get_executor()
+            result = _run_async(
+                executor.generate_japanese_hiragana(
+                    script_content=payload.scriptContent,
+                )
+            )
+            _write_audit_log(
+                "pipeline.generate_japanese_hiragana",
+                resource="japanese_hiragana_generation",
+                details={"scriptLength": len(payload.scriptContent)},
+                success=True,
+            )
+            return _json_response(result)
+        except Exception as e:
+            logger.error(f"generate_japanese_hiragana error: {e}\n{traceback.format_exc()}")
+            _write_audit_log(
+                "pipeline.generate_japanese_hiragana.failed",
+                resource="japanese_hiragana_generation",
+                details={"error": str(e)},
+                success=False,
+            )
+            return _error_response(
+                "Japanese Hiragana conversion failed",
+                500,
+                code="JAPANESE_HIRAGANA_GENERATION_FAILED",
                 details=str(e),
                 retryable=True,
             )
