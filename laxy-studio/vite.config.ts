@@ -26,11 +26,15 @@ export default defineConfig(({ mode }) => {
   // Load VITE_* vars from .env / .env.local so they're available here
   const env = loadEnv(mode, process.cwd(), '')
   assertRequiredFirebaseEnv(mode, env)
+  const deployVersion = env.VITE_DEPLOY_VERSION || new Date().toISOString()
 
   const GCP_PROJECT = env.VITE_GCP_PROJECT || 'laxy-pipeline-dev'
   const GCP_REGION  = env.VITE_GCP_REGION  || 'us-central1'
 
   return {
+    define: {
+      __APP_BUILD_VERSION__: JSON.stringify(deployVersion),
+    },
     plugins: [react()],
     test: {
       exclude: ['e2e/**', 'node_modules/**', 'dist/**'],

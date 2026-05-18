@@ -11,6 +11,7 @@ import CharacterPickerDialog from './components/dialogs/CharacterPickerDialog';
 import ConfigPreviewDialog from './components/dialogs/ConfigPreviewDialog';
 import DirectorNoteDialog from './components/dialogs/DirectorNoteDialog';
 import VoicePickerDialog from './components/dialogs/VoicePickerDialog';
+import DeployVersionFooter from '../../components/DeployVersionFooter';
 import GenerationHistoryRail from './components/panels/GenerationHistoryRail';
 import ScriptPolishSection from './components/panels/ScriptPolishSection';
 import TtsScriptSection from './components/panels/TtsScriptSection';
@@ -64,6 +65,7 @@ export default function AudioDirectorApp() {
                 onOpenScriptPolish={() => setScriptPolishOpen(true)}
                 onOpenDirectorNote={() => controller.setDirectorNoteEditorOpen(true)}
               />
+            <DeployVersionFooter align="left" compact />
           </Stack>
         </Container>
 

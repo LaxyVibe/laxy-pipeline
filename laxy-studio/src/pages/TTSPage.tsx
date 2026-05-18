@@ -33,6 +33,7 @@ import HeadphonesIcon from '@mui/icons-material/Headphones';
 import LanguageOutlinedIcon from '@mui/icons-material/LanguageOutlined';
 import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
+import DeployVersionFooter from '../components/DeployVersionFooter';
 import { detectLanguageCode } from '../features/audioDirector/utils';
 import { ROUTES } from '../routes';
 import { SUPPORTED_LANGUAGES, langLabel } from '../types/entity';
@@ -430,6 +431,8 @@ export default function TTSPage() {
             </Table>
           </Box>
         </Paper>
+
+        <DeployVersionFooter />
       </Stack>
 
       <Dialog fullScreen open={open} onClose={handleRequestClose} TransitionComponent={SlideUp}>

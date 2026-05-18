@@ -68,10 +68,26 @@ laxy-pipeline/
 │       ├── components/wizard/ # 9-step wizard UI
 │       └── pages/             # Dashboard, Guide, Login, PipelineDebug
 │
-├── ADK_README.md              # Backend pipeline reference (as-built)
-├── GUIDE_WIZARD_README.md     # Frontend wizard reference (as-built)
+├── GETTING_STARTED.md         # Canonical local setup and emulator guide
+├── OBSERVABILITY_RUNBOOK.md   # Runtime telemetry and alerting guide
+├── ARCHITECTURE_ENHANCEMENT_PLAN.md
 └── FIRECMS_DEVELOPMENT_PLAN.md
 ```
+
+## Docs
+
+- `README.md`
+  - Canonical product and deployment overview
+- `GETTING_STARTED.md`
+  - Canonical local development setup
+- `OBSERVABILITY_RUNBOOK.md`
+  - Production telemetry, dashboards, and alerts
+- `ARCHITECTURE_ENHANCEMENT_PLAN.md`
+  - Active platform improvement roadmap
+- `FIRECMS_DEVELOPMENT_PLAN.md`
+  - Admin and FireCMS-specific implementation plan
+
+Historical duplicate frontend/backend reference docs were collapsed into short pointers so this file and `GETTING_STARTED.md` stay authoritative.
 
 ## Quick Start
 
