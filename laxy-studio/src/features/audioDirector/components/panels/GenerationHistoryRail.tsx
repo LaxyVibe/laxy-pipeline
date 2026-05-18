@@ -52,6 +52,15 @@ function sanitizeFilenamePart(value: string): string {
   return normalized || 'audio';
 }
 
+function inferAudioExtension(audioUrl: string): string {
+  const match = audioUrl.match(/\.([a-z0-9]+)(?:[?#]|$)/i);
+  const extension = match?.[1]?.toLowerCase();
+  if (extension === 'wav' || extension === 'mp3') {
+    return extension;
+  }
+  return 'mp3';
+}
+
 export default function GenerationHistoryRail(props: Props) {
   const { items, generationHistory, audioFiles, itemStates, progressSummary, generationError, isGenerating, onChooseAudio } = props;
 
@@ -72,7 +81,7 @@ export default function GenerationHistoryRail(props: Props) {
                 sanitizeFilenamePart(languageAudio.lang),
                 `spot-${String(spot.spotNumber ?? sourceItem?.spotNumber ?? 0).padStart(3, '0')}`,
                 sanitizeFilenamePart(spot.title || sourceItem?.title || ''),
-              ].join('-') + '.mp3',
+              ].join('-') + `.${inferAudioExtension(spot.audioUrl)}`,
               scriptText,
               audioUrl: spot.audioUrl,
             };

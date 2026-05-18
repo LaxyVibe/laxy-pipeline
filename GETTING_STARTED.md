@@ -147,7 +147,7 @@ npm run dev    # -> http://localhost:5173
 | `GEMINI_API_KEY` | *(unset)* | Google AI Studio key — takes priority over Vertex AI ADC |
 | `GCP_PROJECT` / `GCLOUD_PROJECT` | *(auto-detected)* | GCP project ID (Vertex AI mode) |
 | `GEMINI_LOCATION` / `VERTEX_LOCATION` | `global` | Gemini / Vertex AI model location |
-| `TTS_MODEL` | `gemini-2.5-flash-preview-tts` | Gemini TTS model, e.g. `gemini-3.1-flash-tts-preview` |
+| `TTS_MODEL` | `gemini-3.1-flash-tts-preview` | Gemini TTS model, e.g. `gemini-3.1-flash-tts-preview` |
 | `PIPELINE_AUDIO_E2E_STUB` | `false` | Return deterministic per-language audio/SRT payloads for E2E stability |
 
 ---

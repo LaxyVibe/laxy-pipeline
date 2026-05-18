@@ -168,7 +168,7 @@ def test_audio_generate_language_uses_deterministic_stub(monkeypatch: pytest.Mon
     payload = _extract_json(response)
     assert payload["lang"] == "ja"
     assert len(payload["audioFiles"]) == 2
-    assert all(item["audioUrl"].startswith("data:audio/mpeg;base64,") for item in payload["audioFiles"])
+    assert all(item["audioUrl"].startswith("data:audio/wav;base64,") for item in payload["audioFiles"])
     assert len(payload["srtFiles"]) == 2
     assert "こんにちは世界" in payload["srtFiles"][0]["rawSrt"]
 

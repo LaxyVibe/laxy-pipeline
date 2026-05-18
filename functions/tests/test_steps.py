@@ -13,6 +13,7 @@ that wraps each LLM invocation.
 """
 from __future__ import annotations
 
+import base64
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -229,7 +230,7 @@ class TestTtsAudioExtraction:
                     content=SimpleNamespace(
                         parts=[
                             SimpleNamespace(
-                                inline_data=SimpleNamespace(data=b"abc", mime_type="audio/mp3")
+                                inline_data=SimpleNamespace(data=b"abc", mime_type="audio/wav")
                             )
                         ]
                     )
@@ -241,7 +242,7 @@ class TestTtsAudioExtraction:
 
         audio_data, mime_type, error = executor._extract_audio_inline_data(response)
         assert audio_data == b"abc"
-        assert mime_type == "audio/mp3"
+        assert mime_type == "audio/wav"
         assert error is None
 
     def test_extract_audio_inline_data_converts_bytearray_to_bytes(self, executor):
@@ -251,7 +252,7 @@ class TestTtsAudioExtraction:
                     content=SimpleNamespace(
                         parts=[
                             SimpleNamespace(
-                                inline_data=SimpleNamespace(data=bytearray(b"abc"), mime_type="audio/mpeg")
+                                inline_data=SimpleNamespace(data=bytearray(b"abc"), mime_type="audio/wav")
                             )
                         ]
                     )
@@ -264,12 +265,58 @@ class TestTtsAudioExtraction:
         audio_data, mime_type, error = executor._extract_audio_inline_data(response)
         assert audio_data == b"abc"
         assert isinstance(audio_data, bytes)
-        assert mime_type == "audio/mpeg"
+        assert mime_type == "audio/wav"
+        assert error is None
+
+    def test_extract_audio_inline_data_decodes_base64_and_defaults_to_raw_pcm(self, executor):
+        payload = base64.b64encode(b"\x00\x01\x02\x03").decode("ascii")
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                inline_data=SimpleNamespace(data=payload, mime_type=None)
+                            )
+                        ]
+                    )
+                )
+            ],
+            prompt_feedback=None,
+            text=None,
+        )
+
+        audio_data, mime_type, error = executor._extract_audio_inline_data(response)
+        assert audio_data == b"\x00\x01\x02\x03"
+        assert mime_type == "audio/L16;rate=24000"
+        assert error is None
+
+    def test_extract_audio_inline_data_sniffs_wav_when_mime_missing(self, executor):
+        wav_data = executor._pcm_to_wav(b"\x00\x00\x01\x00")
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                inline_data=SimpleNamespace(data=wav_data, mime_type=None)
+                            )
+                        ]
+                    )
+                )
+            ],
+            prompt_feedback=None,
+            text=None,
+        )
+
+        audio_data, mime_type, error = executor._extract_audio_inline_data(response)
+        assert audio_data == wav_data
+        assert mime_type == "audio/wav"
         assert error is None
 
     def test_extract_audio_inline_data_reports_data_access_failure(self, executor):
         class BrokenInlineData:
-            mime_type = "audio/mpeg"
+            mime_type = "audio/wav"
 
             @property
             def data(self):
@@ -322,15 +369,27 @@ class TestTtsAudioExtraction:
 
 
 class TestTtsAudioOutputPreparation:
-    def test_prepare_audio_output_keeps_mp3_and_skips_alignment(self, executor):
+    def test_prepare_audio_output_keeps_wav_and_alignment(self, executor):
+        wav_data = executor._pcm_to_wav(b"\x00\x00\x01\x00")
         output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
-            executor._prepare_audio_output(bytearray(b"ID3fake-mp3"), "audio/mpeg")
+            executor._prepare_audio_output(wav_data, "audio/wav")
         )
 
-        assert output_audio_data == b"ID3fake-mp3"
-        assert output_mime_type == "audio/mpeg"
-        assert output_extension == "mp3"
-        assert alignment_audio_data is None
+        assert output_audio_data == wav_data
+        assert output_mime_type == "audio/wav"
+        assert output_extension == "wav"
+        assert alignment_audio_data == wav_data
+        assert duration_ms >= 0
+
+    def test_prepare_audio_output_wraps_pcm_as_wav(self, executor):
+        output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
+            executor._prepare_audio_output(bytearray(b"\x00\x00\x01\x00"), "audio/L16;rate=24000")
+        )
+
+        assert output_mime_type == "audio/wav"
+        assert output_extension == "wav"
+        assert output_audio_data == alignment_audio_data
+        assert output_audio_data.startswith(b"RIFF")
         assert duration_ms >= 0
 
     @pytest.mark.asyncio
@@ -382,6 +441,24 @@ class TestTtsPromptBuilder:
         assert "SAMPLE CONTEXT" not in result
         assert "ready-to-speak" not in result
 
+    def test_build_tts_prompt_and_transcript_splits_compiled_prompt(self, executor):
+        prompt, transcript = executor._build_tts_prompt_and_transcript(
+            "Hello world.",
+            {
+                "compiledPrompt": "\n".join([
+                    "You are Museum Manager, a calm narrator.",
+                    "## THE SCENE",
+                    "A calm gallery.",
+                    "Stay in character, avoid meta commentary, and produce a natural ready-to-speak delivery.",
+                ])
+            },
+        )
+
+        assert transcript == "Hello world."
+        assert "Character: Museum Manager" in prompt
+        assert "A calm gallery." in prompt
+        assert "ready-to-speak" not in prompt
+
     def test_legacy_director_note_fallback_uses_markdown_sections(self, executor):
         result = executor._build_tts_text(
             "Hello world.",
@@ -397,6 +474,21 @@ class TestTtsPromptBuilder:
         assert "Style: Clear and grounded." in result
         assert "Pacing: Steady." in result
         assert result.endswith("#### TRANSCRIPT\nHello world.")
+
+    def test_build_tts_prompt_and_transcript_uses_cloud_tts_fields(self, executor):
+        prompt, transcript = executor._build_tts_prompt_and_transcript(
+            "Hello world.",
+            {
+                "vocalEnvironment": "A calm gallery.",
+                "missionOfSpeech": "Clear and grounded.",
+                "pacingAndEnergy": "Steady.",
+            },
+        )
+
+        assert transcript == "Hello world."
+        assert "Scene: A calm gallery." in prompt
+        assert "Style: Clear and grounded." in prompt
+        assert "Pacing: Steady." in prompt
 
 
 # ── LLM step execution tests ─────────────────────────────────────────────

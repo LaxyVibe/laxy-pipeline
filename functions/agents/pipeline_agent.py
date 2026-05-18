@@ -29,6 +29,12 @@ from uuid import uuid4
 
 from google import genai
 from google.genai import types as genai_types
+try:
+    from google.api_core.client_options import ClientOptions
+    from google.cloud import texttospeech
+except Exception:  # pragma: no cover - dependency is validated in deployed env
+    ClientOptions = None  # type: ignore[assignment]
+    texttospeech = None  # type: ignore[assignment]
 
 import firebase_admin
 from firebase_admin import storage as fb_storage
@@ -230,7 +236,7 @@ async def _retry_generate_content(
 MODELS = {
     "flash": "gemini-2.5-flash",
     "pro": "gemini-2.5-pro",
-    "tts": os.environ.get("TTS_MODEL", "gemini-2.5-flash-preview-tts"),
+    "tts": os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview"),
 }
 
 TEMPERATURES = {
@@ -316,6 +322,7 @@ class PipelineExecutor:
     def __init__(self, project_id: str | None = None, location: str | None = None):
         self.project_id = project_id or os.environ.get("GCP_PROJECT", os.environ.get("GCLOUD_PROJECT", ""))
         self.location = location or os.environ.get("GEMINI_LOCATION", os.environ.get("VERTEX_LOCATION", "global"))
+        self._tts_client = None
 
         # Use Gemini API key if provided; otherwise fall back to Vertex AI
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -325,6 +332,24 @@ class PipelineExecutor:
         else:
             logger.info("Using Vertex AI (project=%s, location=%s)", self.project_id, self.location)
             self._client = genai.Client(vertexai=True, project=self.project_id, location=self.location)
+
+    @staticmethod
+    def _build_tts_client(location: str):
+        if texttospeech is None or ClientOptions is None:
+            raise RuntimeError("Cloud TTS dependency is missing; install google-cloud-texttospeech>=2.29.0")
+        endpoint = (
+            f"{location}-texttospeech.googleapis.com"
+            if location and location != "global"
+            else "texttospeech.googleapis.com"
+        )
+        return texttospeech.TextToSpeechClient(
+            client_options=ClientOptions(api_endpoint=endpoint),
+        )
+
+    def _get_tts_client(self):
+        if self._tts_client is None:
+            self._tts_client = self._build_tts_client(self.location)
+        return self._tts_client
 
     @staticmethod
     def _build_idempotency_fingerprint(payload: dict[str, Any]) -> str:
@@ -1078,69 +1103,13 @@ class PipelineExecutor:
             if not text.strip():
                 continue
 
-            tts_text = self._build_tts_text(text, director_note)
-
             try:
-                response = await _retry_generate_content(
-                    self._client,
-                    timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
-                    retry_context={
-                        "operation": "audio_generate_language",
-                        "step_id": "s9_audio_gen",
-                        "session_id": session_id,
-                        "language": language,
-                        "spot_id": spot_id,
-                    },
-                    retry_tracker=retry_tracker,
-                    model=MODELS["tts"],
-                    contents=tts_text,
-                    config=genai_types.GenerateContentConfig(
-                        response_modalities=["AUDIO"],
-                        speech_config=genai_types.SpeechConfig(
-                            voice_config=genai_types.VoiceConfig(
-                                prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                                    voice_name=voice_id,
-                                )
-                            )
-                        ),
-                    ),
+                audio_data, mime_type = await self._synthesize_tts_audio(
+                    text=text,
+                    director_note=director_note,
+                    voice_id=voice_id,
+                    language=language,
                 )
-
-                audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
-                if not audio_data and self._is_prohibited_content_block(extraction_error):
-                    logger.warning(
-                        "Gemini TTS blocked directed prompt for %s/%s; retrying with transcript-only fallback",
-                        language,
-                        spot_id,
-                    )
-                    response = await _retry_generate_content(
-                        self._client,
-                        timeout_seconds=self._get_step_timeout_seconds("s9_audio_gen"),
-                        retry_context={
-                            "operation": "audio_generate_language_fallback",
-                            "step_id": "s9_audio_gen",
-                            "session_id": session_id,
-                            "language": language,
-                            "spot_id": spot_id,
-                        },
-                        retry_tracker=retry_tracker,
-                        model=MODELS["tts"],
-                        contents=text,
-                        config=genai_types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=genai_types.SpeechConfig(
-                                voice_config=genai_types.VoiceConfig(
-                                    prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                                        voice_name=voice_id,
-                                    )
-                                )
-                            ),
-                        ),
-                    )
-                    audio_data, mime_type, extraction_error = self._extract_audio_inline_data(response)
-
-                    if not audio_data:
-                        raise RuntimeError(extraction_error or "No audio data returned from Gemini TTS response")
 
                 output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
                     self._prepare_audio_output(audio_data, mime_type)
@@ -1307,6 +1276,40 @@ class PipelineExecutor:
         return f"{prompt}\n\n#### TRANSCRIPT\n{transcript}"
 
     @classmethod
+    def _build_tts_prompt_and_transcript(
+        cls,
+        transcript: str,
+        director_note: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        """Split direction and transcript for Cloud TTS Gemini-TTS requests."""
+        clean_transcript = str(transcript or "").strip()
+        if not director_note:
+            return "", clean_transcript
+
+        compiled_prompt = str(
+            director_note.get("compiledPrompt")
+            or director_note.get("compiledPromptOverride")
+            or director_note.get("stylePrompt")
+            or ""
+        ).strip()
+        if compiled_prompt:
+            prompt = cls._sanitize_compiled_tts_prompt(compiled_prompt)
+            return prompt, clean_transcript
+
+        scene = cls._first_director_note_value(director_note, "scene", "vocalEnvironment")
+        style = cls._first_director_note_value(director_note, "style", "mission", "missionOfSpeech")
+        pacing = cls._first_director_note_value(director_note, "pacing", "pacingAndEnergy")
+
+        lines: list[str] = []
+        if scene:
+            lines.append(f"Scene: {scene}")
+        if style:
+            lines.append(f"Style: {style}")
+        if pacing:
+            lines.append(f"Pacing: {pacing}")
+        return "\n".join(lines), clean_transcript
+
+    @classmethod
     def _sanitize_compiled_tts_prompt(cls, compiled_prompt: str) -> str:
         """
         Convert the UI's rich preview prompt into TTS-safe positive delivery cues.
@@ -1378,6 +1381,32 @@ class PipelineExecutor:
                 compact.append(line)
             previous_heading = is_heading
         return "\n".join(compact)
+
+    @staticmethod
+    def _map_tts_language_code(language: str) -> str:
+        normalized = (language or "").strip()
+        if not normalized:
+            return "en-US"
+
+        aliases = {
+            "en": "en-US",
+            "ja": "ja-JP",
+            "ko": "ko-KR",
+            "zh": "cmn-CN",
+            "zh-cn": "cmn-CN",
+            "zh-tw": "cmn-tw",
+            "fr": "fr-FR",
+            "de": "de-DE",
+            "es": "es-ES",
+            "it": "it-IT",
+            "pt": "pt-PT",
+        }
+        lowered = normalized.lower()
+        if lowered in aliases:
+            return aliases[lowered]
+        if "-" in normalized:
+            return normalized
+        return aliases.get(lowered, "en-US")
 
     @staticmethod
     def _first_director_note_value(director_note: dict[str, Any], *keys: str) -> str:
@@ -1455,6 +1484,53 @@ class PipelineExecutor:
                 fallback = tools.srt_generate_for_text(alignment_text, duration_sec)
                 if fallback:
                     return fallback
+            raise
+
+    async def _synthesize_tts_audio(
+        self,
+        *,
+        text: str,
+        director_note: dict[str, Any] | None,
+        voice_id: str,
+        language: str,
+    ) -> tuple[bytes, str]:
+        """Synthesize Gemini-TTS audio using the Cloud Text-to-Speech API."""
+        prompt, transcript = self._build_tts_prompt_and_transcript(text, director_note)
+        language_code = self._map_tts_language_code(language)
+
+        def _run_cloud_tts(request_prompt: str) -> tuple[bytes, str]:
+            tts_client = self._get_tts_client()
+            synthesis_input = texttospeech.SynthesisInput(
+                text=transcript,
+                prompt=request_prompt,
+            )
+            voice = texttospeech.VoiceSelectionParams(
+                language_code=language_code,
+                name=voice_id,
+                model_name=MODELS["tts"],
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                sample_rate_hertz=24000,
+            )
+            response = tts_client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice,
+                audio_config=audio_config,
+            )
+            audio_content = bytes(response.audio_content)
+            return audio_content, self._sniff_audio_mime_type(audio_content)
+
+        try:
+            return await asyncio.to_thread(_run_cloud_tts, prompt)
+        except Exception as exc:
+            if prompt and "prohibited_content" in str(exc).lower():
+                logger.warning(
+                    "Cloud TTS blocked directed prompt for %s/%s; retrying with transcript-only fallback",
+                    language,
+                    voice_id,
+                )
+                return await asyncio.to_thread(_run_cloud_tts, "")
             raise
 
     async def _segment_text_with_gemini(
@@ -1596,42 +1672,6 @@ class PipelineExecutor:
             wf.writeframes(pcm_data)
         return buf.getvalue()
 
-    @staticmethod
-    def _pcm_to_mp3(
-        pcm_data: bytes,
-        *,
-        sample_rate: int = 24000,
-        channels: int = 1,
-        bit_rate_kbps: int = 64,
-    ) -> bytes:
-        """Encode 16-bit PCM bytes to MP3 while preserving the target sample rate."""
-        try:
-            import lameenc  # type: ignore[import-not-found]
-        except Exception as exc:  # pragma: no cover - dependency availability is env-dependent
-            raise RuntimeError("MP3 encoding dependency is missing; install lameenc") from exc
-
-        encoder = lameenc.Encoder()
-        encoder.set_bit_rate(bit_rate_kbps)
-        encoder.set_in_sample_rate(sample_rate)
-        encoder.set_channels(channels)
-        if hasattr(encoder, "set_out_sample_rate"):
-            encoder.set_out_sample_rate(sample_rate)
-        encoder.set_quality(2)
-        mp3_data = encoder.encode(pcm_data)
-        mp3_data += encoder.flush()
-        return mp3_data
-
-    @staticmethod
-    def _wav_to_pcm(wav_data: bytes) -> tuple[bytes, int, int, int]:
-        """Extract PCM frames and format metadata from a WAV payload."""
-        with wave.open(io.BytesIO(wav_data), "rb") as wf:
-            return (
-                wf.readframes(wf.getnframes()),
-                wf.getframerate(),
-                wf.getnchannels(),
-                wf.getsampwidth(),
-            )
-
     @classmethod
     def _prepare_audio_output(
         cls,
@@ -1645,27 +1685,12 @@ class PipelineExecutor:
         if cls._mime_indicates_raw_pcm(mime_type):
             sample_rate = cls._extract_sample_rate_from_mime(mime_type, default=24000)
             alignment_audio_data = cls._pcm_to_wav(normalized_audio_data, sample_rate=sample_rate)
-            output_audio_data = cls._pcm_to_mp3(normalized_audio_data, sample_rate=sample_rate)
             duration_ms = cls._estimate_duration_ms(alignment_audio_data, "audio/wav")
-            return output_audio_data, "audio/mpeg", "mp3", alignment_audio_data, duration_ms
-
-        if base_mime_type in {"audio/mpeg", "audio/mp3"}:
-            duration_ms = cls._estimate_duration_ms(normalized_audio_data, "audio/mpeg")
-            # Google Speech alignment expects LINEAR16 input, so direct MP3
-            # responses must skip STT alignment and use subtitle fallback.
-            return normalized_audio_data, "audio/mpeg", "mp3", None, duration_ms
+            return alignment_audio_data, "audio/wav", "wav", alignment_audio_data, duration_ms
 
         if base_mime_type in {"audio/wav", "audio/x-wav"}:
             duration_ms = cls._estimate_duration_ms(normalized_audio_data, "audio/wav")
-            pcm_data, sample_rate, channels, sample_width = cls._wav_to_pcm(normalized_audio_data)
-            if sample_width != 2:
-                raise RuntimeError(f"Unsupported WAV sample width for MP3 conversion: {sample_width}")
-            output_audio_data = cls._pcm_to_mp3(
-                pcm_data,
-                sample_rate=sample_rate,
-                channels=channels,
-            )
-            return output_audio_data, "audio/mpeg", "mp3", normalized_audio_data, duration_ms
+            return normalized_audio_data, "audio/wav", "wav", normalized_audio_data, duration_ms
 
         duration_ms = cls._estimate_duration_ms(normalized_audio_data, mime_type)
         return normalized_audio_data, mime_type or "application/octet-stream", "bin", None, duration_ms
@@ -1730,10 +1755,37 @@ class PipelineExecutor:
             return "The TTS provider blocked this audio prompt."
 
         raw_audio_markers = ("bytearray(", "lame3.", "\\xff\\xf3", "b'\\xff", 'b"\\xff')
-        if any(marker in lowered for marker in raw_audio_markers) or len(compact_message) > 240:
+        binary_noise_markers = ("\\x00", "\\x01", "\\x02", "\\x03", "\\xff", "\\xfe")
+        if any(marker in lowered for marker in raw_audio_markers):
+            return "The TTS provider returned audio in an unreadable format."
+        if len(compact_message) > 240 and any(marker in lowered for marker in binary_noise_markers):
             return "The TTS provider returned audio in an unreadable format."
 
         return compact_message
+
+    @staticmethod
+    def _sniff_audio_mime_type(audio_data: bytes) -> str:
+        """Infer Gemini TTS audio format when the SDK omits mime_type."""
+        if audio_data.startswith(b"RIFF") and audio_data[8:12] == b"WAVE":
+            return "audio/wav"
+        # Gemini TTS docs describe inline audio as raw 24kHz PCM by default.
+        return "audio/L16;rate=24000"
+
+    @staticmethod
+    def _coerce_inline_audio_bytes(data: Any) -> bytes:
+        """Accept SDK bytes objects and base64 strings returned by Gemini TTS."""
+        if isinstance(data, bytes):
+            return data
+        if isinstance(data, bytearray):
+            return bytes(data)
+        if isinstance(data, memoryview):
+            return data.tobytes()
+        if isinstance(data, str):
+            try:
+                return base64.b64decode(data, validate=True)
+            except Exception as exc:
+                raise ValueError(f"inline audio base64 decode failed: {exc}") from exc
+        return bytes(data)
 
     @staticmethod
     def _extract_audio_inline_data(response: Any) -> tuple[bytes | None, str, str | None]:
@@ -1751,7 +1803,7 @@ class PipelineExecutor:
                     continue
                 try:
                     data = getattr(inline_data, "data", None)
-                    mime_type = getattr(inline_data, "mime_type", None) or "audio/wav"
+                    mime_type = getattr(inline_data, "mime_type", None)
                 except Exception as exc:
                     return None, "audio/wav", PipelineExecutor._format_audio_generation_error(
                         f"Audio payload could not be read: {exc}"
@@ -1759,9 +1811,11 @@ class PipelineExecutor:
                 if not data:
                     continue
                 try:
-                    return bytes(data), mime_type, None
+                    normalized_audio = PipelineExecutor._coerce_inline_audio_bytes(data)
+                    resolved_mime_type = mime_type or PipelineExecutor._sniff_audio_mime_type(normalized_audio)
+                    return normalized_audio, resolved_mime_type, None
                 except Exception as exc:
-                    return None, mime_type, PipelineExecutor._format_audio_generation_error(
+                    return None, mime_type or "audio/L16;rate=24000", PipelineExecutor._format_audio_generation_error(
                         f"Audio payload could not be converted to bytes: {exc}"
                     )
 

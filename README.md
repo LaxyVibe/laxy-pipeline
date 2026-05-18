@@ -29,7 +29,7 @@ laxy-studio (React/Vite)
 | 9 | `n5_character_select` | N5: Character Select | Tool | — |
 | 10 | `s7_voice_recommend` | S7: Voice Recommend | LLM | `gemini-2.5-flash` |
 | 11 | `s8_director_note` | S8: Director Note | LLM | `gemini-2.5-flash` |
-| 12 | `s9_audio_gen` | S9: Audio Gen | TTS | `TTS_MODEL` (default `gemini-2.5-flash-preview-tts`) |
+| 12 | `s9_audio_gen` | S9: Audio Gen | TTS | `TTS_MODEL` (default `gemini-3.1-flash-tts-preview`) |
 | 13 | `n6_audio_qa` | N6: Audio Playback QA | Tool | — |
 | 14 | `hg5_audio_review` | HG5: Audio Review | **Human Gate** | — |
 | 15 | `n8_generation_history` | N8: Generation History | Tool | — |
@@ -197,7 +197,7 @@ All endpoints are Firebase Functions (`region=us-central1`, `memory=GB_2`, `time
 | `GEMINI_API_KEY` | Google AI Studio key — takes priority over Vertex AI ADC | *(unset -> uses ADC)* |
 | `GCP_PROJECT` / `GCLOUD_PROJECT` | GCP project ID | Auto-detected by Cloud Run |
 | `GEMINI_LOCATION` / `VERTEX_LOCATION` | Gemini / Vertex AI model location | `global` |
-| `TTS_MODEL` | Gemini TTS model, e.g. `gemini-3.1-flash-tts-preview` | `gemini-2.5-flash-preview-tts` |
+| `TTS_MODEL` | Gemini TTS model, e.g. `gemini-3.1-flash-tts-preview` | `gemini-3.1-flash-tts-preview` |
 | `PIPELINE_AUDIO_E2E_STUB` | Return deterministic stub audio/SRT from `audio_generate_language` for E2E reliability | `false` |
 
 ### Frontend (`laxy-studio/.env.local`)

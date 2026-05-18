@@ -396,7 +396,7 @@ export default function AudioPlayer({ audioFiles, onTimestamp }: AudioPlayerProp
                 Approve
               </Button>
             )}
-            <Tooltip title="Download .mp3">
+            <Tooltip title="Download audio">
               <span>
                 <IconButton
                   size="small"
