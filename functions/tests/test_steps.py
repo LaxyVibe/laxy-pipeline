@@ -314,6 +314,28 @@ class TestTtsAudioExtraction:
         assert mime_type == "audio/wav"
         assert error is None
 
+    def test_extract_audio_inline_data_sniffs_mp3_when_mime_missing(self, executor):
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(
+                        parts=[
+                            SimpleNamespace(
+                                inline_data=SimpleNamespace(data=b"ID3fake-mp3", mime_type=None)
+                            )
+                        ]
+                    )
+                )
+            ],
+            prompt_feedback=None,
+            text=None,
+        )
+
+        audio_data, mime_type, error = executor._extract_audio_inline_data(response)
+        assert audio_data == b"ID3fake-mp3"
+        assert mime_type == "audio/mpeg"
+        assert error is None
+
     def test_extract_audio_inline_data_reports_data_access_failure(self, executor):
         class BrokenInlineData:
             mime_type = "audio/wav"
@@ -369,6 +391,17 @@ class TestTtsAudioExtraction:
 
 
 class TestTtsAudioOutputPreparation:
+    def test_prepare_audio_output_keeps_mp3_and_skips_alignment(self, executor):
+        output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
+            executor._prepare_audio_output(bytearray(b"ID3fake-mp3"), "audio/mpeg")
+        )
+
+        assert output_audio_data == b"ID3fake-mp3"
+        assert output_mime_type == "audio/mpeg"
+        assert output_extension == "mp3"
+        assert alignment_audio_data is None
+        assert duration_ms >= 0
+
     def test_prepare_audio_output_keeps_wav_and_alignment(self, executor):
         wav_data = executor._pcm_to_wav(b"\x00\x00\x01\x00")
         output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
