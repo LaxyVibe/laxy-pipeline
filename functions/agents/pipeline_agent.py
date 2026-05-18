@@ -1423,16 +1423,33 @@ class PipelineExecutor:
             lines.append(cls._rewrite_tts_prompt_line(line))
 
         compact = cls._compact_tts_prompt_lines(lines)
-        return compact[:1200].rstrip()
+        return cls._truncate_tts_prompt(compact, 1200)
 
     @staticmethod
     def _rewrite_tts_prompt_line(line: str) -> str:
+        replacements = (
+            ("flat and unemotional", "steady and emotionally restrained"),
+            ("consistently flat and unemotional", "consistently steady and emotionally restrained"),
+            ("mind engrossed in logic and code", "highly analytical point of view"),
+            ("socially awkward", "reserved"),
+            ("non-human", "artificial"),
+            ("devoid of genuine human emotion or casualness", "carefully controlled and minimally casual"),
+            ("devoid of genuine human emotion", "emotionally restrained"),
+            ("programmed, subtle warmth", "subtle warmth"),
+            ("pre-programmed social nicety", "precise social nicety"),
+        )
+        rewritten = line
+        for source, target in replacements:
+            rewritten = rewritten.replace(source, target)
+        line = rewritten
         if line.startswith("You are "):
             return f"Character: {line.removeprefix('You are ').strip()}"
         if line.startswith("Personality DNA:"):
             return line.replace("Personality DNA:", "Personality:", 1)
         if line.startswith("Linguistic fingerprint:"):
             return line.replace("Linguistic fingerprint:", "Linguistic style:", 1)
+        if line.startswith("Pacing:") and "For '" in line:
+            line = line.split(" For '", 1)[0].rstrip()
         return line
 
     @staticmethod
@@ -1447,6 +1464,19 @@ class PipelineExecutor:
                 compact.append(line)
             previous_heading = is_heading
         return "\n".join(compact)
+
+    @staticmethod
+    def _truncate_tts_prompt(prompt: str, limit: int) -> str:
+        if len(prompt) <= limit:
+            return prompt.rstrip()
+        candidate = prompt[:limit]
+        for marker in ("\n", ". ", "! ", "? ", "。", "！", "？"):
+            index = candidate.rfind(marker)
+            if index >= max(0, limit - 220):
+                if marker == "\n":
+                    return candidate[:index].rstrip()
+                return candidate[: index + len(marker)].rstrip()
+        return candidate.rstrip()
 
     @staticmethod
     def _map_tts_language_code(language: str) -> str:
@@ -1594,7 +1624,7 @@ class PipelineExecutor:
             try:
                 return await asyncio.to_thread(_run_cloud_tts, prompt, audio_encoding)
             except Exception as exc:
-                if prompt and "prohibited_content" in str(exc).lower():
+                if prompt and self._is_tts_prompt_block_error(str(exc)):
                     logger.warning(
                         "Cloud TTS blocked directed prompt for %s/%s; retrying with transcript-only fallback",
                         language,
@@ -1852,7 +1882,7 @@ class PipelineExecutor:
             return "The TTS provider returned audio that could not be read."
         if "no audio data returned from gemini tts response" in lowered:
             return "The TTS provider did not return any playable audio."
-        if PipelineExecutor._is_prohibited_content_block(compact_message):
+        if PipelineExecutor._is_tts_prompt_block_error(compact_message):
             return "The TTS provider blocked this audio prompt."
 
         raw_audio_markers = ("bytearray(", "lame3.", "\\xff\\xf3", "b'\\xff", 'b"\\xff')
@@ -1969,6 +1999,19 @@ class PipelineExecutor:
         return (
             "block_reason=prohibited_content" in lowered
             or "block_reason=blockedreason.prohibited_content" in lowered
+        )
+
+    @staticmethod
+    def _is_tts_prompt_block_error(error_text: str | None) -> bool:
+        if not error_text:
+            return False
+        lowered = error_text.lower()
+        return (
+            PipelineExecutor._is_prohibited_content_block(lowered)
+            or "violates vertex ai's usage guidelines" in lowered
+            or "violates vertex ai usage guidelines" in lowered
+            or "input text or prompt violates" in lowered
+            or "could not generate audio because the input text or prompt violates" in lowered
         )
 
     async def _run_from(

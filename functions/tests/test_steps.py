@@ -474,6 +474,27 @@ class TestTtsPromptBuilder:
         assert "SAMPLE CONTEXT" not in result
         assert "ready-to-speak" not in result
 
+    def test_compiled_prompt_rewrites_policy_sensitive_persona_wording(self, executor):
+        compiled_prompt = "\n".join([
+            "You are Data Narrator. Your voice is consistently flat and unemotional, reflecting a mind engrossed in logic and code.",
+            "## DIRECTOR'S NOTES",
+            "Style: Maintain a distinctly non-human presence with a programmed, subtle warmth.",
+            "Pacing: The tone should be pleasant and approachable, but devoid of genuine human emotion or casualness. For '今日も良い天気ですね。', keep it precise.",
+        ])
+
+        prompt, transcript = executor._build_tts_prompt_and_transcript(
+            "きょうもよいてんきですね。",
+            {"compiledPrompt": compiled_prompt},
+        )
+
+        assert transcript == "きょうもよいてんきですね。"
+        assert "flat and unemotional" not in prompt
+        assert "non-human" not in prompt
+        assert "devoid of genuine human emotion" not in prompt
+        assert "For '今日も良い天気ですね。'" not in prompt
+        assert "emotionally restrained" in prompt
+        assert "artificial presence" in prompt
+
     def test_build_tts_prompt_and_transcript_splits_compiled_prompt(self, executor):
         prompt, transcript = executor._build_tts_prompt_and_transcript(
             "Hello world.",
@@ -522,6 +543,14 @@ class TestTtsPromptBuilder:
         assert "Scene: A calm gallery." in prompt
         assert "Style: Clear and grounded." in prompt
         assert "Pacing: Steady." in prompt
+
+    def test_usage_guideline_errors_are_treated_as_prompt_blocks(self, executor):
+        assert executor._is_tts_prompt_block_error(
+            "400 Cloud Text-to-Speech could not generate audio because the input text or prompt violates Vertex AI's usage guidelines. Support codes: 54702341"
+        ) is True
+        assert executor._format_audio_generation_error(
+            "400 Cloud Text-to-Speech could not generate audio because the input text or prompt violates Vertex AI's usage guidelines. Support codes: 54702341"
+        ) == "The TTS provider blocked this audio prompt."
 
 
 class TestJapaneseHiraganaConversion:
