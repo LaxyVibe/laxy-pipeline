@@ -3,9 +3,10 @@
 # deploy.sh — Deploy Laxy ADK pipeline to Firebase
 # ---------------------------------------------------------------------------
 # Usage:
-#   ./deploy.sh              # Deploy everything (functions + hosting)
+#   ./deploy.sh              # Deploy everything (functions + hosting + storage)
 #   ./deploy.sh functions    # Deploy only Cloud Functions
 #   ./deploy.sh hosting      # Deploy only frontend hosting
+#   ./deploy.sh storage      # Deploy only storage rules
 #   ./deploy.sh setup        # First-time GCP/Firebase setup
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -22,6 +23,22 @@ NC='\033[0m'
 log()  { echo -e "${GREEN}[deploy]${NC} $*"; }
 warn() { echo -e "${YELLOW}[deploy]${NC} $*"; }
 err()  { echo -e "${RED}[deploy]${NC} $*" >&2; }
+
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  if [[ -x "functions/.venv/bin/python" ]]; then
+    PYTHON_BIN="$(pwd)/functions/.venv/bin/python"
+  elif [[ -x "functions/venv/bin/python" ]]; then
+    PYTHON_BIN="$(pwd)/functions/venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  else
+    err "Python is required but neither 'python3' nor 'python' is available."
+    exit 1
+  fi
+fi
 
 # ── First-time setup ──
 
@@ -54,7 +71,7 @@ setup() {
 deploy_functions() {
   log "Running backend tests..."
   pushd functions > /dev/null
-  python -m pytest tests/ -v --tb=short
+  "$PYTHON_BIN" -m pytest tests/ -v --tb=short
   popd > /dev/null
 
   log "Deploying Cloud Functions to $PROJECT_ID ($REGION)..."

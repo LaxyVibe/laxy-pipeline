@@ -114,9 +114,16 @@ export GCP_PROJECT=your-project-id
 ### Deploy
 
 ```bash
-./deploy.sh              # Deploy everything (functions + hosting)
+./deploy.sh              # Deploy everything (functions + hosting + storage)
 ./deploy.sh functions    # Deploy only Cloud Functions
-./deploy.sh hosting      # Deploy only frontend
+./deploy.sh hosting      # Deploy only frontend hosting
+./deploy.sh storage      # Deploy only storage rules
+```
+
+After a successful hosting deploy to `laxy-studio-dev`, the current TTS entrypoint is:
+
+```text
+https://laxy-studio-dev.web.app/tts
 ```
 
 ## API Endpoints
