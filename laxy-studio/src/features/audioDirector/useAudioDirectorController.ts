@@ -18,6 +18,7 @@ import {
   createDefaultSettings,
   draftCharacterFromPrompt,
   estimateTokensForSettings,
+  isScriptEnhancementActive,
   PRESET_AUDIO_CHARACTERS,
   recommendVoice,
   resolveCompiledPrompt,
@@ -104,7 +105,6 @@ export function useAudioDirectorController() {
   const [manuscriptText, setManuscriptText] = useState('');
   const [items, setItems] = useState<AudioPoiDraft[]>([]);
   const [coreLanguage, setCoreLanguage] = useState('en');
-  const [scriptEnhancementEnabled, setScriptEnhancementEnabled] = useState(false);
   const [enhancementCache, setEnhancementCache] = useState<Record<string, Record<string, EnhancementEntry>>>({});
   const [readingAssistCache, setReadingAssistCache] = useState<Record<string, Record<string, JapaneseReadingEntry>>>({});
   const defaultSettings = useMemo(() => createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]), []);
@@ -131,6 +131,7 @@ export function useAudioDirectorController() {
     () => [...PRESET_AUDIO_CHARACTERS, ...customCharacters],
     [customCharacters],
   );
+  const scriptEnhancementEnabled = isScriptEnhancementActive(globalSettings.scriptEnhancementLimit);
 
   const resetScriptBoundState = () => {
     setSessionId(null);
@@ -160,7 +161,6 @@ export function useAudioDirectorController() {
     if (isEmbedded) {
       resetScriptBoundState();
       setManuscriptText('');
-      setScriptEnhancementEnabled(saved.scriptEnhancementEnabled ?? false);
       setCustomCharacters(saved.customCharacters ?? []);
       setGlobalSettings(saved.globalSettings ?? defaultSettings);
       setReadingAssistCache(saved.readingAssistCache ?? {});
@@ -171,7 +171,6 @@ export function useAudioDirectorController() {
     setManuscriptText(saved.manuscriptText ?? '');
     setSessionId(saved.sessionId ?? null);
     setCoreLanguage(saved.coreLanguage ?? 'en');
-    setScriptEnhancementEnabled(saved.scriptEnhancementEnabled ?? false);
     setCustomCharacters(saved.customCharacters ?? []);
     setGlobalSettings(saved.globalSettings ?? defaultSettings);
     setEnhancementCache(saved.enhancementCache ?? {});
@@ -782,6 +781,7 @@ export function useAudioDirectorController() {
           characterName: character.name,
           characterRole: character.role,
           contextDirective: settings.directorNote.scene || undefined,
+          cueDensity: settings.scriptEnhancementLimit,
         });
         const enhancedText = result.enhancedScript;
         const validation = validateEnhancedScript(enhancedText);
@@ -1230,7 +1230,6 @@ export function useAudioDirectorController() {
     setDirectorNoteEditorOpen,
     setDirectorNotePrompt,
     setManuscriptText,
-    setScriptEnhancementEnabled,
     srtFiles,
     summaryPayload,
     triggerTxtUpload,

@@ -107,18 +107,18 @@ export const SCRIPT_ENHANCEMENT_OPTIONS: Array<{
 }> = [
   {
     id: 'none',
-    label: 'Off',
-    summary: 'Leave the script untouched and generate directly from the written copy.',
+    label: 'Level 0 - Off',
+    summary: 'Use the original script directly with no added performance cue tags.',
   },
   {
     id: 'light',
-    label: 'Light',
-    summary: 'Add sparse performance cues that shape delivery while keeping the script easy to review.',
+    label: 'Level 1 - Light',
+    summary: 'Add sparse cue tags where they noticeably improve delivery without much clutter.',
   },
   {
     id: 'medium',
-    label: 'Medium',
-    summary: 'Use a more expressive cue pass with richer emotion and pacing direction.',
+    label: 'Level 2 - Expressive',
+    summary: 'Use a richer cue pass with more active emotion and pause direction while staying readable.',
   },
 ];
 
@@ -472,22 +472,26 @@ export function contentVersionInstruction(contentVersion: ContentVersion): strin
 
 export function scriptEnhancementInstruction(limit: ScriptEnhancementLimit): string {
   if (limit === 'none') {
-    return 'Do not add any bracket tags. Read the text naturally as written.';
+    return 'Cue density level 0: use the original script directly without adding bracketed performance tags.';
   }
   if (limit === 'light') {
-    return `Use bracket tags sparingly when they materially improve delivery. Example tags: ${SCRIPT_TAG_EXAMPLES.join(', ')}. There is no fixed tag whitelist, but keep the script readable and avoid cue clutter.`;
+    return `Cue density level 1: use bracket tags sparingly when they materially improve delivery. Example tags: ${SCRIPT_TAG_EXAMPLES.join(', ')}. Keep the script readable and avoid cue clutter.`;
   }
-  return `Use bracket tags expressively when they sharpen performance. Example tags: ${SCRIPT_TAG_EXAMPLES.join(', ')}. There is no fixed tag whitelist, but avoid stacking cues so densely that the script becomes hard to follow.`;
+  return `Cue density level 2: use bracket tags expressively when they sharpen performance. Example tags: ${SCRIPT_TAG_EXAMPLES.join(', ')}. Add more active emotion and pause direction, but keep the script readable.`;
 }
 
 export function describeScriptEnhancementLimit(limit: ScriptEnhancementLimit): string {
   if (limit === 'none') {
-    return 'Cue tags disabled — script should stay clean.';
+    return 'Cue density level 0: audio uses the original script with no generated cue tags.';
   }
   if (limit === 'light') {
-    return 'Light cue pass — use tags sparingly where they improve delivery.';
+    return 'Cue density level 1: use a light cue pass with sparse tags where they improve delivery.';
   }
-  return 'Expressive cue pass — add as many helpful tags as needed while keeping the script readable.';
+  return 'Cue density level 2: use a more expressive cue pass with richer emotion and pause direction.';
+}
+
+export function isScriptEnhancementActive(limit: ScriptEnhancementLimit): boolean {
+  return limit !== 'none';
 }
 
 function splitIntoSentences(text: string): string[] {

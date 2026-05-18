@@ -962,8 +962,12 @@ class PipelineExecutor:
         character_name: str | None = None,
         character_role: str | None = None,
         context_directive: str | None = None,
+        cue_density: str | None = None,
     ) -> dict[str, Any]:
         """Enhance a script with AI-generated performance cues."""
+        if cue_density == "none":
+            return {"success": True, "enhancedScript": script_content.strip()}
+
         prompt_text = load_prompt("guide_script_enhance")
         model = MODELS["flash"]
         temperature = TEMPERATURES.get("guide_script_enhance", 0.7)
@@ -976,6 +980,16 @@ class PipelineExecutor:
             parts.append(f"Character Identity: {char_desc}")
         if context_directive:
             parts.append(f"Contextual Venue/Goal: {context_directive}")
+        if cue_density == "light":
+            parts.append(
+                "Cue Density Target: Level 1 (Light). Use sparse cues only where they "
+                "materially improve delivery, usually no more than one cue before a sentence or beat."
+            )
+        elif cue_density == "medium":
+            parts.append(
+                "Cue Density Target: Level 2 (Expressive). Use richer emotional and pacing cues "
+                "proactively, including multiple cues when a line benefits, while keeping the script readable."
+            )
         parts.append(f"Original Script:\n{script_content}")
         parts.append(
             "Enhance the script with natural performance tags. There is no hard "

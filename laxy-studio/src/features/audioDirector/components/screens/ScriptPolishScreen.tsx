@@ -7,10 +7,12 @@ import {
   Button,
   Card,
   CardContent,
-  Checkbox,
   Chip,
-  FormControlLabel,
+  FormControl,
+  InputLabel,
+  MenuItem,
   Paper,
+  Select,
   Stack,
   TextField,
   Typography,
@@ -18,8 +20,10 @@ import {
 import { langLabel } from '../../../../types/entity';
 import {
   describeScriptEnhancementLimit,
+  SCRIPT_ENHANCEMENT_OPTIONS,
   type AudioGuideSettings,
   type AudioPoiDraft,
+  type ScriptEnhancementLimit,
 } from '../../../audioMvp/model';
 import { audioDirectorStyles } from '../../theme';
 import type { EnhancementEntry } from '../../types';
@@ -30,12 +34,13 @@ type Props = {
   items: AudioPoiDraft[];
   coreLanguage: string;
   scriptEnhancementEnabled: boolean;
+  scriptEnhancementLimit: ScriptEnhancementLimit;
   activeEnhancementEntries: Record<string, EnhancementEntry>;
   isGenerating: boolean;
   isEnhancing: boolean;
   generationError: string | null;
   getItemSettings: (item: AudioPoiDraft) => AudioGuideSettings;
-  onToggleEnhancement: (enabled: boolean) => void;
+  onCueDensityChange: (limit: ScriptEnhancementLimit) => void;
   onEnhanceAll: (forceRegenerate?: boolean) => void;
   onChangeEnhancedScript: (language: string, item: AudioPoiDraft, nextText: string) => void;
   onBack: () => void;
@@ -47,12 +52,13 @@ export default function ScriptPolishScreen(props: Props) {
     items,
     coreLanguage,
     scriptEnhancementEnabled,
+    scriptEnhancementLimit,
     activeEnhancementEntries,
     isGenerating,
     isEnhancing,
     generationError,
     getItemSettings,
-    onToggleEnhancement,
+    onCueDensityChange,
     onEnhanceAll,
     onChangeEnhancedScript,
     onBack,
@@ -84,15 +90,21 @@ export default function ScriptPolishScreen(props: Props) {
             ) : null}
 
             <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems={{ xs: 'stretch', lg: 'center' }}>
-              <FormControlLabel
-                control={(
-                  <Checkbox
-                    checked={scriptEnhancementEnabled}
-                    onChange={(event) => onToggleEnhancement(event.target.checked)}
-                  />
-                )}
-                label="Enable performance cue enhancement"
-              />
+              <FormControl fullWidth sx={{ maxWidth: { lg: 320 } }}>
+                <InputLabel id="script-polish-screen-cue-density-label">Performance cue density</InputLabel>
+                <Select
+                  labelId="script-polish-screen-cue-density-label"
+                  label="Performance cue density"
+                  value={scriptEnhancementLimit}
+                  onChange={(event) => onCueDensityChange(event.target.value as ScriptEnhancementLimit)}
+                >
+                  {SCRIPT_ENHANCEMENT_OPTIONS.map((option) => (
+                    <MenuItem key={option.id} value={option.id}>
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
 
               <Button
                 variant="outlined"
@@ -108,9 +120,11 @@ export default function ScriptPolishScreen(props: Props) {
             </Stack>
 
             <Alert severity={scriptEnhancementEnabled ? 'info' : 'warning'}>
-              {scriptEnhancementEnabled
-                ? 'Performance cues are active. Any edits you make below will be used during audio generation.'
-                : 'Performance cues are off. Audio generation will use the clean script directly.'}
+              {!scriptEnhancementEnabled
+                ? 'Cue density is off. Audio generation will use the original script directly.'
+                : hasEnhancement
+                  ? 'Cue density is active and any polished-script edits below will be used during audio generation.'
+                  : 'Cue density is active, but you still need to run the cue pass before audio generation can use a polished script.'}
             </Alert>
 
             {items.length === 0 ? (
@@ -171,7 +185,7 @@ export default function ScriptPolishScreen(props: Props) {
                           disabled={!scriptEnhancementEnabled}
                           helperText={scriptEnhancementEnabled
                             ? describeScriptEnhancementLimit(settings.scriptEnhancementLimit)
-                            : 'Enable performance cues above to edit this field.'}
+                            : 'Set cue density above to Light or Expressive to edit this field.'}
                         />
 
                         {!validation.isValid ? (

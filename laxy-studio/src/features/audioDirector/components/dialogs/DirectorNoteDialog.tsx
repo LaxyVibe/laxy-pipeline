@@ -79,7 +79,7 @@ export default function DirectorNoteDialog(props: Props) {
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
             <TextField
               select
-              label="Content Version"
+              label="Narration Style"
               value={settings.contentVersion}
               onChange={(event) => onContentVersionChange(event.target.value as ContentVersion)}
               fullWidth
@@ -93,7 +93,7 @@ export default function DirectorNoteDialog(props: Props) {
 
             <TextField
               select
-              label="Script Enhancement Limit"
+              label="Performance Cue Density"
               value={settings.scriptEnhancementLimit}
               onChange={(event) => onScriptEnhancementLimitChange(event.target.value as ScriptEnhancementLimit)}
               fullWidth

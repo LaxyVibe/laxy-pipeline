@@ -89,6 +89,7 @@ class EnhanceScriptRequest(BaseModel):
     characterName: str | None = None
     characterRole: str | None = None
     contextDirective: str | None = None
+    cueDensity: Literal["none", "light", "medium"] | None = None
 
 
 class GenerateJapaneseHiraganaRequest(BaseModel):

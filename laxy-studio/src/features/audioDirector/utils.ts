@@ -156,7 +156,14 @@ function normalizeAudioDirectorDraft(
       isPromptCustomized: false,
     },
   } satisfies AudioGuideSettings;
-  const globalSettings = normalizeAudioGuideSettings(value.globalSettings, defaultSettings);
+  const normalizedGlobalSettings = normalizeAudioGuideSettings(value.globalSettings, defaultSettings);
+  const globalSettings = value.scriptEnhancementEnabled === true
+    && normalizedGlobalSettings.scriptEnhancementLimit === 'none'
+    ? {
+      ...normalizedGlobalSettings,
+      scriptEnhancementLimit: 'light' as const,
+    }
+    : normalizedGlobalSettings;
   const dropScriptBoundState = options.dropScriptBoundState === true;
   const manuscriptText = typeof value.manuscriptText === 'string' ? value.manuscriptText : '';
   const normalizedItems = dropScriptBoundState
@@ -171,7 +178,7 @@ function normalizeAudioDirectorDraft(
     manuscriptText,
     sessionId: dropScriptBoundState ? null : typeof value.sessionId === 'string' ? value.sessionId : null,
     coreLanguage: typeof value.coreLanguage === 'string' ? value.coreLanguage : 'en',
-    scriptEnhancementEnabled: value.scriptEnhancementEnabled === true,
+    scriptEnhancementEnabled: globalSettings.scriptEnhancementLimit !== 'none',
     globalSettings,
     items: normalizedItems,
     customCharacters: Array.isArray(value.customCharacters)

@@ -969,6 +969,7 @@ export interface EnhanceScriptRequest {
   characterName?: string;
   characterRole?: string;
   contextDirective?: string;
+  cueDensity?: 'none' | 'light' | 'medium';
 }
 
 export interface EnhanceScriptResponse {

@@ -535,6 +535,34 @@ describe('generateJapaneseHiragana', () => {
   });
 });
 
+describe('enhanceScript', () => {
+  it('passes cue density through to the enhancement endpoint', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        enhancedScript: '[short pause] Welcome to the gallery.',
+      }),
+    });
+
+    const { enhanceScript } = await import('./api');
+    const result = await enhanceScript({
+      scriptContent: 'Welcome to the gallery.',
+      characterName: 'Museum Manager',
+      cueDensity: 'medium',
+    });
+
+    const calledUrl = String((global.fetch as any).mock.calls[0][0]);
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(calledUrl).toMatch(/\/pipeline\/enhance-script|enhance-script-/);
+    expect(body.scriptContent).toBe('Welcome to the gallery.');
+    expect(body.characterName).toBe('Museum Manager');
+    expect(body.cueDensity).toBe('medium');
+    expect(result.enhancedScript).toBe('[short pause] Welcome to the gallery.');
+  });
+});
+
 describe('API error normalization', () => {
   it('surfaces structured backend error envelope fields', async () => {
     global.fetch = vi.fn().mockResolvedValue({

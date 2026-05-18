@@ -116,10 +116,10 @@ export default function DirectorNoteSection(props: Props) {
 
           <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' } }}>
             <FormControl fullWidth>
-              <InputLabel id="content-version-label">Content version</InputLabel>
+              <InputLabel id="content-version-label">Narration style</InputLabel>
               <Select
                 labelId="content-version-label"
-                label="Content version"
+                label="Narration style"
                 value={globalSettings.contentVersion}
                 onChange={(event) => onContentVersionChange(event.target.value as ContentVersion)}
               >
@@ -132,10 +132,10 @@ export default function DirectorNoteSection(props: Props) {
             </FormControl>
 
             <FormControl fullWidth>
-              <InputLabel id="enhancement-limit-label">Enhancement limit</InputLabel>
+              <InputLabel id="enhancement-limit-label">Performance cue density</InputLabel>
               <Select
                 labelId="enhancement-limit-label"
-                label="Enhancement limit"
+                label="Performance cue density"
                 value={globalSettings.scriptEnhancementLimit}
                 onChange={(event) => onScriptEnhancementLimitChange(event.target.value as ScriptEnhancementLimit)}
               >

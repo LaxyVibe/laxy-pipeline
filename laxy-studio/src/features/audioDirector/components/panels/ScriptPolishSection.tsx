@@ -7,10 +7,12 @@ import {
   Button,
   Card,
   CardContent,
-  Checkbox,
   Chip,
-  FormControlLabel,
+  FormControl,
+  InputLabel,
+  MenuItem,
   Paper,
+  Select,
   Stack,
   Tab,
   Tabs,
@@ -18,7 +20,13 @@ import {
   Typography,
 } from '@mui/material';
 import { langLabel } from '../../../../types/entity';
-import { describeScriptEnhancementLimit, type AudioGuideSettings, type AudioPoiDraft } from '../../../audioMvp/model';
+import {
+  describeScriptEnhancementLimit,
+  SCRIPT_ENHANCEMENT_OPTIONS,
+  type AudioGuideSettings,
+  type AudioPoiDraft,
+  type ScriptEnhancementLimit,
+} from '../../../audioMvp/model';
 import type { EnhancementEntry } from '../../types';
 import { audioDirectorStyles } from '../../theme';
 import { createEmptyValidation } from '../../utils';
@@ -28,12 +36,13 @@ type Props = {
   items: AudioPoiDraft[];
   coreLanguage: string;
   scriptEnhancementEnabled: boolean;
+  scriptEnhancementLimit: ScriptEnhancementLimit;
   activeEnhancementEntries: Record<string, EnhancementEntry>;
   isGenerating: boolean;
   isEnhancing: boolean;
   generationError: string | null;
   getItemSettings: (item: AudioPoiDraft) => AudioGuideSettings;
-  onToggleEnhancement: (enabled: boolean) => void;
+  onCueDensityChange: (limit: ScriptEnhancementLimit) => void;
   onEnhanceAll: (forceRegenerate?: boolean) => void;
   onChangeEnhancedScript: (language: string, item: AudioPoiDraft, nextText: string) => void;
   onChangePhoneticOverrides?: (
@@ -52,12 +61,13 @@ export default function ScriptPolishSection(props: Props) {
     items,
     coreLanguage,
     scriptEnhancementEnabled,
+    scriptEnhancementLimit,
     activeEnhancementEntries,
     isGenerating,
     isEnhancing,
     generationError,
     getItemSettings,
-    onToggleEnhancement,
+    onCueDensityChange,
     onEnhanceAll,
     onChangeEnhancedScript,
     eyebrow = 'Right center column',
@@ -85,15 +95,21 @@ export default function ScriptPolishSection(props: Props) {
         {generationError ? <Alert severity="error">{generationError}</Alert> : null}
 
         <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems={{ xs: 'stretch', lg: 'center' }}>
-          <FormControlLabel
-            control={(
-              <Checkbox
-                checked={scriptEnhancementEnabled}
-                onChange={(event) => onToggleEnhancement(event.target.checked)}
-              />
-            )}
-            label="Enable performance cue enhancement"
-          />
+          <FormControl fullWidth sx={{ maxWidth: { lg: 320 } }}>
+            <InputLabel id="script-polish-cue-density-label">Performance cue density</InputLabel>
+            <Select
+              labelId="script-polish-cue-density-label"
+              label="Performance cue density"
+              value={scriptEnhancementLimit}
+              onChange={(event) => onCueDensityChange(event.target.value as ScriptEnhancementLimit)}
+            >
+              {SCRIPT_ENHANCEMENT_OPTIONS.map((option) => (
+                <MenuItem key={option.id} value={option.id}>
+                  {option.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
 
           <Button
             variant="outlined"
@@ -106,9 +122,11 @@ export default function ScriptPolishSection(props: Props) {
         </Stack>
 
         <Alert severity={scriptEnhancementEnabled ? 'info' : 'warning'}>
-          {scriptEnhancementEnabled
-            ? 'Performance cues are active. Use the enhance button here when you want a polished script. Generate audio will not run enhancement automatically.'
-            : 'Performance cues are off. Audio generation will use the clean script directly.'}
+          {!scriptEnhancementEnabled
+            ? 'Cue density is off. Audio generation will use the original script directly.'
+            : hasEnhancement
+              ? 'Cue density is active and a polished script is ready. Audio generation will use the polished script for this language.'
+              : 'Cue density is active, but you still need to run the cue pass. Until then, audio generation will use the original script.'}
         </Alert>
       </Stack>
 
@@ -218,7 +236,7 @@ function ScriptPolishItemCard(props: {
             disabled={!scriptEnhancementEnabled}
             helperText={scriptEnhancementEnabled
               ? describeScriptEnhancementLimit(scriptEnhancementLimit)
-              : 'Enable performance cues above to edit this field.'}
+              : 'Set cue density above to Light or Expressive to edit the polished script.'}
           />
         )}
 

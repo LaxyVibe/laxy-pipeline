@@ -2098,7 +2098,8 @@ def enhance_script(req: https_fn.Request) -> https_fn.Response:
         "scriptContent": "Welcome to the ancient temple...",
         "characterName": "Ada",
         "characterRole": "Warm, approachable narrator",
-        "contextDirective": "A peaceful Buddhist temple in Kyoto"
+        "contextDirective": "A peaceful Buddhist temple in Kyoto",
+        "cueDensity": "light"
     }
 
     Response:
@@ -2147,12 +2148,13 @@ def enhance_script(req: https_fn.Request) -> https_fn.Response:
                     character_name=payload.characterName,
                     character_role=payload.characterRole,
                     context_directive=payload.contextDirective,
+                    cue_density=payload.cueDensity,
                 )
             )
             _write_audit_log(
                 "pipeline.enhance_script",
                 resource="script_enhancement",
-                details={"characterName": payload.characterName},
+                details={"characterName": payload.characterName, "cueDensity": payload.cueDensity},
                 success=True,
             )
             return _json_response(result)

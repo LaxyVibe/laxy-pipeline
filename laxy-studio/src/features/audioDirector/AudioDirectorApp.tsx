@@ -153,9 +153,10 @@ export default function AudioDirectorApp() {
               items={controller.items}
               onChangeEnhancedScript={controller.handleEnhancedScriptChange}
               onChangePhoneticOverrides={controller.handlePhoneticOverridesChange}
+              onCueDensityChange={controller.handleScriptEnhancementLimitChange}
               onEnhanceAll={controller.handleEnhanceActiveLanguage}
-              onToggleEnhancement={controller.setScriptEnhancementEnabled}
               scriptEnhancementEnabled={controller.scriptEnhancementEnabled}
+              scriptEnhancementLimit={controller.globalSettings.scriptEnhancementLimit}
               eyebrow="Polish dialog"
               mode="plain"
             />
