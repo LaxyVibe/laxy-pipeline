@@ -101,6 +101,12 @@ const AudioGenerateLanguageFileSchema = z.object({
   voiceId: z.string().optional(),
   model: z.string().optional(),
   error: z.string().optional(),
+  versionId: z.string().optional(),
+  storagePath: z.string().optional(),
+  guideId: z.string().optional(),
+  generatedAtMs: z.number().optional(),
+  isActiveVersion: z.boolean().optional(),
+  isLatestVersion: z.boolean().optional(),
 });
 
 const AudioGenerateLanguageSrtSchema = z.object({

@@ -6,6 +6,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   IconButton,
   LinearProgress,
   Paper,
@@ -37,7 +38,15 @@ type Props = {
   };
   generationError: string | null;
   isGenerating: boolean;
-  onChooseAudio?: (selection: { audioUrl: string; scriptText: string }) => void;
+  onChooseAudio?: (selection: {
+    audioUrl: string;
+    scriptText: string;
+    versionId?: string;
+    storagePath?: string;
+    guideId?: string;
+    spotId?: string;
+    lang?: string;
+  }) => void;
 };
 
 type HistoryRow = {
@@ -45,6 +54,14 @@ type HistoryRow = {
   downloadName: string;
   scriptText: string;
   audioUrl: string;
+  versionId?: string;
+  storagePath?: string;
+  guideId?: string;
+  spotId?: string;
+  lang?: string;
+  generatedAt?: number;
+  isActiveVersion?: boolean;
+  isLatestVersion?: boolean;
 };
 
 function sanitizeFilenamePart(value: string): string {
@@ -82,8 +99,16 @@ export default function GenerationHistoryRail(props: Props) {
                 `spot-${String(spot.spotNumber ?? sourceItem?.spotNumber ?? 0).padStart(3, '0')}`,
                 sanitizeFilenamePart(spot.title || sourceItem?.title || ''),
               ].join('-') + `.${inferAudioExtension(spot.audioUrl)}`,
-              scriptText,
+              scriptText: spot.scriptText?.trim() || scriptText,
               audioUrl: spot.audioUrl,
+              versionId: spot.versionId,
+              storagePath: spot.storagePath,
+              guideId: spot.guideId,
+              spotId: spot.spotId,
+              lang: spot.lang ?? languageAudio.lang,
+              generatedAt: spot.generatedAtMs ?? run.generatedAt,
+              isActiveVersion: spot.isActiveVersion,
+              isLatestVersion: spot.isLatestVersion,
             };
           }),
         ),
@@ -165,6 +190,17 @@ export default function GenerationHistoryRail(props: Props) {
                         <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                           {row.scriptText || 'Generated script'}
                         </Typography>
+                        {row.isActiveVersion || row.isLatestVersion || row.generatedAt ? (
+                          <Stack direction="row" spacing={0.75} sx={{ mt: 0.75, flexWrap: 'wrap' }}>
+                            {row.isActiveVersion ? <Chip label="Active" size="small" color="success" /> : null}
+                            {row.isLatestVersion && !row.isActiveVersion ? <Chip label="Latest" size="small" /> : null}
+                            {row.generatedAt ? (
+                              <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
+                                {new Date(row.generatedAt).toLocaleString()}
+                              </Typography>
+                            ) : null}
+                          </Stack>
+                        ) : null}
                       </TableCell>
                       <TableCell sx={{ py: 0.5 }} align="center">
                         <HistoryAudioButton audioUrl={row.audioUrl} />
@@ -176,6 +212,11 @@ export default function GenerationHistoryRail(props: Props) {
                         <HistoryChooseButton
                           audioUrl={row.audioUrl}
                           scriptText={row.scriptText}
+                          versionId={row.versionId}
+                          storagePath={row.storagePath}
+                          guideId={row.guideId}
+                          spotId={row.spotId}
+                          lang={row.lang}
                           onChooseAudio={onChooseAudio}
                         />
                       </TableCell>
@@ -264,16 +305,29 @@ function HistoryDownloadButton(props: { audioUrl: string; downloadName: string }
 function HistoryChooseButton(props: {
   audioUrl: string;
   scriptText: string;
-  onChooseAudio?: (selection: { audioUrl: string; scriptText: string }) => void;
+  versionId?: string;
+  storagePath?: string;
+  guideId?: string;
+  spotId?: string;
+  lang?: string;
+  onChooseAudio?: (selection: {
+    audioUrl: string;
+    scriptText: string;
+    versionId?: string;
+    storagePath?: string;
+    guideId?: string;
+    spotId?: string;
+    lang?: string;
+  }) => void;
 }) {
-  const { audioUrl, scriptText, onChooseAudio } = props;
+  const { audioUrl, scriptText, versionId, storagePath, guideId, spotId, lang, onChooseAudio } = props;
 
   return (
     <Button
       variant="outlined"
       size="small"
       disabled={!onChooseAudio}
-      onClick={() => onChooseAudio?.({ audioUrl, scriptText })}
+      onClick={() => onChooseAudio?.({ audioUrl, scriptText, versionId, storagePath, guideId, spotId, lang })}
     >
       Choose
     </Button>

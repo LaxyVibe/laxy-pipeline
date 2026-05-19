@@ -46,6 +46,14 @@ class TranslationTextItem(BaseModel):
     translatedText: str
 
 
+class AudioHistoryTarget(BaseModel):
+    tenantId: str | None = None
+    guideId: str = Field(min_length=1)
+    spotId: str = Field(min_length=1)
+    spotTitle: str | None = None
+    lang: str = Field(min_length=1)
+
+
 class AudioGenerateRequest(BaseModel):
     sessionId: str = Field(min_length=1)
     scripts: list[ScriptRequestItem] = Field(min_length=1)
@@ -60,6 +68,7 @@ class AudioGenerateLanguageRequest(BaseModel):
     scripts: list[ScriptRequestItem] = Field(min_length=1)
     voiceId: str = "Aoede"
     language: str = Field(min_length=1)
+    historyTarget: AudioHistoryTarget | None = None
     directorNote: dict[str, Any] | None = None
     translations: list[TranslationTextItem] | None = None
 

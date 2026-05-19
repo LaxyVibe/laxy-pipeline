@@ -423,6 +423,14 @@ export interface SpotAudioFile {
   title: string;
   audioUrl: string;
   durationMs: number;
+  scriptText?: string;
+  versionId?: string;
+  storagePath?: string;
+  guideId?: string;
+  lang?: string;
+  generatedAtMs?: number;
+  isActiveVersion?: boolean;
+  isLatestVersion?: boolean;
 }
 
 /** Generated audio for a single language */

@@ -1,5 +1,6 @@
 from .pipeline_contract import (
     API_VERSION,
+    AudioHistoryTarget,
     AudioGenerateLanguageRequest,
     AudioGenerateRequest,
     GenerateJapaneseHiraganaRequest,
@@ -16,6 +17,7 @@ from .pipeline_contract import (
 
 __all__ = [
     "API_VERSION",
+    "AudioHistoryTarget",
     "AudioGenerateLanguageRequest",
     "AudioGenerateRequest",
     "GenerateJapaneseHiraganaRequest",

@@ -2,7 +2,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import GraphicEqOutlinedIcon from '@mui/icons-material/GraphicEqOutlined';
 import { Badge, Box, Container, Dialog, DialogContent, DialogTitle, Fab, IconButton, Stack, Typography } from '@mui/material';
 import { ThemeProvider } from '@mui/material/styles';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAudioDirectorController } from './useAudioDirectorController';
 import { audioDirectorStyles, audioDirectorTheme } from './theme';
 import AnalysisOverlay from './components/AnalysisOverlay';
@@ -27,7 +27,21 @@ export default function AudioDirectorApp() {
   );
   const isEmbedded = window.self !== window.top;
 
-  const handleChooseAudio = (selection: { audioUrl: string; scriptText: string }) => {
+  useEffect(() => {
+    if (controller.resultDialogRequestAt) {
+      setResultOpen(true);
+    }
+  }, [controller.resultDialogRequestAt]);
+
+  const handleChooseAudio = (selection: {
+    audioUrl: string;
+    scriptText: string;
+    versionId?: string;
+    storagePath?: string;
+    guideId?: string;
+    spotId?: string;
+    lang?: string;
+  }) => {
     if (!selection.audioUrl) return;
     if (!window.confirm('Use this generated result and send its script and audio back to the parent page?')) return;
     if (!isEmbedded) return;
@@ -37,6 +51,11 @@ export default function AudioDirectorApp() {
         type: 'laxy:result-selected',
         outputScript: selection.scriptText,
         outputAudio: selection.audioUrl,
+        versionId: selection.versionId,
+        storagePath: selection.storagePath,
+        guideId: selection.guideId,
+        spotId: selection.spotId,
+        lang: selection.lang,
       },
       window.location.origin,
     );

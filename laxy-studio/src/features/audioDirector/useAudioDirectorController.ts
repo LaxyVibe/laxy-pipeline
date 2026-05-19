@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
 import {
   bootstrapAudioSession,
   enhanceScript,
@@ -8,6 +9,7 @@ import {
   generateDirectorNote,
   generateJapaneseHiragana,
 } from '../../api';
+import { initFirebase } from '../../firebase';
 import { SUPPORTED_LANGUAGES, langLabel, type LanguageAudio, type LanguageSRT } from '../../types/entity';
 import {
   AUDIO_MVP_VOICES,
@@ -29,6 +31,14 @@ import {
   type ContentVersion,
   type ScriptEnhancementLimit,
 } from '../audioMvp/model';
+import {
+  buildAudioTrackDocId,
+  buildGenerationHistoryFromVersions,
+  mapAudioHistoryVersion,
+  mapAudioTrackSummary,
+  readAudioHistoryTarget,
+  type AudioHistoryTarget,
+} from './history';
 import type {
   AudioDirectorDraft,
   EnhancementEntry,
@@ -64,9 +74,9 @@ function resolveScriptDraft(text: string, previous: AudioPoiDraft[]): AudioPoiDr
   if (!trimmed) return [];
   const prev0 = previous[0];
   return [{
-    spotId: 'spot_001',
-    spotNumber: 1,
-    title: '',
+    spotId: prev0?.spotId ?? 'spot_001',
+    spotNumber: prev0?.spotNumber ?? 1,
+    title: prev0?.title ?? '',
     scriptText: trimmed,
     excerpt: buildExcerpt(trimmed),
     overrideEnabled: prev0?.overrideEnabled ?? false,
@@ -83,7 +93,13 @@ export function useAudioDirectorController() {
   const txtInputRef = useRef<HTMLInputElement | null>(null);
   const analysisRunRef = useRef(0);
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const readyPostedRef = useRef(false);
+  const lastEmbeddedPayloadRef = useRef<{ text: string; language: string | null } | null>(null);
   const isEmbedded = window.self !== window.top;
+  const embeddedHistoryTarget = useMemo<AudioHistoryTarget | null>(
+    () => (isEmbedded ? readAudioHistoryTarget(searchParams) : null),
+    [isEmbedded, searchParams],
+  );
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -112,6 +128,7 @@ export function useAudioDirectorController() {
   const [audioFiles, setAudioFiles] = useState<LanguageAudio[]>([]);
   const [srtFiles, setSrtFiles] = useState<LanguageSRT[]>([]);
   const [generationHistory, setGenerationHistory] = useState<GenerationHistoryEntry[]>([]);
+  const [storedGenerationHistory, setStoredGenerationHistory] = useState<GenerationHistoryEntry[]>([]);
   const [itemStates, setItemStates] = useState<Record<string, ItemGenerationState>>({});
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -119,8 +136,10 @@ export function useAudioDirectorController() {
   const [lastGenerationLatencyMs, setLastGenerationLatencyMs] = useState<number | null>(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isHydratingHistory, setIsHydratingHistory] = useState(false);
   const [analysisPhase, setAnalysisPhase] = useState(0);
   const [detectedLangLabel, setDetectedLangLabel] = useState<string | null>(null);
+  const [resultDialogRequestAt, setResultDialogRequestAt] = useState<number | null>(null);
   const [progressSummary, setProgressSummary] = useState({
     completed: 0,
     total: 0,
@@ -132,8 +151,12 @@ export function useAudioDirectorController() {
     [customCharacters],
   );
   const scriptEnhancementEnabled = isScriptEnhancementActive(globalSettings.scriptEnhancementLimit);
+  const combinedGenerationHistory = useMemo(
+    () => [...generationHistory, ...storedGenerationHistory].sort((left, right) => right.generatedAt - left.generatedAt),
+    [generationHistory, storedGenerationHistory],
+  );
 
-  const resetScriptBoundState = () => {
+  const resetScriptBoundState = useCallback(() => {
     setSessionId(null);
     setCoreLanguage('en');
     setEnhancementCache({});
@@ -149,7 +172,35 @@ export function useAudioDirectorController() {
       total: 0,
       currentLabel: '',
     });
-  };
+  }, []);
+
+  const applyEmbeddedScriptPayload = useCallback((payload: { text: string; language: string | null }) => {
+    const normalizedPayload = {
+      text: payload.text,
+      language: payload.language,
+    };
+    const previousPayload = lastEmbeddedPayloadRef.current;
+    if (
+      previousPayload
+      && previousPayload.text === normalizedPayload.text
+      && previousPayload.language === normalizedPayload.language
+    ) {
+      return;
+    }
+
+    lastEmbeddedPayloadRef.current = normalizedPayload;
+    resetScriptBoundState();
+    setManuscriptText(payload.text);
+    if (payload.language) {
+      setCoreLanguage(payload.language);
+    } else {
+      const detected = detectLanguageCode(payload.text.trim());
+      if (detected) setCoreLanguage(detected.code);
+    }
+    const nextSearchParams = new URLSearchParams(window.location.search);
+    nextSearchParams.set('screen', 'guide-settings');
+    setSearchParams(nextSearchParams);
+  }, [resetScriptBoundState, setSearchParams]);
 
   useEffect(() => {
     const saved = readStoredAudioDirectorDraft();
@@ -182,6 +233,106 @@ export function useAudioDirectorController() {
   useEffect(() => {
     setItems((previous) => resolveScriptDraft(manuscriptText, previous));
   }, [manuscriptText]);
+
+  useEffect(() => {
+    if (!embeddedHistoryTarget) return;
+
+    let cancelled = false;
+
+    const hydrateHistory = async () => {
+      setIsHydratingHistory(true);
+      setStoredGenerationHistory([]);
+
+      try {
+        const { db } = initFirebase();
+        const summaryDocRef = doc(
+          db,
+          'guides',
+          embeddedHistoryTarget.guideId,
+          'audioTracks',
+          buildAudioTrackDocId(embeddedHistoryTarget.spotId, embeddedHistoryTarget.lang),
+        );
+
+        const directSummaryDoc = await getDoc(summaryDocRef);
+        let summary = directSummaryDoc.exists()
+          ? mapAudioTrackSummary({
+            guideId: embeddedHistoryTarget.guideId,
+            docId: directSummaryDoc.id,
+            data: directSummaryDoc.data() as Record<string, unknown>,
+          })
+          : null;
+
+        if (!summary) {
+          const summarySnapshot = await getDocs(query(
+            collection(db, 'guides', embeddedHistoryTarget.guideId, 'audioTracks'),
+            where('spotId', '==', embeddedHistoryTarget.spotId),
+            where('lang', '==', embeddedHistoryTarget.lang),
+            limit(1),
+          ));
+          const fallbackDoc = summarySnapshot.docs[0];
+          if (fallbackDoc) {
+            summary = mapAudioTrackSummary({
+              guideId: embeddedHistoryTarget.guideId,
+              docId: fallbackDoc.id,
+              data: fallbackDoc.data() as Record<string, unknown>,
+            });
+          }
+        }
+
+        if (!summary) {
+          if (!cancelled) {
+            setStoredGenerationHistory([]);
+          }
+          return;
+        }
+
+        const versionsSnapshot = await getDocs(query(
+          collection(db, 'guides', embeddedHistoryTarget.guideId, 'audioTracks', summary.id, 'versions'),
+          orderBy('createdAt', 'desc'),
+        ));
+
+        const versionRecords = versionsSnapshot.docs
+          .map((versionDoc) => mapAudioHistoryVersion({
+            guideId: embeddedHistoryTarget.guideId,
+            target: {
+              ...embeddedHistoryTarget,
+              spotTitle: summary?.spotTitle,
+            },
+            summary,
+            docId: versionDoc.id,
+            data: versionDoc.data() as Record<string, unknown>,
+          }))
+          .filter((record): record is NonNullable<typeof record> => Boolean(record));
+
+        if (!versionRecords.length) {
+          if (!cancelled) {
+            setStoredGenerationHistory([]);
+          }
+          return;
+        }
+
+        if (cancelled) return;
+
+        const historyEntries = buildGenerationHistoryFromVersions(versionRecords);
+        setStoredGenerationHistory(historyEntries);
+        setResultDialogRequestAt(Date.now());
+      } catch (error) {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setGenerationError(`Audio history retrieval failed: ${message}`);
+      } finally {
+        if (!cancelled) {
+          setIsHydratingHistory(false);
+        }
+      }
+    };
+
+    void hydrateHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [embeddedHistoryTarget]);
 
   useEffect(() => {
     writeLocalStorage(AUDIO_DIRECTOR_DRAFT_STORAGE_KEY, {
@@ -224,29 +375,26 @@ export function useAudioDirectorController() {
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'laxy:script') {
-        const text = typeof event.data.text === 'string' ? event.data.text : '';
-        const manualLanguage = typeof event.data.language === 'string' && SUPPORTED_LANGUAGE_CODES.has(event.data.language)
+        const payload = {
+          text: typeof event.data.text === 'string' ? event.data.text : '',
+          language: typeof event.data.language === 'string' && SUPPORTED_LANGUAGE_CODES.has(event.data.language)
           ? event.data.language
-          : null;
-        resetScriptBoundState();
-        setManuscriptText(text);
-        if (manualLanguage) {
-          setCoreLanguage(manualLanguage);
-        } else {
-          const detected = detectLanguageCode(text.trim());
-          if (detected) setCoreLanguage(detected.code);
-        }
-        setSearchParams({ screen: 'guide-settings' });
+          : null,
+        };
+        applyEmbeddedScriptPayload(payload);
       }
     };
 
     window.addEventListener('message', handleMessage);
-    // Signal the parent that the iframe is ready to receive the script.
-    window.parent.postMessage({ type: 'laxy:ready' }, window.location.origin);
+    if (!readyPostedRef.current) {
+      readyPostedRef.current = true;
+      // Signal the parent that the iframe is ready to receive the script.
+      window.parent.postMessage({ type: 'laxy:ready' }, window.location.origin);
+    }
 
     return () => window.removeEventListener('message', handleMessage);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [applyEmbeddedScriptPayload, isEmbedded]);
 
   const getCharacter = (characterId: string) => (
     allCharacters.find((character) => character.id === characterId)
@@ -459,7 +607,9 @@ export function useAudioDirectorController() {
   const canAdvance = manuscriptText.trim().length > 0;
 
   const handleNavigate = (screen: WizardScreen) => {
-    setSearchParams({ screen });
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set('screen', screen);
+    setSearchParams(nextSearchParams);
   };
 
   const runScriptAnalysis = async () => {
@@ -970,6 +1120,11 @@ export function useAudioDirectorController() {
         const character = getCharacter(settings.characterId) ?? selectedCharacter;
         const voice = getVoice(settings.voiceId);
         const stateKey = buildGenerationStateKey(language, item.spotId);
+        const generationTarget = embeddedHistoryTarget && embeddedHistoryTarget.lang === language
+          ? embeddedHistoryTarget
+          : null;
+        const requestSpotId = generationTarget?.spotId ?? item.spotId;
+        const requestTitle = item.title.trim() || generationTarget?.spotTitle || '';
         const sourceText = item.scriptText;
         const enhancementEntry = languageEnhancementEntries[item.spotId];
         const effectiveText = scriptEnhancementEnabled
@@ -1004,13 +1159,22 @@ export function useAudioDirectorController() {
         const response = await generateAudioForLanguage({
           sessionId: activeSessionId,
           scripts: [{
-            spotId: item.spotId,
+            spotId: requestSpotId,
             spotNumber: item.spotNumber,
-            title: '',
+            title: requestTitle,
             scriptText: preprocessing.processedText,
           }],
           voiceId: settings.voiceId,
           language,
+          historyTarget: generationTarget
+            ? {
+              tenantId: generationTarget.tenantId,
+              guideId: generationTarget.guideId,
+              spotId: generationTarget.spotId,
+              spotTitle: generationTarget.spotTitle,
+              lang: generationTarget.lang,
+            }
+            : undefined,
           directorNote: buildDirectorPayload({
             settings,
             character,
@@ -1026,7 +1190,12 @@ export function useAudioDirectorController() {
           );
         }
 
-        nextAudioFiles = upsertLanguageAudio(nextAudioFiles, language, generatedAudio);
+        const enrichedGeneratedAudio = {
+          ...generatedAudio,
+          scriptText: effectiveText,
+        };
+
+        nextAudioFiles = upsertLanguageAudio(nextAudioFiles, language, enrichedGeneratedAudio);
         if (response.srtFiles[0]) {
           nextSrtFiles = upsertLanguageSrt(nextSrtFiles, language, response.srtFiles[0]);
         }
@@ -1176,7 +1345,7 @@ export function useAudioDirectorController() {
     globalCompiledPrompt,
     globalRecommendation,
     globalSettings,
-    generationHistory,
+    generationHistory: combinedGenerationHistory,
     handleCompiledPromptChange,
     handleCurrentScriptTextChange,
     handleDeleteCharacter,
@@ -1204,6 +1373,7 @@ export function useAudioDirectorController() {
     isGenerating,
     isGeneratingJapaneseReading,
     isGeneratingCharacter,
+    isHydratingHistory,
     lastGenerationLatencyMs,
     itemStates,
     items,
@@ -1214,6 +1384,7 @@ export function useAudioDirectorController() {
     playingVoiceId,
     progressSummary,
     promptPreviewPayload,
+    resultDialogRequestAt,
     runGeneration,
     runScriptAnalysis,
     saveMessage,

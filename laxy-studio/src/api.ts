@@ -826,6 +826,13 @@ export interface AudioGenerateLanguageRequest {
   scripts: Array<{ spotId: string; spotNumber: number; title: string; scriptText: string }>;
   voiceId: string;
   language: string;
+  historyTarget?: {
+    tenantId?: string;
+    guideId: string;
+    spotId: string;
+    spotTitle?: string;
+    lang: string;
+  };
   directorNote?: {
     scene: string;
     style: string;
@@ -849,6 +856,12 @@ export interface AudioGenerateLanguageResponse {
     voiceId?: string;
     model?: string;
     error?: string;
+    versionId?: string;
+    storagePath?: string;
+    guideId?: string;
+    generatedAtMs?: number;
+    isActiveVersion?: boolean;
+    isLatestVersion?: boolean;
   }>;
   srtFiles: Array<{
     lang: string;

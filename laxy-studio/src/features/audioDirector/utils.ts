@@ -281,6 +281,7 @@ export function upsertLanguageAudio(
   item: AudioGenerateLanguageResponse['audioFiles'][number],
 ): LanguageAudio[] {
   if (!item.audioUrl) return previous;
+  const rawItem = item as Record<string, unknown>;
   const cacheBustedUrl = withCacheBust(item.audioUrl, `${Date.now()}-${item.spotId}`);
   const existingIndex = previous.findIndex((entry) => entry.lang === language);
   const nextSpot = {
@@ -289,6 +290,14 @@ export function upsertLanguageAudio(
     title: item.title,
     audioUrl: cacheBustedUrl,
     durationMs: item.durationMs,
+    scriptText: typeof rawItem.scriptText === 'string' ? rawItem.scriptText : undefined,
+    versionId: typeof rawItem.versionId === 'string' ? rawItem.versionId : undefined,
+    storagePath: typeof rawItem.storagePath === 'string' ? rawItem.storagePath : undefined,
+    guideId: typeof rawItem.guideId === 'string' ? rawItem.guideId : undefined,
+    lang: typeof rawItem.lang === 'string' ? rawItem.lang : language,
+    generatedAtMs: typeof rawItem.generatedAtMs === 'number' ? rawItem.generatedAtMs : Date.now(),
+    isActiveVersion: typeof rawItem.isActiveVersion === 'boolean' ? rawItem.isActiveVersion : undefined,
+    isLatestVersion: typeof rawItem.isLatestVersion === 'boolean' ? rawItem.isLatestVersion : undefined,
   };
 
   if (existingIndex < 0) {

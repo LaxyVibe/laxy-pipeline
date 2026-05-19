@@ -747,16 +747,34 @@ def _build_audio_generate_language_stub_response(payload: AudioGenerateLanguageR
         # Deterministic duration so CI assertions remain stable.
         duration_ms = max(1_200, min(12_000, 900 + (len(spoken_text) * 35)))
         audio_url = f"{AUDIO_E2E_STUB_DATA_URL}#lang={payload.language}&spot={script.spotId}"
+        history_metadata: dict[str, Any] = {}
+        if payload.historyTarget is not None:
+            generated_at_ms = int(time.time() * 1000)
+            history_metadata = {
+                "guideId": payload.historyTarget.guideId,
+                "spotId": payload.historyTarget.spotId,
+                "lang": payload.historyTarget.lang,
+                "versionId": f"stub-version-{generated_at_ms:x}",
+                "storagePath": f"audio/{payload.sessionId}/{payload.language}/{payload.historyTarget.spotId}.wav",
+                "generatedAtMs": generated_at_ms,
+                "isActiveVersion": True,
+                "isLatestVersion": True,
+            }
 
         audio_files.append({
             "lang": payload.language,
-            "spotId": script.spotId,
+            "spotId": payload.historyTarget.spotId if payload.historyTarget is not None else script.spotId,
             "spotNumber": script.spotNumber,
-            "title": script.title,
+            "title": (
+                payload.historyTarget.spotTitle or script.title
+                if payload.historyTarget is not None
+                else script.title
+            ),
             "audioUrl": audio_url,
             "durationMs": duration_ms,
             "voiceId": payload.voiceId,
             "model": "deterministic-e2e-stub",
+            **history_metadata,
         })
         srt_files.append(_build_stub_srt_file(payload.language, script.spotId, spoken_text, duration_ms))
 
@@ -1847,6 +1865,7 @@ def audio_generate_language(req: https_fn.Request) -> https_fn.Response:
                     scripts=[item.model_dump() for item in payload.scripts],
                     voice_id=payload.voiceId,
                     language=payload.language,
+                    history_target=payload.historyTarget.model_dump() if payload.historyTarget else None,
                     director_note=payload.directorNote,
                     translations=[item.model_dump() for item in payload.translations] if payload.translations else None,
                 )

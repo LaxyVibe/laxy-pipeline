@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { clearCompiledPromptCustomization, validateEnhancedScript } from './model';
+import {
+  AUDIO_DIRECTOR_SAMPLE_CONTEXT,
+  AUDIO_MVP_VOICES,
+  PRESET_AUDIO_CHARACTERS,
+  TTS_SCRIPT_FIDELITY_INSTRUCTION,
+  clearCompiledPromptCustomization,
+  createDefaultSettings,
+  resolveCompiledPrompt,
+  validateEnhancedScript,
+} from './model';
 
 describe('validateEnhancedScript', () => {
   it('accepts creative Gemini TTS audio tags when brackets are well formed', () => {
@@ -40,5 +49,33 @@ describe('clearCompiledPromptCustomization', () => {
       compiledPromptOverride: '',
       isPromptCustomized: false,
     });
+  });
+});
+
+describe('resolveCompiledPrompt', () => {
+  it('includes the script fidelity instruction for all voices', () => {
+    const settings = createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]);
+    const prompt = resolveCompiledPrompt({
+      settings,
+      character: PRESET_AUDIO_CHARACTERS[0],
+      voice: AUDIO_MVP_VOICES[0],
+      scriptText: 'Hello world.',
+    });
+
+    expect(prompt).toContain(TTS_SCRIPT_FIDELITY_INSTRUCTION);
+  });
+
+  it('uses the fixed sample context instead of echoing the current script', () => {
+    const settings = createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]);
+    const prompt = resolveCompiledPrompt({
+      settings,
+      character: PRESET_AUDIO_CHARACTERS[0],
+      voice: AUDIO_MVP_VOICES[0],
+      scriptText: 'きょうもよいてんきですね。',
+    });
+
+    expect(prompt).toContain('## SAMPLE CONTEXT');
+    expect(prompt).toContain(AUDIO_DIRECTOR_SAMPLE_CONTEXT);
+    expect(prompt).not.toContain('きょうもよいてんきですね。');
   });
 });

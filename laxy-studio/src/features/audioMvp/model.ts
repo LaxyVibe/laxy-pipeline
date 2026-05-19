@@ -138,6 +138,12 @@ export const SCRIPT_TAG_EXAMPLES = [
   '[phonetic:word|pronunciation]',
 ];
 
+export const TTS_SCRIPT_FIDELITY_INSTRUCTION =
+  'Make sure you exactly follow the script when you read it. Read the punctuation (commas and periods) naturally as pauses to ensure clear delivery of each segment.';
+
+export const AUDIO_DIRECTOR_SAMPLE_CONTEXT =
+  '八幡さまは古くより多くの人々に親しまれ、お祀りされてきました。 全国約１１万の神社のうち、八幡さまが最も多く、４万６００社あまりのお社(やしろ)があります。 宇佐神宮は４万社あまりある八幡さまの総本宮です。 御祭神である八幡大神さまは応神天皇のご神霊で、５７１年(欽明天皇の時代）に初めて宇佐の地にご示顕になったといわれます。応神天皇は大陸の文化と産業...';
+
 export const AUDIO_MVP_VOICES: AudioMvpVoice[] = [
   {
     id: 'Aoede',
@@ -632,16 +638,11 @@ export function resolveCompiledPrompt(args: {
   voice: AudioMvpVoice;
   scriptText: string;
 }): string {
-  const { settings, character, voice, scriptText } = args;
+  const { settings, character, voice } = args;
   const { directorNote } = settings;
   if (directorNote.isPromptCustomized && directorNote.compiledPromptOverride.trim()) {
     return directorNote.compiledPromptOverride.trim();
   }
-
-  const trimmedScript = scriptText.replace(/\s+/g, ' ').trim();
-  const shortContext = trimmedScript.length <= 180
-    ? trimmedScript
-    : `${trimmedScript.slice(0, 177).trimEnd()}...`;
 
   return [
     character.staticInstruction.trim(),
@@ -664,7 +665,9 @@ export function resolveCompiledPrompt(args: {
     scriptEnhancementInstruction(settings.scriptEnhancementLimit),
     '',
     '## SAMPLE CONTEXT',
-    shortContext,
+    AUDIO_DIRECTOR_SAMPLE_CONTEXT,
+    '',
+    TTS_SCRIPT_FIDELITY_INSTRUCTION,
     '',
     'Stay in character, avoid meta commentary, and produce a natural ready-to-speak delivery.',
   ].filter(Boolean).join('\n');

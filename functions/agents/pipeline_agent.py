@@ -38,6 +38,7 @@ except Exception:  # pragma: no cover - dependency is validated in deployed env
     texttospeech = None  # type: ignore[assignment]
 
 import firebase_admin
+from firebase_admin import firestore as fb_firestore
 from firebase_admin import storage as fb_storage
 
 from . import audio_alignment
@@ -1134,12 +1135,93 @@ class PipelineExecutor:
 
     # ── Standalone audio generation (called by /pipeline/audio-generate) ──
 
+    def _persist_audio_history_version(
+        self,
+        *,
+        history_target: dict[str, Any],
+        session_id: str,
+        spot_id: str,
+        spot_number: int,
+        title: str,
+        script_text: str,
+        language: str,
+        audio_url: str,
+        storage_path: str,
+        duration_ms: int,
+        voice_id: str,
+    ) -> dict[str, Any]:
+        generated_at_ms = int(time.time() * 1000)
+        version_id = f"version-{generated_at_ms:x}-{uuid4().hex[:8]}"
+        track_doc_id = f"{history_target.get('spotId', spot_id)}_{history_target.get('lang', language)}"
+        guide_id = str(history_target.get("guideId", "")).strip()
+        target_spot_id = str(history_target.get("spotId", spot_id)).strip() or spot_id
+        target_lang = str(history_target.get("lang", language)).strip() or language
+        target_spot_title = str(history_target.get("spotTitle", "")).strip() or title or target_spot_id
+        tenant_id = str(history_target.get("tenantId", "")).strip() or None
+        db = fb_firestore.client()
+
+        summary_payload: dict[str, Any] = {
+            "guideId": guide_id,
+            "spotId": target_spot_id,
+            "spotTitle": target_spot_title,
+            "lang": target_lang,
+            "activeVersionId": version_id,
+            "latestVersionId": version_id,
+            "latestGeneratedAt": generated_at_ms,
+            "activeDurationMs": duration_ms,
+            "updatedAt": generated_at_ms,
+            "hasGeneratedAudio": True,
+        }
+        version_payload: dict[str, Any] = {
+            "guideId": guide_id,
+            "spotId": target_spot_id,
+            "spotTitle": target_spot_title,
+            "lang": target_lang,
+            "sessionId": session_id,
+            "runId": f"{session_id}-{generated_at_ms:x}",
+            "createdAt": generated_at_ms,
+            "updatedAt": generated_at_ms,
+            "audioUrl": audio_url,
+            "storagePath": storage_path,
+            "durationMs": duration_ms,
+            "voiceId": voice_id,
+            "model": MODELS["tts"],
+            "scriptSnapshot": {
+                "spotId": target_spot_id,
+                "spotNumber": spot_number,
+                "title": target_spot_title,
+                "scriptText": script_text,
+            },
+        }
+        if tenant_id:
+            summary_payload["tenantId"] = tenant_id
+            version_payload["tenantId"] = tenant_id
+
+        batch = db.batch()
+        summary_ref = db.collection("guides").document(guide_id).collection("audioTracks").document(track_doc_id)
+        version_ref = summary_ref.collection("versions").document(version_id)
+        batch.set(summary_ref, summary_payload, merge=True)
+        batch.set(version_ref, version_payload)
+        batch.commit()
+
+        return {
+            "guideId": guide_id,
+            "spotId": target_spot_id,
+            "lang": target_lang,
+            "versionId": version_id,
+            "storagePath": storage_path,
+            "generatedAtMs": generated_at_ms,
+            "isActiveVersion": True,
+            "isLatestVersion": True,
+        }
+
     async def generate_audio_for_language(
         self,
         session_id: str,
         scripts: list[dict[str, Any]],
         voice_id: str,
         language: str,
+        history_target: dict[str, Any] | None = None,
         director_note: dict[str, Any] | None = None,
         translations: list[dict[str, Any]] | None = None,
         retry_tracker: dict[str, int] | None = None,
@@ -1205,6 +1287,22 @@ class PipelineExecutor:
                     storage_path,
                 )
 
+                history_metadata: dict[str, Any] = {}
+                if history_target:
+                    history_metadata = self._persist_audio_history_version(
+                        history_target=history_target,
+                        session_id=session_id,
+                        spot_id=spot_id,
+                        spot_number=spot_number,
+                        title=title,
+                        script_text=text,
+                        language=language,
+                        audio_url=audio_url,
+                        storage_path=storage_path,
+                        duration_ms=duration_ms,
+                        voice_id=voice_id,
+                    )
+
                 audio_files.append({
                     "lang": language,
                     "spotId": spot_id,
@@ -1214,6 +1312,7 @@ class PipelineExecutor:
                     "durationMs": duration_ms,
                     "voiceId": voice_id,
                     "model": MODELS["tts"],
+                    **history_metadata,
                 })
 
                 srt_entries = await self._generate_aligned_srt_entries(
@@ -1359,7 +1458,9 @@ class PipelineExecutor:
             or ""
         ).strip()
         if compiled_prompt:
-            prompt = cls._sanitize_compiled_tts_prompt(compiled_prompt)
+            prompt = cls._ensure_tts_script_fidelity_instruction(
+                cls._sanitize_compiled_tts_prompt(compiled_prompt)
+            )
             return prompt, clean_transcript
 
         scene = cls._first_director_note_value(director_note, "scene", "vocalEnvironment")
@@ -1373,7 +1474,7 @@ class PipelineExecutor:
             lines.append(f"Style: {style}")
         if pacing:
             lines.append(f"Pacing: {pacing}")
-        return "\n".join(lines), clean_transcript
+        return cls._ensure_tts_script_fidelity_instruction("\n".join(lines)), clean_transcript
 
     @classmethod
     def _sanitize_compiled_tts_prompt(cls, compiled_prompt: str) -> str:
@@ -1477,6 +1578,20 @@ class PipelineExecutor:
                     return candidate[:index].rstrip()
                 return candidate[: index + len(marker)].rstrip()
         return candidate.rstrip()
+
+    @staticmethod
+    def _ensure_tts_script_fidelity_instruction(prompt: str) -> str:
+        instruction = (
+            "Make sure you exactly follow the script when you read it. "
+            "Read the punctuation (commas and periods) naturally as pauses "
+            "to ensure clear delivery of each segment."
+        )
+        normalized_prompt = str(prompt or "").strip()
+        if instruction in normalized_prompt:
+            return normalized_prompt
+        if not normalized_prompt:
+            return instruction
+        return f"{normalized_prompt}\n{instruction}"
 
     @staticmethod
     def _map_tts_language_code(language: str) -> str:

@@ -512,6 +512,7 @@ class TestTtsPromptBuilder:
         assert "Character: Museum Manager" in prompt
         assert "A calm gallery." in prompt
         assert "ready-to-speak" not in prompt
+        assert "Make sure you exactly follow the script when you read it." in prompt
 
     def test_legacy_director_note_fallback_uses_markdown_sections(self, executor):
         result = executor._build_tts_text(
@@ -543,6 +544,21 @@ class TestTtsPromptBuilder:
         assert "Scene: A calm gallery." in prompt
         assert "Style: Clear and grounded." in prompt
         assert "Pacing: Steady." in prompt
+        assert "Make sure you exactly follow the script when you read it." in prompt
+
+    def test_script_fidelity_instruction_is_not_duplicated(self, executor):
+        prompt, transcript = executor._build_tts_prompt_and_transcript(
+            "Hello world.",
+            {
+                "compiledPrompt": "\n".join([
+                    "You are Museum Manager, a calm narrator.",
+                    "Make sure you exactly follow the script when you read it. Read the punctuation (commas and periods) naturally as pauses to ensure clear delivery of each segment.",
+                ])
+            },
+        )
+
+        assert transcript == "Hello world."
+        assert prompt.count("Make sure you exactly follow the script when you read it.") == 1
 
     def test_usage_guideline_errors_are_treated_as_prompt_blocks(self, executor):
         assert executor._is_tts_prompt_block_error(
