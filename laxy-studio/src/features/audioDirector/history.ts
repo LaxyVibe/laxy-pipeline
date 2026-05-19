@@ -222,7 +222,7 @@ export function buildGenerationHistoryFromVersions(records: AudioHistoryVersionR
       runId: record.runId,
       generatedAt: record.generatedAt,
       coreLanguage: record.lang,
-      label: record.isActiveVersion ? 'Active version' : 'Historical version',
+      label: record.isActiveVersion ? 'Chosen version' : 'Historical version',
       audioFiles: [languageAudio],
       srtFiles: [],
       itemCount: 1,

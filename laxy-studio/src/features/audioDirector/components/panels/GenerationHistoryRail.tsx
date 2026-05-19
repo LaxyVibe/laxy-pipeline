@@ -83,15 +83,17 @@ export default function GenerationHistoryRail(props: Props) {
 
   const itemLookup = useMemo(() => new Map(items.map((item) => [item.spotId, item])), [items]);
   const rows = useMemo<HistoryRow[]>(
-    () =>
-      generationHistory.flatMap((run) =>
-        run.audioFiles.flatMap((languageAudio) =>
-          (languageAudio.spots ?? []).map((spot) => {
+    () => {
+      const dedupedRows = new Map<string, HistoryRow>();
+
+      generationHistory.forEach((run) => {
+        run.audioFiles.forEach((languageAudio) => {
+          (languageAudio.spots ?? []).forEach((spot) => {
             const reviewState = itemStates[`${languageAudio.lang}::${spot.spotId}`];
             const sourceItem = itemLookup.get(spot.spotId);
             const scriptText = (reviewState?.finalScript ?? reviewState?.originalScript ?? sourceItem?.scriptText ?? '').trim();
 
-            return {
+            const nextRow: HistoryRow = {
               id: `${run.runId}-${languageAudio.lang}-${spot.spotId}-${spot.audioUrl}`,
               downloadName: [
                 'audio-director',
@@ -110,11 +112,29 @@ export default function GenerationHistoryRail(props: Props) {
               isActiveVersion: spot.isActiveVersion,
               isLatestVersion: spot.isLatestVersion,
             };
-          }),
-        ),
-      ),
+
+            const dedupeKey = nextRow.versionId
+              ? `version:${nextRow.versionId}`
+              : `${nextRow.lang}:${nextRow.spotId}:${nextRow.audioUrl}`;
+            const existingRow = dedupedRows.get(dedupeKey);
+
+            if (!existingRow || (nextRow.generatedAt ?? 0) >= (existingRow.generatedAt ?? 0)) {
+              dedupedRows.set(dedupeKey, nextRow);
+            }
+          });
+        });
+      });
+
+      return Array.from(dedupedRows.values()).sort((left, right) => (right.generatedAt ?? 0) - (left.generatedAt ?? 0));
+    },
     [generationHistory, itemLookup, itemStates],
   );
+  const chosenRowId = useMemo(() => {
+    const chosenCandidate = [...rows]
+      .filter((row) => row.isActiveVersion)
+      .sort((left, right) => (right.generatedAt ?? 0) - (left.generatedAt ?? 0))[0];
+    return chosenCandidate?.id ?? null;
+  }, [rows]);
   const isShowingProgress = isGenerating || progressSummary.total > 0;
 
   return (
@@ -190,10 +210,10 @@ export default function GenerationHistoryRail(props: Props) {
                         <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                           {row.scriptText || 'Generated script'}
                         </Typography>
-                        {row.isActiveVersion || row.isLatestVersion || row.generatedAt ? (
+                        {chosenRowId === row.id || row.isLatestVersion || row.generatedAt ? (
                           <Stack direction="row" spacing={0.75} sx={{ mt: 0.75, flexWrap: 'wrap' }}>
-                            {row.isActiveVersion ? <Chip label="Active" size="small" color="success" /> : null}
-                            {row.isLatestVersion && !row.isActiveVersion ? <Chip label="Latest" size="small" /> : null}
+                            {chosenRowId === row.id ? <Chip label="Chosen" size="small" color="success" /> : null}
+                            {row.isLatestVersion && chosenRowId !== row.id ? <Chip label="Latest" size="small" /> : null}
                             {row.generatedAt ? (
                               <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
                                 {new Date(row.generatedAt).toLocaleString()}
