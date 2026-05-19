@@ -118,6 +118,15 @@ RECOVERABLE_ALIGNMENT_ERROR_MARKERS = (
 FAILURE_HOTSPOT_THRESHOLD = _read_positive_int_env("PIPELINE_FAILURE_HOTSPOT_THRESHOLD", 3)
 
 
+def _normalize_optional_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"none", "null", "undefined"}:
+        return ""
+    return text
+
+
 def _log_telemetry(event: str, *, level: int = logging.INFO, **fields: Any) -> None:
     payload: dict[str, Any] = {
         "event": event,
@@ -251,6 +260,25 @@ TEMPERATURES = {
     "s8_director_note": 0.6,
     "guide_script_enhance": 0.7,
     "generate_character": 0.8,
+}
+
+TRANSLATION_LANGUAGE_LABELS = {
+    "en": "English",
+    "ja": "Japanese (日本語)",
+    "ko": "Korean (한국어)",
+    "zh-TW": "Chinese Traditional (繁體中文)",
+    "zh-CN": "Chinese Simplified (简体中文)",
+    "fr": "French (Français)",
+    "de": "German (Deutsch)",
+    "es": "Spanish (Español)",
+    "it": "Italian (Italiano)",
+    "pt": "Portuguese (Português)",
+    "th": "Thai (ไทย)",
+    "vi": "Vietnamese (Tiếng Việt)",
+    "id": "Indonesian (Bahasa Indonesia)",
+    "ms": "Malay (Bahasa Melayu)",
+    "ar": "Arabic (العربية)",
+    "ru": "Russian (Русский)",
 }
 
 # Maps step_id → display label for frontend compatibility
@@ -809,7 +837,7 @@ class PipelineExecutor:
             for i, s in enumerate(scripts)
         )
 
-        lang_label = target_language  # will be enriched on the frontend
+        lang_label = TRANSLATION_LANGUAGE_LABELS.get(target_language, target_language)
         user_message = (
             f"Translate the following {len(scripts)} approved script(s) "
             f"from {core_language} into {target_language}.\n"
@@ -1152,12 +1180,16 @@ class PipelineExecutor:
     ) -> dict[str, Any]:
         generated_at_ms = int(time.time() * 1000)
         version_id = f"version-{generated_at_ms:x}-{uuid4().hex[:8]}"
-        track_doc_id = f"{history_target.get('spotId', spot_id)}_{history_target.get('lang', language)}"
-        guide_id = str(history_target.get("guideId", "")).strip()
-        target_spot_id = str(history_target.get("spotId", spot_id)).strip() or spot_id
-        target_lang = str(history_target.get("lang", language)).strip() or language
-        target_spot_title = str(history_target.get("spotTitle", "")).strip() or title or target_spot_id
-        tenant_id = str(history_target.get("tenantId", "")).strip() or None
+        track_doc_id = f"{_normalize_optional_text(history_target.get('spotId', spot_id)) or spot_id}_{_normalize_optional_text(history_target.get('lang', language)) or language}"
+        guide_id = _normalize_optional_text(history_target.get("guideId", ""))
+        target_spot_id = _normalize_optional_text(history_target.get("spotId", spot_id)) or spot_id
+        target_lang = _normalize_optional_text(history_target.get("lang", language)) or language
+        target_spot_title = (
+            _normalize_optional_text(history_target.get("spotTitle", ""))
+            or _normalize_optional_text(title)
+            or target_spot_id
+        )
+        tenant_id = _normalize_optional_text(history_target.get("tenantId", "")) or None
         db = fb_firestore.client()
 
         summary_payload: dict[str, Any] = {

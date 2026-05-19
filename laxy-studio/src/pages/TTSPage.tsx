@@ -1,11 +1,12 @@
 // ---------------------------------------------------------------------------
 // TTSPage — Guide-scoped spot tabs with one row per spot-language job
 // ---------------------------------------------------------------------------
-import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Box,
   Button,
+  Checkbox,
   Chip,
   CircularProgress,
   Container,
@@ -14,12 +15,13 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormControlLabel,
+  FormGroup,
   IconButton,
   InputLabel,
   MenuItem,
   Paper,
   Select,
-  Slide,
   Stack,
   Tab,
   Table,
@@ -29,40 +31,37 @@ import {
   TableRow,
   Tabs,
   TextField,
-  Toolbar,
   Typography,
 } from '@mui/material';
-import type { TransitionProps } from '@mui/material/transitions';
-import CloseIcon from '@mui/icons-material/Close';
+import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import HeadphonesIcon from '@mui/icons-material/Headphones';
 import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
-import LanguageOutlinedIcon from '@mui/icons-material/LanguageOutlined';
 import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
-import { collection, doc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { getCustomClaims } from '../admin/auth/authenticator';
+import { translateLanguage } from '../api';
 import { useAuthStore } from '../authStore';
 import DeployVersionFooter from '../components/DeployVersionFooter';
 import { initFirebase } from '../firebase';
 import {
   buildAudioDirectorHistoryUrl,
   buildAudioTrackDocId,
+  mapAudioHistoryVersion,
   mapAudioTrackSummary,
   type AudioHistorySelection,
   type AudioHistoryTarget,
   type AudioTrackSummaryRecord,
 } from '../features/audioDirector/history';
-import { detectLanguageCode } from '../features/audioDirector/utils';
 import { ROUTES } from '../routes';
 import { SUPPORTED_LANGUAGES, langLabel } from '../types/entity';
-
-type RowMessageTone = 'info' | 'warning';
 
 type SharedGuideTarget = {
   guideId: string;
   title: string;
   tenantId?: string;
+  languages: string[];
   status: 'existing' | 'minimal-draft';
 };
 
@@ -74,8 +73,6 @@ type TtsJob = {
   inputScript: string;
   outputScript: string;
   outputAudio: string;
-  rowMessage: string | null;
-  rowMessageTone: RowMessageTone;
   selectedHistoryVersion?: AudioHistorySelection;
 };
 
@@ -83,6 +80,7 @@ type GuidePickerOption = {
   id: string;
   title: string;
   tenantId?: string;
+  languages: string[];
   updatedAt: number;
   status?: string;
   createdFrom?: string;
@@ -95,12 +93,16 @@ type SpotOption = {
   hasGeneratedAudio: boolean;
 };
 
-const SlideUp = forwardRef(function SlideUp(
-  props: TransitionProps & { children: React.ReactElement },
-  ref: React.Ref<unknown>,
-) {
-  return <Slide direction="up" ref={ref} {...props} />;
-});
+type PersistedJobSelection = {
+  outputScript: string;
+  outputAudio: string;
+  selectedHistoryVersion: AudioHistorySelection;
+};
+
+type AudioDirectorLaunchRecord = {
+  jobId: string;
+  windowRef: Window | null;
+};
 
 const AUDIO_DIRECTOR_ORIGIN = window.location.origin;
 const SUPPORTED_TTS_JOB_LANGUAGE_CODES = ['en', 'ja', 'ko', 'zh-TW', 'zh-CN', 'fr'] as const;
@@ -120,14 +122,13 @@ function readText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeMultiSelectValue(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.map((item) => String(item)).filter(Boolean);
-  }
-  if (typeof value === 'string') {
-    return value.split(',').map((item) => item.trim()).filter(Boolean);
-  }
-  return [];
+function readLanguageCodes(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return sortLanguageCodes(
+    value
+      .map((item) => String(item))
+      .filter((item) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(item)),
+  );
 }
 
 function sortLanguageCodes(codes: string[]): string[] {
@@ -152,8 +153,6 @@ function createTtsJob(spotId: string, spotTitle: string, language: string): TtsJ
     inputScript: '',
     outputScript: '',
     outputAudio: '',
-    rowMessage: null,
-    rowMessageTone: 'info',
   };
 }
 
@@ -171,11 +170,6 @@ function withOptionalTenantId<T extends Record<string, unknown>>(payload: T, ten
     ...payload,
     tenantId,
   };
-}
-
-function buildGuideStatusLabel(guide: SharedGuideTarget | null): string {
-  if (!guide) return 'No guide selected';
-  return guide.status === 'minimal-draft' ? 'Minimal guide draft' : 'Existing guide';
 }
 
 function buildHistoryTarget(guide: SharedGuideTarget | null, job: TtsJob): AudioHistoryTarget | null {
@@ -251,15 +245,10 @@ export default function TTSPage() {
   const user = useAuthStore((state) => state.user);
   const authLoading = useAuthStore((state) => state.loading);
   const [jobs, setJobs] = useState<TtsJob[]>([]);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [selectedSpotId, setSelectedSpotId] = useState('');
-  const [open, setOpen] = useState(false);
-  const [iframeKey, setIframeKey] = useState(0);
-  const [iframeSrc, setIframeSrc] = useState<string>(ROUTES.audioDirector);
-  const [iframeLoading, setIframeLoading] = useState(true);
   const [tenantId, setTenantId] = useState<string>('');
   const [sharedGuideTarget, setSharedGuideTarget] = useState<SharedGuideTarget | null>(null);
-  const [guidePickerOpen, setGuidePickerOpen] = useState(false);
+  const [guidePickerOpen, setGuidePickerOpen] = useState(true);
   const [guidePickerLoading, setGuidePickerLoading] = useState(false);
   const [guidePickerError, setGuidePickerError] = useState<string | null>(null);
   const [guidePickerGuides, setGuidePickerGuides] = useState<GuidePickerOption[]>([]);
@@ -267,18 +256,21 @@ export default function TTSPage() {
   const [trackSummaries, setTrackSummaries] = useState<AudioTrackSummaryRecord[]>([]);
   const [trackSummariesLoading, setTrackSummariesLoading] = useState(false);
   const [trackSummariesError, setTrackSummariesError] = useState<string | null>(null);
+  const [persistedJobSelections, setPersistedJobSelections] = useState<Record<string, PersistedJobSelection>>({});
   const [quickCreateExpanded, setQuickCreateExpanded] = useState(false);
   const [quickCreateGuideTitle, setQuickCreateGuideTitle] = useState(buildDefaultQuickCreateGuideTitle());
-  const [quickCreateSpotTitle, setQuickCreateSpotTitle] = useState('');
   const [quickCreateLanguages, setQuickCreateLanguages] = useState<string[]>(['en']);
   const [quickCreateCreating, setQuickCreateCreating] = useState(false);
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
   const [spotManagerTitle, setSpotManagerTitle] = useState('');
-  const [spotManagerLanguages, setSpotManagerLanguages] = useState<string[]>(['en']);
+  const [spotComposerOpen, setSpotComposerOpen] = useState(false);
   const [spotManagerCreating, setSpotManagerCreating] = useState(false);
   const [spotManagerDeletingId, setSpotManagerDeletingId] = useState<string | null>(null);
   const [spotManagerError, setSpotManagerError] = useState<string | null>(null);
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [translationPendingByJob, setTranslationPendingByJob] = useState<Record<string, boolean>>({});
+  const [translationErrorByJob, setTranslationErrorByJob] = useState<Record<string, string>>({});
+  const [openAudioDirectorRevision, setOpenAudioDirectorRevision] = useState(0);
+  const audioDirectorLaunchesRef = useRef<Record<string, AudioDirectorLaunchRecord>>({});
 
   const spotOptions = useMemo<SpotOption[]>(() => {
     const grouped = trackSummaries.reduce<Map<string, SpotOption>>((acc, summary) => {
@@ -304,6 +296,12 @@ export default function TTSPage() {
 
   const selectedGuideOption = guidePickerGuides.find((guide) => guide.id === guidePickerSelectionId) ?? null;
   const selectedSpot = spotOptions.find((spot) => spot.spotId === selectedSpotId) ?? null;
+  const effectiveGuideLanguages = useMemo(() => {
+    const explicit = sharedGuideTarget?.languages ?? [];
+    if (explicit.length > 0) return sortLanguageCodes(explicit);
+    const derived = Array.from(new Set(trackSummaries.map((summary) => summary.lang).filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language))));
+    return sortLanguageCodes(derived);
+  }, [sharedGuideTarget?.languages, trackSummaries]);
   const visibleJobs = useMemo(
     () => jobs.filter((job) => job.spotId === selectedSpotId).sort((left, right) => {
       const leftRank = LANGUAGE_ORDER.get(left.language) ?? Number.MAX_SAFE_INTEGER;
@@ -313,9 +311,56 @@ export default function TTSPage() {
     }),
     [jobs, selectedSpotId],
   );
+  const englishJobBySpotId = useMemo(() => new Map(
+    jobs
+      .filter((job) => job.language === 'en')
+      .map((job) => [job.spotId, job] as const),
+  ), [jobs]);
 
   const updateJob = (jobId: string, updater: (job: TtsJob) => TtsJob) => {
     setJobs((currentJobs) => currentJobs.map((job) => (job.id === jobId ? updater(job) : job)));
+  };
+
+  const bumpOpenAudioDirectorRevision = () => {
+    setOpenAudioDirectorRevision((current) => current + 1);
+  };
+
+  const findOpenAudioDirectorLaunch = (jobId: string): [string, AudioDirectorLaunchRecord] | null => {
+    const entry = Object.entries(audioDirectorLaunchesRef.current).find(([, record]) => (
+      record.jobId === jobId && record.windowRef && !record.windowRef.closed
+    ));
+    return entry ? [entry[0], entry[1]] : null;
+  };
+
+  const cleanupAudioDirectorLaunch = (launchId: string) => {
+    if (!audioDirectorLaunchesRef.current[launchId]) return;
+    delete audioDirectorLaunchesRef.current[launchId];
+    bumpOpenAudioDirectorRevision();
+  };
+
+  const cleanupClosedAudioDirectorLaunches = () => {
+    let removed = false;
+    Object.entries(audioDirectorLaunchesRef.current).forEach(([launchId, record]) => {
+      if (record.windowRef && !record.windowRef.closed) return;
+      delete audioDirectorLaunchesRef.current[launchId];
+      removed = true;
+    });
+    if (removed) {
+      bumpOpenAudioDirectorRevision();
+    }
+  };
+
+  const sendScriptToAudioDirector = (targetWindow: Window | null, job: TtsJob, launchId: string) => {
+    if (!targetWindow || targetWindow.closed) return;
+    targetWindow.postMessage(
+      {
+        type: 'laxy:script',
+        launchId,
+        text: job.inputScript,
+        language: job.language,
+      },
+      AUDIO_DIRECTOR_ORIGIN,
+    );
   };
 
   useEffect(() => {
@@ -338,11 +383,22 @@ export default function TTSPage() {
   useEffect(() => {
     setJobs([]);
     setSelectedSpotId('');
+    setTranslationPendingByJob({});
+    setTranslationErrorByJob({});
   }, [sharedGuideTarget?.guideId]);
 
   useEffect(() => {
     if (!sharedGuideTarget) {
+      setGuidePickerOpen(true);
+      return;
+    }
+    setGuidePickerOpen(false);
+  }, [sharedGuideTarget]);
+
+  useEffect(() => {
+    if (!sharedGuideTarget) {
       setTrackSummaries([]);
+      setPersistedJobSelections({});
       setTrackSummariesError(null);
       return;
     }
@@ -385,6 +441,81 @@ export default function TTSPage() {
   }, [sharedGuideTarget]);
 
   useEffect(() => {
+    if (!sharedGuideTarget || trackSummaries.length === 0) {
+      setPersistedJobSelections({});
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPersistedSelections = async () => {
+      try {
+        const { db } = initFirebase();
+        const entries = await Promise.all(
+          trackSummaries.map(async (summary) => {
+            const versionId = summary.activeVersionId || summary.latestVersionId;
+            if (!versionId) return null;
+
+            const versionDoc = await getDoc(
+              doc(db, 'guides', sharedGuideTarget.guideId, 'audioTracks', summary.id, 'versions', versionId),
+            );
+            if (!versionDoc.exists()) return null;
+
+            const versionRecord = mapAudioHistoryVersion({
+              guideId: sharedGuideTarget.guideId,
+              target: {
+                guideId: sharedGuideTarget.guideId,
+                spotId: summary.spotId,
+                spotTitle: summary.spotTitle,
+                lang: summary.lang,
+                tenantId: sharedGuideTarget.tenantId,
+              },
+              summary,
+              docId: versionDoc.id,
+              data: versionDoc.data() as Record<string, unknown>,
+            });
+            if (!versionRecord) return null;
+
+            return [
+              createJobId(summary.spotId, summary.lang),
+              {
+                outputScript: versionRecord.scriptText,
+                outputAudio: versionRecord.audioUrl,
+                selectedHistoryVersion: {
+                  versionId: versionRecord.versionId,
+                  storagePath: versionRecord.storagePath,
+                  guideId: versionRecord.guideId,
+                  spotId: versionRecord.spotId,
+                  lang: versionRecord.lang,
+                },
+              } satisfies PersistedJobSelection,
+            ] as const;
+          }),
+        );
+
+        if (cancelled) return;
+
+        const nextSelections: Record<string, PersistedJobSelection> = {};
+        entries.forEach((entry) => {
+          if (!entry) return;
+          nextSelections[entry[0]] = entry[1];
+        });
+        setPersistedJobSelections(nextSelections);
+      } catch {
+        if (!cancelled) {
+          setPersistedJobSelections({});
+        }
+      }
+    };
+
+    void loadPersistedSelections();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sharedGuideTarget, trackSummaries]);
+
+  useEffect(() => {
     setJobs((currentJobs) => {
       const currentMap = new Map(currentJobs.map((job) => [job.id, job]));
       const nextJobs: TtsJob[] = [];
@@ -394,21 +525,30 @@ export default function TTSPage() {
         for (const language of sortedLanguages) {
           const jobId = createJobId(spot.spotId, language);
           const existingJob = currentMap.get(jobId);
+          const persistedSelection = persistedJobSelections[jobId];
           if (existingJob) {
             nextJobs.push({
               ...existingJob,
               spotTitle: spot.spotTitle,
               language,
+              outputScript: existingJob.outputScript || persistedSelection?.outputScript || '',
+              outputAudio: existingJob.outputAudio || persistedSelection?.outputAudio || '',
+              selectedHistoryVersion: existingJob.selectedHistoryVersion ?? persistedSelection?.selectedHistoryVersion,
             });
             continue;
           }
-          nextJobs.push(createTtsJob(spot.spotId, spot.spotTitle, language));
+          nextJobs.push({
+            ...createTtsJob(spot.spotId, spot.spotTitle, language),
+            outputScript: persistedSelection?.outputScript || '',
+            outputAudio: persistedSelection?.outputAudio || '',
+            selectedHistoryVersion: persistedSelection?.selectedHistoryVersion,
+          });
         }
       }
 
       return nextJobs;
     });
-  }, [spotOptions]);
+  }, [persistedJobSelections, spotOptions]);
 
   useEffect(() => {
     if (!spotOptions.length) {
@@ -420,28 +560,33 @@ export default function TTSPage() {
   }, [selectedSpotId, spotOptions]);
 
   useEffect(() => {
+    if (!guidePickerOpen || sharedGuideTarget || authLoading) return;
+    void loadGuides();
+  }, [authLoading, guidePickerOpen, sharedGuideTarget, tenantId, user]);
+
+  useEffect(() => {
+    cleanupClosedAudioDirectorLaunches();
+
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== AUDIO_DIRECTOR_ORIGIN) return;
+      const launchId = typeof event.data?.launchId === 'string' ? event.data.launchId : '';
+      if (!launchId) return;
+      const launchRecord = audioDirectorLaunchesRef.current[launchId];
+      if (!launchRecord) return;
 
       if (event.data?.type === 'laxy:ready') {
-        setIframeLoading(false);
-
-        const activeJob = jobs.find((job) => job.id === activeJobId);
+        const targetWindow = (event.source as Window | null) ?? launchRecord.windowRef;
+        if (targetWindow) {
+          launchRecord.windowRef = targetWindow;
+        }
+        const activeJob = jobs.find((job) => job.id === launchRecord.jobId);
         if (!activeJob) return;
-
-        iframeRef.current?.contentWindow?.postMessage(
-          {
-            type: 'laxy:script',
-            text: activeJob.inputScript,
-            language: activeJob.language,
-          },
-          AUDIO_DIRECTOR_ORIGIN,
-        );
+        sendScriptToAudioDirector(targetWindow ?? launchRecord.windowRef, activeJob, launchId);
         return;
       }
 
-      if (event.data?.type === 'laxy:result-selected' && activeJobId) {
-        updateJob(activeJobId, (job) => ({
+      if (event.data?.type === 'laxy:result-selected') {
+        updateJob(launchRecord.jobId, (job) => ({
           ...job,
           outputScript: typeof event.data.outputScript === 'string' ? event.data.outputScript : job.outputScript,
           outputAudio: typeof event.data.outputAudio === 'string' ? event.data.outputAudio : job.outputAudio,
@@ -453,25 +598,20 @@ export default function TTSPage() {
             lang: typeof event.data.lang === 'string' ? event.data.lang : job.selectedHistoryVersion?.lang,
           },
         }));
-        closeAudioDirector();
+        cleanupAudioDirectorLaunch(launchId);
       }
     };
 
+    const intervalId = window.setInterval(() => {
+      cleanupClosedAudioDirectorLaunches();
+    }, 1000);
+
     window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [activeJobId, jobs]);
-
-  const closeAudioDirector = () => {
-    setOpen(false);
-    setActiveJobId(null);
-    setIframeLoading(true);
-  };
-
-  const closeGuidePicker = () => {
-    setGuidePickerOpen(false);
-    setGuidePickerError(null);
-    setGuidePickerSelectionId(sharedGuideTarget?.guideId ?? '');
-  };
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('message', handleMessage);
+    };
+  }, [jobs]);
 
   const loadGuides = async () => {
     if (!user) {
@@ -492,6 +632,7 @@ export default function TTSPage() {
             id: guideDoc.id,
             title: readText(data.title) || readText(data.venueName) || readText(data.name) || guideDoc.id,
             tenantId: readText(data.tenantId) || undefined,
+            languages: readLanguageCodes(data.ttsLanguages),
             updatedAt: readTimestampMs(data.updatedAt) || readTimestampMs(data.createdAt),
             status: readText(data.status) || undefined,
             createdFrom: readText(data.createdFrom) || undefined,
@@ -501,7 +642,9 @@ export default function TTSPage() {
         .sort((left, right) => right.updatedAt - left.updatedAt);
       setGuidePickerGuides(guides);
       if (!guides.length) {
-        setGuidePickerError('No guides are available for this tenant yet.');
+        setGuidePickerSelectionId('');
+        setQuickCreateExpanded(true);
+        setGuidePickerError(null);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -512,20 +655,16 @@ export default function TTSPage() {
   };
 
   const applySharedGuideSelection = (guide: GuidePickerOption) => {
+    setQuickCreateError(null);
     setSharedGuideTarget({
       guideId: guide.id,
       title: guide.title,
       tenantId: guide.tenantId,
+      languages: guide.languages,
       status: guide.createdFrom === 'tts' && guide.status === 'draft' ? 'minimal-draft' : 'existing',
     });
     setGuidePickerSelectionId(guide.id);
     setGuidePickerOpen(false);
-  };
-
-  const handleOpenGuidePicker = () => {
-    setGuidePickerSelectionId(sharedGuideTarget?.guideId ?? '');
-    setGuidePickerOpen(true);
-    void loadGuides();
   };
 
   const handleConfirmGuidePicker = () => {
@@ -533,36 +672,13 @@ export default function TTSPage() {
     applySharedGuideSelection(selectedGuideOption);
   };
 
-  const handleAutoDetectLanguage = (jobId: string) => {
-    const job = jobs.find((entry) => entry.id === jobId);
-    if (!job) return;
-
-    const detected = detectLanguageCode(job.inputScript.trim());
-    if (!detected) {
-      updateJob(jobId, (currentJob) => ({
-        ...currentJob,
-        rowMessage: 'Could not confidently detect the script language.',
-        rowMessageTone: 'warning',
-      }));
-      return;
-    }
-
-    if (!SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(detected.code)) {
-      updateJob(jobId, (currentJob) => ({
-        ...currentJob,
-        rowMessage: `Detected ${langLabel(detected.code)}, which is outside the supported TTS job languages.`,
-        rowMessageTone: 'warning',
-      }));
-      return;
-    }
-
-    updateJob(jobId, (currentJob) => ({
-      ...currentJob,
-      rowMessage: detected.code === currentJob.language
-        ? `Detected ${langLabel(detected.code)} and it matches this row.`
-        : `Detected ${langLabel(detected.code)}, but this row is fixed to ${langLabel(currentJob.language)}.`,
-      rowMessageTone: detected.code === currentJob.language ? 'info' : 'warning',
-    }));
+  const handleToggleQuickCreateLanguage = (language: string) => {
+    setQuickCreateLanguages((current) => {
+      const next = current.includes(language)
+        ? current.filter((item) => item !== language)
+        : [...current, language];
+      return sortLanguageCodes(next.filter((item) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(item)));
+    });
   };
 
   const jobHasSavedHistory = (job: TtsJob): boolean => (
@@ -571,10 +687,9 @@ export default function TTSPage() {
 
   const handleCreateMinimalGuide = async () => {
     const guideTitle = quickCreateGuideTitle.trim();
-    const seededSpotTitle = quickCreateSpotTitle.trim();
     const seededLanguages = sortLanguageCodes(quickCreateLanguages.filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language)));
     if (!guideTitle) return;
-    if (seededSpotTitle && seededLanguages.length === 0) return;
+    if (seededLanguages.length === 0) return;
 
     setQuickCreateCreating(true);
     setQuickCreateError(null);
@@ -589,43 +704,12 @@ export default function TTSPage() {
         ...withOptionalTenantId({
           title: guideTitle,
           status: 'draft',
+          ttsLanguages: seededLanguages,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
           createdFrom: 'tts',
         }, tenantId),
       });
-
-      let seededTrackSummaries: AudioTrackSummaryRecord[] = [];
-      if (seededSpotTitle && seededLanguages.length > 0) {
-        const spotId = createQuickCreateSpotId();
-        seededTrackSummaries = seededLanguages.map((language) => ({
-          id: buildAudioTrackDocId(spotId, language),
-          guideId,
-          spotId,
-          lang: language,
-          spotTitle: seededSpotTitle,
-          latestGeneratedAt: 0,
-          hasGeneratedAudio: false,
-        }));
-
-        seededTrackSummaries.forEach((summary) => {
-          const audioTrackRef = doc(db, 'guides', guideId, 'audioTracks', summary.id);
-          batch.set(audioTrackRef, {
-            ...withOptionalTenantId({
-              guideId,
-              spotId: summary.spotId,
-              spotTitle: summary.spotTitle,
-              lang: summary.lang,
-              activeVersionId: '',
-              latestVersionId: '',
-              latestGeneratedAt: 0,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-              hasGeneratedAudio: false,
-            }, tenantId),
-          });
-        });
-      }
 
       await batch.commit();
 
@@ -633,6 +717,7 @@ export default function TTSPage() {
         id: guideId,
         title: guideTitle,
         tenantId: tenantId || undefined,
+        languages: seededLanguages,
         updatedAt: Date.now(),
         status: 'draft',
         createdFrom: 'tts',
@@ -642,17 +727,18 @@ export default function TTSPage() {
         guideId,
         title: guideTitle,
         tenantId: tenantId || undefined,
+        languages: seededLanguages,
         status: 'minimal-draft',
       });
-      setTrackSummaries(seededTrackSummaries);
+      setTrackSummaries([]);
       setTrackSummariesError(null);
-      setSelectedSpotId(seededTrackSummaries[0]?.spotId ?? '');
+      setSelectedSpotId('');
       setQuickCreateExpanded(false);
       setQuickCreateGuideTitle(buildDefaultQuickCreateGuideTitle());
-      setQuickCreateSpotTitle('');
       setQuickCreateLanguages(['en']);
       setQuickCreateError(null);
       setGuidePickerSelectionId(guideId);
+      setSpotComposerOpen(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setQuickCreateError(`Unable to create a minimal guide: ${message}`);
@@ -665,7 +751,7 @@ export default function TTSPage() {
     if (!sharedGuideTarget) return;
 
     const spotTitle = spotManagerTitle.trim();
-    const languages = sortLanguageCodes(spotManagerLanguages.filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language)));
+    const languages = effectiveGuideLanguages;
     if (!spotTitle || languages.length === 0) return;
 
     setSpotManagerCreating(true);
@@ -708,7 +794,7 @@ export default function TTSPage() {
       setTrackSummaries((previous) => [...summaries, ...previous.filter((summary) => summary.spotId !== spotId)]);
       setSelectedSpotId(spotId);
       setSpotManagerTitle('');
-      setSpotManagerLanguages(['en']);
+      setSpotComposerOpen(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setSpotManagerError(`Unable to create the spot: ${message}`);
@@ -762,22 +848,115 @@ export default function TTSPage() {
     const target = buildHistoryTarget(sharedGuideTarget, job);
     if (!target) return;
 
-    setActiveJobId(jobId);
-    setIframeLoading(true);
-    setIframeSrc(buildAudioDirectorHistoryUrl({
-      basePath: ROUTES.audioDirector,
-      target,
-      cacheBust: Date.now(),
-    }));
-    setIframeKey((currentKey) => currentKey + 1);
-    setOpen(true);
-  };
-
-  const handleRequestClose = () => {
-    if (!window.confirm('Close Audio Director? Any unchosen result in this session will be lost.')) {
+    const existingLaunch = findOpenAudioDirectorLaunch(jobId);
+    if (existingLaunch) {
+      const [launchId, launchRecord] = existingLaunch;
+      launchRecord.windowRef?.focus();
+      sendScriptToAudioDirector(launchRecord.windowRef, job, launchId);
       return;
     }
-    closeAudioDirector();
+
+    const launchId = crypto.randomUUID();
+    const popupWindow = window.open(
+      'about:blank',
+      `audio-director-${launchId}`,
+      'popup=yes,width=1440,height=960,left=80,top=80,resizable=yes,scrollbars=yes',
+    );
+    if (!popupWindow) {
+      window.alert('Audio Director could not be opened. Please allow pop-up windows for this site and try again.');
+      return;
+    }
+
+    audioDirectorLaunchesRef.current[launchId] = {
+      jobId,
+      windowRef: popupWindow,
+    };
+    bumpOpenAudioDirectorRevision();
+
+    popupWindow.location.href = buildAudioDirectorHistoryUrl({
+      basePath: ROUTES.audioDirector,
+      target: {
+        ...target,
+        launchId,
+      },
+      cacheBust: Date.now(),
+    });
+    popupWindow.focus();
+  };
+
+  const handleTranslateFromEnglish = async (jobId: string) => {
+    const targetJob = jobs.find((job) => job.id === jobId);
+    if (!targetJob || targetJob.language === 'en') return;
+
+    const englishJob = englishJobBySpotId.get(targetJob.spotId);
+    const englishScript = englishJob?.inputScript.trim() ?? '';
+    if (!englishJob || !englishScript) {
+      setTranslationErrorByJob((previous) => ({
+        ...previous,
+        [jobId]: 'Enter the English script in the English row first.',
+      }));
+      return;
+    }
+
+    if (
+      targetJob.inputScript.trim()
+      && targetJob.inputScript.trim() !== englishScript
+      && !window.confirm(`Replace the current ${langLabel(targetJob.language)} input script with an AI translation from English?`)
+    ) {
+      return;
+    }
+
+    setTranslationPendingByJob((previous) => ({
+      ...previous,
+      [jobId]: true,
+    }));
+    setTranslationErrorByJob((previous) => ({
+      ...previous,
+      [jobId]: '',
+    }));
+
+    try {
+      const result = await translateLanguage({
+        scripts: [{
+          spotId: targetJob.spotId,
+          spotNumber: 1,
+          title: targetJob.spotTitle,
+          scriptText: englishScript,
+        }],
+        targetLanguage: targetJob.language,
+        coreLanguage: 'en',
+      });
+
+      const translatedText = result.spots[0]?.translatedText?.trim() ?? '';
+      if (!translatedText) {
+        throw new Error('No translated text was returned.');
+      }
+
+      updateJob(jobId, (job) => ({
+        ...job,
+        inputScript: translatedText,
+      }));
+      setTranslationErrorByJob((previous) => ({
+        ...previous,
+        [jobId]: '',
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setTranslationErrorByJob((previous) => ({
+        ...previous,
+        [jobId]: message,
+      }));
+    } finally {
+      setTranslationPendingByJob((previous) => ({
+        ...previous,
+        [jobId]: false,
+      }));
+    }
+  };
+
+  const jobHasOpenWindow = (jobId: string): boolean => {
+    void openAudioDirectorRevision;
+    return findOpenAudioDirectorLaunch(jobId) !== null;
   };
 
   return (
@@ -788,267 +967,9 @@ export default function TTSPage() {
             Text to Speech
           </Typography>
           <Typography variant="body1" color="text.secondary">
-            Manage one guide at a time, define spots with multiple languages, and let each spot-language pair become its own TTS job row.
+            Manage one guide at a time, define guide-wide languages once, and let each spot-language pair become its own TTS job row.
           </Typography>
         </Box>
-
-        <Paper
-          elevation={0}
-          sx={{
-            border: '1px solid',
-            borderColor: 'divider',
-            borderRadius: 4,
-            p: { xs: 2, md: 3 },
-          }}
-        >
-          <Stack spacing={2.5}>
-            <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
-              <Stack spacing={0.75}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  Guide Target
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Choose a guide once, then manage spots and language sets underneath it.
-                </Typography>
-              </Stack>
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
-                <Button variant="outlined" startIcon={<HistoryOutlinedIcon />} disabled={authLoading} onClick={handleOpenGuidePicker}>
-                  Browse Guides
-                </Button>
-                <Button
-                  variant={quickCreateExpanded ? 'contained' : 'outlined'}
-                  onClick={() => {
-                    setQuickCreateExpanded((previous) => !previous);
-                    setQuickCreateError(null);
-                  }}
-                >
-                  {quickCreateExpanded ? 'Hide Create Form' : 'Create Minimal Guide'}
-                </Button>
-              </Stack>
-            </Stack>
-
-            {sharedGuideTarget ? (
-              <Alert severity="success">
-                <strong>{sharedGuideTarget.title}</strong>
-                {' — '}
-                {buildGuideStatusLabel(sharedGuideTarget)}
-              </Alert>
-            ) : (
-              <Alert severity="info">
-                No guide selected yet. Choose an existing guide or create a minimal guide to start defining spot-language jobs.
-              </Alert>
-            )}
-
-            {!tenantId && !authLoading ? (
-              <Alert severity="warning">
-                No tenant claim was found on the current user. New guide targets will be created without tenant scoping metadata.
-              </Alert>
-            ) : null}
-
-            {trackSummariesError ? <Alert severity="warning">{trackSummariesError}</Alert> : null}
-            {spotManagerError ? <Alert severity="warning">{spotManagerError}</Alert> : null}
-
-            {quickCreateExpanded ? (
-              <Paper
-                elevation={0}
-                sx={{
-                  border: '1px dashed',
-                  borderColor: 'divider',
-                  borderRadius: 3,
-                  p: 2,
-                  bgcolor: 'background.default',
-                }}
-              >
-                <Stack spacing={2}>
-                  {quickCreateError ? <Alert severity="error">{quickCreateError}</Alert> : null}
-                  <Typography variant="body2" color="text.secondary">
-                    Create a lightweight draft guide directly from `/tts`. You can optionally seed the guide with its first spot and multiple language rows.
-                  </Typography>
-                  <TextField
-                    label="Guide Title"
-                    value={quickCreateGuideTitle}
-                    onChange={(event) => setQuickCreateGuideTitle(event.target.value)}
-                    disabled={quickCreateCreating}
-                  />
-                  <TextField
-                    label="First Spot Title (Optional)"
-                    value={quickCreateSpotTitle}
-                    onChange={(event) => setQuickCreateSpotTitle(event.target.value)}
-                    placeholder="Leave blank to create only the guide"
-                    disabled={quickCreateCreating}
-                  />
-                  <FormControl fullWidth disabled={quickCreateCreating}>
-                    <InputLabel id="quick-create-languages-label">Spot Languages</InputLabel>
-                    <Select
-                      labelId="quick-create-languages-label"
-                      multiple
-                      value={quickCreateLanguages}
-                      label="Spot Languages"
-                      onChange={(event) => setQuickCreateLanguages(sortLanguageCodes(normalizeMultiSelectValue(event.target.value)))}
-                      renderValue={(selected) => sortLanguageCodes(normalizeMultiSelectValue(selected)).map((language) => langLabel(language)).join(', ')}
-                    >
-                      {SUPPORTED_TTS_JOB_LANGUAGES.map((language) => (
-                        <MenuItem key={language.code} value={language.code}>
-                          {language.label}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
-                    <Button
-                      variant="contained"
-                      disabled={quickCreateCreating || !quickCreateGuideTitle.trim() || (Boolean(quickCreateSpotTitle.trim()) && quickCreateLanguages.length === 0)}
-                      onClick={() => {
-                        void handleCreateMinimalGuide();
-                      }}
-                    >
-                      {quickCreateCreating ? 'Creating…' : 'Create Minimal Guide'}
-                    </Button>
-                    <Button
-                      variant="text"
-                      color="inherit"
-                      disabled={quickCreateCreating}
-                      onClick={() => {
-                        setQuickCreateExpanded(false);
-                        setQuickCreateError(null);
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                  </Stack>
-                </Stack>
-              </Paper>
-            ) : null}
-
-            {sharedGuideTarget ? (
-              <Paper
-                elevation={0}
-                sx={{
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  borderRadius: 3,
-                  p: 2,
-                  bgcolor: 'background.default',
-                }}
-              >
-                <Stack spacing={2}>
-                  <Stack spacing={0.5}>
-                    <Typography variant="subtitle2" fontWeight={700}>
-                      Spot Management
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Each spot owns a multi-language set. Every selected language becomes its own TTS job row automatically.
-                    </Typography>
-                  </Stack>
-
-                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.25}>
-                    <TextField
-                      label="Spot Title"
-                      value={spotManagerTitle}
-                      onChange={(event) => setSpotManagerTitle(event.target.value)}
-                      disabled={spotManagerCreating || spotManagerDeletingId !== null}
-                      fullWidth
-                    />
-                    <FormControl sx={{ minWidth: { xs: '100%', md: 300 } }}>
-                      <InputLabel id="spot-manager-languages-label">Spot Languages</InputLabel>
-                      <Select
-                        labelId="spot-manager-languages-label"
-                        multiple
-                        value={spotManagerLanguages}
-                        label="Spot Languages"
-                        onChange={(event) => setSpotManagerLanguages(sortLanguageCodes(normalizeMultiSelectValue(event.target.value)))}
-                        disabled={spotManagerCreating || spotManagerDeletingId !== null}
-                        renderValue={(selected) => sortLanguageCodes(normalizeMultiSelectValue(selected)).map((language) => langLabel(language)).join(', ')}
-                      >
-                        {SUPPORTED_TTS_JOB_LANGUAGES.map((language) => (
-                          <MenuItem key={language.code} value={language.code}>
-                            {language.label}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    <Button
-                      variant="contained"
-                      disabled={spotManagerCreating || spotManagerDeletingId !== null || !spotManagerTitle.trim() || spotManagerLanguages.length === 0}
-                      onClick={() => {
-                        void handleCreateSpot();
-                      }}
-                    >
-                      {spotManagerCreating ? 'Creating…' : 'Add Spot'}
-                    </Button>
-                  </Stack>
-
-                  {trackSummariesLoading ? (
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <CircularProgress size={18} />
-                      <Typography variant="body2" color="text.secondary">
-                        Loading guide spots…
-                      </Typography>
-                    </Stack>
-                  ) : null}
-
-                  {spotOptions.length === 0 ? (
-                    <Alert severity="info">No spots exist in this guide yet.</Alert>
-                  ) : (
-                    <Stack spacing={1}>
-                      {spotOptions.map((spot) => (
-                        <Paper
-                          key={spot.spotId}
-                          elevation={0}
-                          sx={{
-                            border: selectedSpotId === spot.spotId ? '1px solid rgba(31, 92, 79, 0.5)' : '1px solid',
-                            borderColor: selectedSpotId === spot.spotId ? 'primary.main' : 'divider',
-                            borderRadius: 2.5,
-                            p: 1.5,
-                          }}
-                        >
-                          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
-                            <Stack spacing={0.75}>
-                              <Typography variant="body2" fontWeight={700}>
-                                {spot.spotTitle}
-                              </Typography>
-                              <Stack direction="row" spacing={0.75} sx={{ flexWrap: 'wrap' }}>
-                                {sortLanguageCodes(spot.languages).map((language) => (
-                                  <Chip key={`${spot.spotId}-${language}`} size="small" label={langLabel(language)} />
-                                ))}
-                                <Chip
-                                  size="small"
-                                  color={spot.hasGeneratedAudio ? 'success' : 'default'}
-                                  label={spot.hasGeneratedAudio ? 'Has history' : 'New target'}
-                                />
-                              </Stack>
-                            </Stack>
-                            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-                              <Button
-                                variant={selectedSpotId === spot.spotId ? 'contained' : 'outlined'}
-                                size="small"
-                                onClick={() => setSelectedSpotId(spot.spotId)}
-                              >
-                                Open Jobs
-                              </Button>
-                              <Button
-                                variant="text"
-                                color="inherit"
-                                size="small"
-                                startIcon={<DeleteOutlineIcon />}
-                                disabled={spotManagerCreating || spotManagerDeletingId === spot.spotId}
-                                onClick={() => {
-                                  void handleDeleteSpot(spot);
-                                }}
-                              >
-                                {spotManagerDeletingId === spot.spotId ? 'Removing…' : 'Remove Spot'}
-                              </Button>
-                            </Stack>
-                          </Stack>
-                        </Paper>
-                      ))}
-                    </Stack>
-                  )}
-                </Stack>
-              </Paper>
-            ) : null}
-          </Stack>
-        </Paper>
 
         <Paper
           elevation={0}
@@ -1069,26 +990,129 @@ export default function TTSPage() {
               </Typography>
             </Box>
 
-            {!sharedGuideTarget ? (
-              <Alert severity="info">Choose or create a guide target first.</Alert>
-            ) : spotOptions.length === 0 ? (
-              <Alert severity="info">Create a spot with one or more languages to start generating TTS jobs.</Alert>
-            ) : (
+            {sharedGuideTarget ? (
               <Stack spacing={2}>
-                <Tabs
-                  value={selectedSpotId}
-                  onChange={(_, nextValue: string) => setSelectedSpotId(nextValue)}
-                  variant="scrollable"
-                  scrollButtons="auto"
-                >
-                  {spotOptions.map((spot) => (
-                    <Tab
-                      key={spot.spotId}
-                      value={spot.spotId}
-                      label={`${spot.spotTitle} (${spot.languages.length})`}
-                    />
-                  ))}
-                </Tabs>
+                {trackSummariesLoading ? (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={18} />
+                    <Typography variant="body2" color="text.secondary">
+                      Loading guide spots…
+                    </Typography>
+                  </Stack>
+                ) : null}
+
+                {spotOptions.length > 0 ? (
+                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', md: 'center' }}>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Tabs
+                        value={selectedSpotId}
+                        onChange={(_, nextValue: string) => setSelectedSpotId(nextValue)}
+                        variant="scrollable"
+                        scrollButtons="auto"
+                      >
+                        {spotOptions.map((spot) => (
+                          <Tab
+                            key={spot.spotId}
+                            value={spot.spotId}
+                            label={`${spot.spotTitle} (${spot.languages.length})`}
+                          />
+                        ))}
+                      </Tabs>
+                    </Box>
+                    <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                      <IconButton
+                        color="primary"
+                        aria-label="add spot"
+                        disabled={spotManagerCreating || spotManagerDeletingId !== null || effectiveGuideLanguages.length === 0}
+                        onClick={() => {
+                          setSpotComposerOpen((previous) => !previous);
+                          setSpotManagerError(null);
+                        }}
+                      >
+                        <AddCircleOutlineIcon />
+                      </IconButton>
+                      <IconButton
+                        color="inherit"
+                        aria-label="remove selected spot"
+                        disabled={!selectedSpot || spotManagerCreating || spotManagerDeletingId === selectedSpot?.spotId}
+                        onClick={() => {
+                          if (!selectedSpot) return;
+                          void handleDeleteSpot(selectedSpot);
+                        }}
+                      >
+                        <DeleteOutlineIcon />
+                      </IconButton>
+                    </Stack>
+                  </Stack>
+                ) : (
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
+                    <Alert severity="info" sx={{ flex: 1 }}>
+                      Create a spot to start generating TTS jobs for the guide languages.
+                    </Alert>
+                    <Button
+                      variant="outlined"
+                      startIcon={<AddCircleOutlineIcon />}
+                      disabled={spotManagerCreating || effectiveGuideLanguages.length === 0}
+                      onClick={() => {
+                        setSpotComposerOpen(true);
+                        setSpotManagerError(null);
+                      }}
+                    >
+                      Create Spot
+                    </Button>
+                  </Stack>
+                )}
+
+                {spotComposerOpen ? (
+                  <Paper
+                    elevation={0}
+                    sx={{
+                      border: '1px dashed',
+                      borderColor: 'divider',
+                      borderRadius: 3,
+                      p: 2,
+                    }}
+                  >
+                    <Stack spacing={1.5}>
+                      <TextField
+                        label="Spot Title"
+                        value={spotManagerTitle}
+                        onChange={(event) => setSpotManagerTitle(event.target.value)}
+                        disabled={spotManagerCreating || spotManagerDeletingId !== null}
+                        fullWidth
+                      />
+                      <Typography variant="caption" color="text.secondary">
+                        This spot will create rows for: {effectiveGuideLanguages.length > 0
+                          ? effectiveGuideLanguages.map((language) => langLabel(language)).join(', ')
+                          : 'no languages yet'}
+                      </Typography>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                        <Button
+                          variant="contained"
+                          startIcon={<AddCircleOutlineIcon />}
+                          disabled={spotManagerCreating || spotManagerDeletingId !== null || !spotManagerTitle.trim() || effectiveGuideLanguages.length === 0}
+                          onClick={() => {
+                            void handleCreateSpot();
+                          }}
+                        >
+                          {spotManagerCreating ? 'Creating…' : 'Create Spot'}
+                        </Button>
+                        <Button
+                          variant="text"
+                          color="inherit"
+                          disabled={spotManagerCreating}
+                          onClick={() => {
+                            setSpotComposerOpen(false);
+                            setSpotManagerTitle('');
+                            setSpotManagerError(null);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  </Paper>
+                ) : null}
 
                 {selectedSpot ? (
                   <Paper
@@ -1126,12 +1150,16 @@ export default function TTSPage() {
                           {visibleJobs.map((job) => {
                             const savedHistory = jobHasSavedHistory(job);
                             const openDisabled = !job.inputScript.trim() && !savedHistory;
+                            const hasOpenWindow = jobHasOpenWindow(job.id);
+                            const englishSourceJob = englishJobBySpotId.get(job.spotId);
+                            const canTranslateFromEnglish = job.language !== 'en' && Boolean(englishSourceJob);
+                            const translateDisabled = translationPendingByJob[job.id] || !(englishSourceJob?.inputScript.trim());
+                            const translateError = translationErrorByJob[job.id];
 
                             return (
                               <TableRow
                                 key={job.id}
                                 hover
-                                selected={activeJobId === job.id && open}
                                 sx={{ verticalAlign: 'top' }}
                               >
                                 <TableCell>
@@ -1156,30 +1184,41 @@ export default function TTSPage() {
                                         updateJob(job.id, (currentJob) => ({
                                           ...currentJob,
                                           inputScript: nextValue,
-                                          rowMessage: currentJob.rowMessageTone === 'warning' ? null : currentJob.rowMessage,
+                                        }));
+                                        setTranslationErrorByJob((previous) => ({
+                                          ...previous,
+                                          [job.id]: '',
                                         }));
                                       }}
                                       inputProps={{ 'aria-label': `Input Script ${selectedSpot.spotTitle} ${langLabel(job.language)}` }}
                                     />
-                                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
-                                      <Button
-                                        variant="outlined"
-                                        size="small"
-                                        startIcon={<LanguageOutlinedIcon />}
-                                        disabled={!job.inputScript.trim()}
-                                        onClick={() => handleAutoDetectLanguage(job.id)}
-                                      >
-                                        Check language
-                                      </Button>
-                                      <Typography
-                                        variant="caption"
-                                        sx={{
-                                          color: job.rowMessageTone === 'warning' ? 'warning.main' : 'text.secondary',
-                                        }}
-                                      >
-                                        {job.rowMessage ?? `This row is fixed to ${langLabel(job.language)}.`}
+                                    {canTranslateFromEnglish ? (
+                                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
+                                        <Button
+                                          variant="outlined"
+                                          size="small"
+                                          disabled={translateDisabled}
+                                          onClick={() => {
+                                            void handleTranslateFromEnglish(job.id);
+                                          }}
+                                        >
+                                          {translationPendingByJob[job.id] ? 'Translating…' : 'Translate from English'}
+                                        </Button>
+                                        <Typography variant="caption" color="text.secondary">
+                                          {englishSourceJob?.inputScript.trim()
+                                            ? `Use the English row as the source for ${langLabel(job.language)}.`
+                                            : 'Enter the English row script first to enable AI translation.'}
+                                        </Typography>
+                                      </Stack>
+                                    ) : null}
+                                    {translateError ? (
+                                      <Typography variant="caption" color="error.main">
+                                        {translateError}
                                       </Typography>
-                                    </Stack>
+                                    ) : null}
+                                    <Typography variant="caption" color="text.secondary">
+                                      This row is fixed to {langLabel(job.language)}.
+                                    </Typography>
                                   </Stack>
                                 </TableCell>
                                 <TableCell>
@@ -1191,12 +1230,14 @@ export default function TTSPage() {
                                       disabled={openDisabled}
                                       onClick={() => handleOpenJob(job.id)}
                                     >
-                                      Open Audio Director
+                                      {hasOpenWindow ? 'Focus Audio Director' : 'Open Audio Director'}
                                     </Button>
                                     <Typography variant="caption" color="text.secondary">
-                                      {savedHistory
-                                        ? 'Stored results appear in the Audio Director Result rail.'
-                                        : 'Use Audio Director to generate the first result for this row.'}
+                                      {hasOpenWindow
+                                        ? 'This row already has an Audio Director window open.'
+                                        : savedHistory
+                                          ? 'Stored results appear in the Audio Director Result rail.'
+                                          : 'Use Audio Director to generate the first result for this row.'}
                                     </Typography>
                                     {job.selectedHistoryVersion?.versionId ? (
                                       <Typography variant="caption" color="text.secondary">
@@ -1250,109 +1291,159 @@ export default function TTSPage() {
                   </Paper>
                 ) : null}
               </Stack>
-            )}
+            ) : null}
           </Stack>
         </Paper>
 
         <DeployVersionFooter />
       </Stack>
 
-      <Dialog open={guidePickerOpen} onClose={closeGuidePicker} maxWidth="sm" fullWidth>
-        <DialogTitle>Browse Guides</DialogTitle>
+      <Dialog
+        open={guidePickerOpen}
+        onClose={(_, reason) => {
+          if (!sharedGuideTarget && (reason === 'backdropClick' || reason === 'escapeKeyDown')) {
+            return;
+          }
+          setGuidePickerOpen(false);
+        }}
+        maxWidth="md"
+        fullWidth
+        disableEscapeKeyDown={!sharedGuideTarget}
+      >
+        <DialogTitle>Select A Guide To Start</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2}>
-            {guidePickerError ? <Alert severity="info">{guidePickerError}</Alert> : null}
-            {!tenantId && !authLoading ? (
-              <Alert severity="warning">
-                No tenant claim was found on the current user. The picker will show any readable guides.
-              </Alert>
-            ) : null}
-            <FormControl fullWidth disabled={guidePickerLoading || guidePickerGuides.length === 0}>
-              <InputLabel id="guide-picker-label">Guide</InputLabel>
-              <Select
-                labelId="guide-picker-label"
-                value={guidePickerSelectionId}
-                label="Guide"
-                onChange={(event) => setGuidePickerSelectionId(event.target.value)}
+            <Typography variant="body2" color="text.secondary">
+              Choose an existing guide or create a minimal guide before working with TTS jobs.
+            </Typography>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
+              <Button
+                variant={quickCreateExpanded ? 'outlined' : 'contained'}
+                startIcon={<HistoryOutlinedIcon />}
+                onClick={() => {
+                  setQuickCreateExpanded(false);
+                  setQuickCreateError(null);
+                  void loadGuides();
+                }}
               >
-                {guidePickerGuides.map((guide) => (
-                  <MenuItem key={guide.id} value={guide.id}>
-                    {guide.title}
-                    {guide.createdFrom === 'tts' && guide.status === 'draft' ? ' (minimal draft)' : ''}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            {guidePickerLoading ? (
-              <Stack direction="row" spacing={1} alignItems="center">
-                <CircularProgress size={18} />
-                <Typography variant="body2" color="text.secondary">
-                  Loading guides…
-                </Typography>
+                Browse Guides
+              </Button>
+              <Button
+                variant={quickCreateExpanded ? 'contained' : 'outlined'}
+                startIcon={<AddCircleOutlineIcon />}
+                onClick={() => {
+                  setQuickCreateExpanded(true);
+                  setQuickCreateError(null);
+                }}
+              >
+                Create Minimal Guide
+              </Button>
+            </Stack>
+
+            {quickCreateExpanded ? (
+              <Paper
+                elevation={0}
+                sx={{
+                  border: '1px dashed',
+                  borderColor: 'divider',
+                  borderRadius: 3,
+                  p: 2,
+                }}
+              >
+                <Stack spacing={2}>
+                  {quickCreateError ? <Alert severity="error">{quickCreateError}</Alert> : null}
+                  {!tenantId && !authLoading ? (
+                    <Typography variant="caption" color="text.secondary">
+                      No tenant claim was found on the current user. New guides created here will be stored without tenant scoping metadata.
+                    </Typography>
+                  ) : null}
+                  <TextField
+                    label="Guide Title"
+                    value={quickCreateGuideTitle}
+                    onChange={(event) => setQuickCreateGuideTitle(event.target.value)}
+                    disabled={quickCreateCreating}
+                  />
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700} gutterBottom>
+                      Guide Languages
+                    </Typography>
+                    <FormGroup row>
+                      {SUPPORTED_TTS_JOB_LANGUAGES.map((language) => (
+                        <FormControlLabel
+                          key={language.code}
+                          control={(
+                            <Checkbox
+                              checked={quickCreateLanguages.includes(language.code)}
+                              onChange={() => handleToggleQuickCreateLanguage(language.code)}
+                              disabled={quickCreateCreating}
+                            />
+                          )}
+                          label={language.label}
+                        />
+                      ))}
+                    </FormGroup>
+                  </Box>
+                </Stack>
+              </Paper>
+            ) : (
+              <Stack spacing={2}>
+                {guidePickerError ? <Alert severity="info">{guidePickerError}</Alert> : null}
+                <FormControl fullWidth disabled={guidePickerLoading || guidePickerGuides.length === 0}>
+                  <InputLabel id="guide-picker-label">Guide</InputLabel>
+                  <Select
+                    labelId="guide-picker-label"
+                    value={guidePickerSelectionId}
+                    label="Guide"
+                    onChange={(event) => setGuidePickerSelectionId(event.target.value)}
+                  >
+                    {guidePickerGuides.map((guide) => (
+                      <MenuItem key={guide.id} value={guide.id}>
+                        {guide.title}
+                        {guide.createdFrom === 'tts' && guide.status === 'draft' ? ' (minimal draft)' : ''}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                {guidePickerLoading ? (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={18} />
+                    <Typography variant="body2" color="text.secondary">
+                      Loading guides…
+                    </Typography>
+                  </Stack>
+                ) : null}
               </Stack>
-            ) : null}
+            )}
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={closeGuidePicker}>Cancel</Button>
-          <Button variant="contained" onClick={handleConfirmGuidePicker} disabled={!selectedGuideOption}>
-            Use Guide
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog fullScreen open={open} onClose={handleRequestClose} TransitionComponent={SlideUp}>
-        <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <Toolbar
-            variant="dense"
-            sx={{
-              borderBottom: '1px solid',
-              borderColor: 'divider',
-              minHeight: 48,
-              px: 2,
-              flexShrink: 0,
-            }}
-          >
-            <Typography variant="subtitle1" fontWeight={600} sx={{ flexGrow: 1 }}>
-              Audio Director
-            </Typography>
-            <IconButton edge="end" onClick={handleRequestClose} aria-label="close">
-              <CloseIcon />
-            </IconButton>
-          </Toolbar>
-
-          <Box sx={{ position: 'relative', flex: 1, overflow: 'hidden' }}>
-            {iframeLoading && (
-              <Box
-                sx={{
-                  position: 'absolute',
-                  inset: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  bgcolor: 'background.default',
-                  zIndex: 1,
+          {quickCreateExpanded ? (
+            <>
+              <Button
+                onClick={() => {
+                  setQuickCreateExpanded(false);
+                  setQuickCreateError(null);
                 }}
+                disabled={quickCreateCreating}
               >
-                <CircularProgress />
-              </Box>
-            )}
-            {open && (
-              <iframe
-                key={iframeKey}
-                ref={iframeRef}
-                src={iframeSrc}
-                title="Audio Director"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  border: 'none',
-                  display: 'block',
+                Back To Guides
+              </Button>
+              <Button
+                variant="contained"
+                onClick={() => {
+                  void handleCreateMinimalGuide();
                 }}
-              />
-            )}
-          </Box>
-        </Box>
+                disabled={quickCreateCreating || !quickCreateGuideTitle.trim() || quickCreateLanguages.length === 0}
+              >
+                {quickCreateCreating ? 'Creating…' : 'Create Minimal Guide'}
+              </Button>
+            </>
+          ) : (
+            <Button variant="contained" onClick={handleConfirmGuidePicker} disabled={!selectedGuideOption}>
+              Use Guide
+            </Button>
+          )}
+        </DialogActions>
       </Dialog>
     </Container>
   );

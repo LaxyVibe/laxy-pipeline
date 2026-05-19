@@ -241,6 +241,53 @@ class TestPipelineConstants:
         assert HUMAN_GATES == expected
 
 
+class TestAudioHistoryPersistence:
+    def test_persist_audio_history_version_ignores_none_spot_title(self, executor):
+        mock_db = MagicMock()
+        mock_batch = MagicMock()
+        mock_guide_ref = MagicMock()
+        mock_summary_collection = MagicMock()
+        mock_summary_ref = MagicMock()
+        mock_version_collection = MagicMock()
+        mock_version_ref = MagicMock()
+
+        mock_db.batch.return_value = mock_batch
+        mock_db.collection.return_value = mock_guide_ref
+        mock_guide_ref.document.return_value = mock_guide_ref
+        mock_guide_ref.collection.return_value = mock_summary_collection
+        mock_summary_collection.document.return_value = mock_summary_ref
+        mock_summary_ref.collection.return_value = mock_version_collection
+        mock_version_collection.document.return_value = mock_version_ref
+
+        with patch("agents.pipeline_agent.fb_firestore.client", return_value=mock_db):
+            metadata = executor._persist_audio_history_version(
+                history_target={
+                    "guideId": "guide-1",
+                    "spotId": "spot-1",
+                    "spotTitle": None,
+                    "lang": "en",
+                },
+                session_id="session-1",
+                spot_id="spot-1",
+                spot_number=1,
+                title="Entrance Hall",
+                script_text="Welcome in.",
+                language="en",
+                audio_url="https://example.com/audio.mp3",
+                storage_path="audio/guide-1/spot-1/en/version.mp3",
+                duration_ms=1200,
+                voice_id="Aoede",
+            )
+
+        summary_payload = mock_batch.set.call_args_list[0].args[1]
+        version_payload = mock_batch.set.call_args_list[1].args[1]
+
+        assert summary_payload["spotTitle"] == "Entrance Hall"
+        assert version_payload["spotTitle"] == "Entrance Hall"
+        assert metadata["spotId"] == "spot-1"
+        assert metadata["lang"] == "en"
+
+
 # ── start() tests ─────────────────────────────────────────────────────────
 
 

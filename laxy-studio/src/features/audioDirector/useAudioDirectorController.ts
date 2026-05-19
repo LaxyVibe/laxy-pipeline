@@ -96,9 +96,12 @@ export function useAudioDirectorController() {
   const readyPostedRef = useRef(false);
   const lastEmbeddedPayloadRef = useRef<{ text: string; language: string | null } | null>(null);
   const isEmbedded = window.self !== window.top;
+  const hasWindowOpener = window.opener !== null && window.opener !== window;
+  const launchedFromTts = searchParams.get('source') === 'tts' && (isEmbedded || hasWindowOpener);
+  const parentWindow = hasWindowOpener ? window.opener : (isEmbedded ? window.parent : null);
   const embeddedHistoryTarget = useMemo<AudioHistoryTarget | null>(
-    () => (isEmbedded ? readAudioHistoryTarget(searchParams) : null),
-    [isEmbedded, searchParams],
+    () => (launchedFromTts ? readAudioHistoryTarget(searchParams) : null),
+    [launchedFromTts, searchParams],
   );
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
@@ -209,7 +212,7 @@ export function useAudioDirectorController() {
       return;
     }
 
-    if (isEmbedded) {
+    if (launchedFromTts) {
       resetScriptBoundState();
       setManuscriptText('');
       setCustomCharacters(saved.customCharacters ?? []);
@@ -228,7 +231,7 @@ export function useAudioDirectorController() {
     setReadingAssistCache(saved.readingAssistCache ?? {});
     setGenerationHistory(saved.generationHistory ?? []);
     setItems(resolveScriptDraft(saved.manuscriptText ?? '', saved.items ?? []));
-  }, [defaultSettings, isEmbedded]);
+  }, [defaultSettings, launchedFromTts]);
 
   useEffect(() => {
     setItems((previous) => resolveScriptDraft(manuscriptText, previous));
@@ -368,13 +371,17 @@ export function useAudioDirectorController() {
     }
   }, []);
 
-  // When embedded in an iframe, advertise readiness and receive the script via postMessage.
+  // When launched from /tts in an iframe or popup, advertise readiness and receive the script via postMessage.
   useEffect(() => {
-    if (!isEmbedded) return;
+    if (!launchedFromTts || !parentWindow) return;
 
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'laxy:script') {
+        const incomingLaunchId = typeof event.data.launchId === 'string' ? event.data.launchId : '';
+        if (embeddedHistoryTarget?.launchId && incomingLaunchId && incomingLaunchId !== embeddedHistoryTarget.launchId) {
+          return;
+        }
         const payload = {
           text: typeof event.data.text === 'string' ? event.data.text : '',
           language: typeof event.data.language === 'string' && SUPPORTED_LANGUAGE_CODES.has(event.data.language)
@@ -388,13 +395,19 @@ export function useAudioDirectorController() {
     window.addEventListener('message', handleMessage);
     if (!readyPostedRef.current) {
       readyPostedRef.current = true;
-      // Signal the parent that the iframe is ready to receive the script.
-      window.parent.postMessage({ type: 'laxy:ready' }, window.location.origin);
+      // Signal the opener that this launched Audio Director is ready to receive the script.
+      parentWindow.postMessage(
+        {
+          type: 'laxy:ready',
+          launchId: embeddedHistoryTarget?.launchId,
+        },
+        window.location.origin,
+      );
     }
 
     return () => window.removeEventListener('message', handleMessage);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyEmbeddedScriptPayload, isEmbedded]);
+  }, [applyEmbeddedScriptPayload, embeddedHistoryTarget?.launchId, launchedFromTts, parentWindow]);
 
   const getCharacter = (characterId: string) => (
     allCharacters.find((character) => character.id === characterId)

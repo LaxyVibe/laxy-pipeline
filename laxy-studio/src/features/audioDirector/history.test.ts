@@ -4,25 +4,28 @@ import {
   buildGenerationHistoryFromVersions,
   extractScriptText,
   mapAudioTrackSummary,
+  readAudioHistoryTarget,
   sortHistoryVersions,
   type AudioHistoryVersionRecord,
 } from './history';
 
 describe('audio director history helpers', () => {
-  it('builds iframe urls with history query params', () => {
+  it('builds launcher urls with history query params', () => {
     expect(buildAudioDirectorHistoryUrl({
       basePath: '/audio-director',
       target: {
         tenantId: 'tenant-a',
         guideId: 'guide-1',
         spotId: 'spot-2',
+        spotTitle: 'Main Hall',
         lang: 'ja',
+        launchId: 'launch-1',
       },
       cacheBust: 123,
-    })).toBe('/audio-director?screen=audio-production&source=tts&guideId=guide-1&spotId=spot-2&lang=ja&tenantId=tenant-a&ts=123');
+    })).toBe('/audio-director?screen=audio-production&source=tts&guideId=guide-1&spotId=spot-2&lang=ja&tenantId=tenant-a&spotTitle=Main+Hall&launchId=launch-1&ts=123');
   });
 
-  it('omits tenantId from iframe urls when no tenant claim is available', () => {
+  it('omits tenantId from launcher urls when no tenant claim is available', () => {
     expect(buildAudioDirectorHistoryUrl({
       basePath: '/audio-director',
       target: {
@@ -38,6 +41,19 @@ describe('audio director history helpers', () => {
     expect(extractScriptText({ scriptText: 'hello' })).toBe('hello');
     expect(extractScriptText({ text: 'world' })).toBe('world');
     expect(extractScriptText('raw text')).toBe('raw text');
+  });
+
+  it('reads spot titles back from iframe query params', () => {
+    expect(readAudioHistoryTarget(new URLSearchParams(
+      'guideId=guide-1&spotId=spot-2&lang=ja&spotTitle=Main+Hall&launchId=launch-1',
+    ))).toEqual({
+      guideId: 'guide-1',
+      spotId: 'spot-2',
+      lang: 'ja',
+      spotTitle: 'Main Hall',
+      tenantId: undefined,
+      launchId: 'launch-1',
+    });
   });
 
   it('maps track summaries from Firestore-like data', () => {
@@ -82,6 +98,28 @@ describe('audio director history helpers', () => {
       spotId: 'spot-1',
       lang: 'en',
       spotTitle: 'Entrance',
+      latestGeneratedAt: 0,
+      hasGeneratedAudio: false,
+    });
+  });
+
+  it('falls back when persisted spot titles contain placeholder strings', () => {
+    expect(mapAudioTrackSummary({
+      guideId: 'guide-1',
+      docId: 'spot-1_en',
+      data: {
+        spotId: 'spot-1',
+        lang: 'en',
+        spotTitle: 'None',
+        latestGeneratedAt: 0,
+        hasGeneratedAudio: false,
+      },
+    })).toEqual({
+      id: 'spot-1_en',
+      guideId: 'guide-1',
+      spotId: 'spot-1',
+      lang: 'en',
+      spotTitle: 'spot-1',
       latestGeneratedAt: 0,
       hasGeneratedAudio: false,
     });

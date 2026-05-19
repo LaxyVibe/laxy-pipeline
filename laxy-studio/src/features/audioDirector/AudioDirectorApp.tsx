@@ -26,6 +26,11 @@ export default function AudioDirectorApp() {
     0,
   );
   const isEmbedded = window.self !== window.top;
+  const hasWindowOpener = window.opener !== null && window.opener !== window;
+  const launcherWindow = hasWindowOpener ? window.opener : (isEmbedded ? window.parent : null);
+  const launchSearchParams = new URLSearchParams(window.location.search);
+  const launchId = launchSearchParams.get('launchId')?.trim() || undefined;
+  const launchedFromTts = launchSearchParams.get('source') === 'tts' && Boolean(launcherWindow);
 
   useEffect(() => {
     if (controller.resultDialogRequestAt) {
@@ -43,12 +48,15 @@ export default function AudioDirectorApp() {
     lang?: string;
   }) => {
     if (!selection.audioUrl) return;
-    if (!window.confirm('Use this generated result and send its script and audio back to the parent page?')) return;
-    if (!isEmbedded) return;
+    if (!window.confirm(hasWindowOpener
+      ? 'Use this generated result, send it back to /tts, and close this Audio Director window?'
+      : 'Use this generated result and send its script and audio back to the parent page?')) return;
+    if (!launchedFromTts || !launcherWindow) return;
 
-    window.parent.postMessage(
+    launcherWindow.postMessage(
       {
         type: 'laxy:result-selected',
+        launchId,
         outputScript: selection.scriptText,
         outputAudio: selection.audioUrl,
         versionId: selection.versionId,
@@ -59,6 +67,11 @@ export default function AudioDirectorApp() {
       },
       window.location.origin,
     );
+    if (hasWindowOpener) {
+      window.setTimeout(() => {
+        window.close();
+      }, 0);
+    }
   };
 
   return (

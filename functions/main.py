@@ -1927,7 +1927,7 @@ def translate_language(req: https_fn.Request) -> https_fn.Response:
         if req.method != "POST":
             return _error_response("Method not allowed", 405, code="METHOD_NOT_ALLOWED")
 
-        auth_context, auth_error = _authorise_admin_request(req, require_tenant_scope=True)
+        auth_context, auth_error = _authorise_admin_request(req, require_tenant_scope=False)
         if auth_error:
             _write_audit_log(
                 "pipeline.translate_language.denied",
@@ -1952,24 +1952,6 @@ def translate_language(req: https_fn.Request) -> https_fn.Response:
             )
 
         _update_request_context(target_language=payload.targetLanguage)
-
-        if (
-            _non_empty((auth_context or {}).get("role")) != SUPER_ADMIN_ROLE
-            and not _non_empty((auth_context or {}).get("tenant_id"))
-        ):
-            denied = _error_response(
-                "Forbidden: tenant scope required",
-                status=403,
-                code="FORBIDDEN_TENANT_SCOPE",
-                retryable=False,
-            )
-            _write_audit_log(
-                "pipeline.translate_language.denied",
-                resource="translations",
-                details={"reason": "tenant_scope", "targetLanguage": payload.targetLanguage},
-                success=False,
-            )
-            return denied
 
         try:
             executor = get_executor()

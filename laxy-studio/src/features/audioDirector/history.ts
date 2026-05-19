@@ -8,6 +8,7 @@ export type AudioHistoryTarget = {
   lang: string;
   guideTitle?: string;
   spotTitle?: string;
+  launchId?: string;
 };
 
 export type AudioHistorySelection = {
@@ -52,6 +53,16 @@ function readString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function readOptionalTitle(value: unknown): string {
+  const normalized = readString(value);
+  if (!normalized) return '';
+  const lower = normalized.toLowerCase();
+  if (lower === 'none' || lower === 'null' || lower === 'undefined') {
+    return '';
+  }
+  return normalized;
+}
+
 function readNumber(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (value && typeof value === 'object' && typeof (value as { toMillis?: unknown }).toMillis === 'function') {
@@ -80,6 +91,12 @@ export function buildAudioDirectorHistoryUrl(args: {
   if (args.target.tenantId) {
     params.set('tenantId', args.target.tenantId);
   }
+  if (args.target.spotTitle) {
+    params.set('spotTitle', args.target.spotTitle);
+  }
+  if (args.target.launchId) {
+    params.set('launchId', args.target.launchId);
+  }
   if (args.cacheBust != null) {
     params.set('ts', String(args.cacheBust));
   }
@@ -91,6 +108,8 @@ export function readAudioHistoryTarget(searchParams: URLSearchParams): AudioHist
   const guideId = readString(searchParams.get('guideId'));
   const spotId = readString(searchParams.get('spotId'));
   const lang = readString(searchParams.get('lang'));
+  const spotTitle = readOptionalTitle(searchParams.get('spotTitle'));
+  const launchId = readString(searchParams.get('launchId'));
   if (!guideId || !spotId || !lang) {
     return null;
   }
@@ -99,6 +118,8 @@ export function readAudioHistoryTarget(searchParams: URLSearchParams): AudioHist
     guideId,
     spotId,
     lang,
+    spotTitle: spotTitle || undefined,
+    launchId: launchId || undefined,
   };
 }
 
@@ -132,7 +153,7 @@ export function mapAudioTrackSummary(args: {
     guideId,
     spotId,
     lang,
-    spotTitle: readString(data.spotTitle) || readString(data.title) || spotId,
+    spotTitle: readOptionalTitle(data.spotTitle) || readOptionalTitle(data.title) || spotId,
     activeVersionId: readString(data.activeVersionId) || undefined,
     latestVersionId: readString(data.latestVersionId) || undefined,
     latestGeneratedAt: readNumber(data.latestGeneratedAt) || readNumber(data.updatedAt),
@@ -165,7 +186,7 @@ export function mapAudioHistoryVersion(args: {
     guideId,
     spotId,
     lang,
-    spotTitle: readString(data.spotTitle) || readString(data.title) || target.spotTitle || summary?.spotTitle || spotId,
+    spotTitle: readOptionalTitle(data.spotTitle) || readOptionalTitle(data.title) || target.spotTitle || summary?.spotTitle || spotId,
     audioUrl,
     storagePath: readString(data.storagePath) || undefined,
     scriptText:
