@@ -6,6 +6,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   CircularProgress,
   Container,
   Dialog,
@@ -249,6 +250,11 @@ export default function TTSPage() {
   const [quickCreateSpotTitle, setQuickCreateSpotTitle] = useState('');
   const [quickCreateCreating, setQuickCreateCreating] = useState(false);
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
+  const [spotManagerTitle, setSpotManagerTitle] = useState('');
+  const [spotManagerLang, setSpotManagerLang] = useState('en');
+  const [spotManagerCreating, setSpotManagerCreating] = useState(false);
+  const [spotManagerDeletingId, setSpotManagerDeletingId] = useState<string | null>(null);
+  const [spotManagerError, setSpotManagerError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const nextRowIdRef = useRef(2);
 
@@ -365,6 +371,11 @@ export default function TTSPage() {
     if (resultsPickerLang && resultsPickerSpot.languages.includes(resultsPickerLang)) return;
     setResultsPickerLang(resultsPickerSpot.languages[0] ?? resultsPickerLang);
   }, [resultsPickerLang, resultsPickerSpot]);
+
+  useEffect(() => {
+    if (!selectedJobRow) return;
+    setSpotManagerLang(selectedJobRow.targetLang || selectedJobRow.inputLanguage || 'en');
+  }, [selectedJobRow]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -697,17 +708,18 @@ export default function TTSPage() {
     }
   };
 
-  const handleCreateSpotForRow = async (rowId: string) => {
-    const row = rows.find((entry) => entry.id === rowId);
-    if (!row || !sharedGuideTarget) return;
+  const handleCreateSpot = async () => {
+    if (!sharedGuideTarget) return;
 
-    const suggestedTitle = row.targetSpotTitle?.trim() || `Spot ${rows.findIndex((entry) => entry.id === rowId) + 1}`;
-    const spotTitle = window.prompt('New spot title', suggestedTitle)?.trim();
-    if (!spotTitle) return;
+    const spotTitle = spotManagerTitle.trim();
+    const lang = spotManagerLang.trim();
+    if (!spotTitle || !lang) return;
+
+    setSpotManagerCreating(true);
+    setSpotManagerError(null);
 
     try {
       const spotId = createQuickCreateSpotId();
-      const lang = row.targetLang || row.inputLanguage || 'en';
       const docId = buildAudioTrackDocId(spotId, lang);
       const { db } = initFirebase();
       const batch = writeBatch(db);
@@ -742,21 +754,78 @@ export default function TTSPage() {
         ...previous.filter((summary) => summary.id !== docId),
       ]);
 
-      updateRow(rowId, (currentRow) => ({
-        ...currentRow,
-        targetSpotId: spotId,
-        targetSpotTitle: spotTitle,
-        selectedHistoryVersion: undefined,
-        rowMessage: `Created ${spotTitle} / ${langLabel(lang)} under ${sharedGuideTarget.title}.`,
-        rowMessageTone: 'info',
-      }));
+      if (selectedJobRow) {
+        updateRow(selectedJobRow.id, (currentRow) => ({
+          ...currentRow,
+          targetSpotId: spotId,
+          targetSpotTitle: spotTitle,
+          targetLang: lang,
+          selectedHistoryVersion: undefined,
+          rowMessage: `Created ${spotTitle} / ${langLabel(lang)} under ${sharedGuideTarget.title}.`,
+          rowMessageTone: 'info',
+        }));
+      }
+
+      setSpotManagerTitle('');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      updateRow(rowId, (currentRow) => ({
-        ...currentRow,
-        rowMessage: `Unable to create the spot target: ${message}`,
-        rowMessageTone: 'warning',
-      }));
+      setSpotManagerError(`Unable to create the spot target: ${message}`);
+    } finally {
+      setSpotManagerCreating(false);
+    }
+  };
+
+  const handleDeleteSpot = async (spot: SpotOption) => {
+    if (!sharedGuideTarget) return;
+    if (!window.confirm(`Remove ${spot.spotTitle} and all saved audio versions under it?`)) return;
+
+    setSpotManagerDeletingId(spot.spotId);
+    setSpotManagerError(null);
+
+    try {
+      const matchingSummaries = trackSummaries.filter((summary) => summary.spotId === spot.spotId);
+      const { db } = initFirebase();
+      const batch = writeBatch(db);
+
+      for (const summary of matchingSummaries) {
+        const versionsSnapshot = await getDocs(collection(
+          db,
+          'guides',
+          sharedGuideTarget.guideId,
+          'audioTracks',
+          summary.id,
+          'versions',
+        ));
+        versionsSnapshot.docs.forEach((versionDoc) => {
+          batch.delete(versionDoc.ref);
+        });
+        batch.delete(doc(db, 'guides', sharedGuideTarget.guideId, 'audioTracks', summary.id));
+      }
+
+      await batch.commit();
+
+      setTrackSummaries((previous) => previous.filter((summary) => summary.spotId !== spot.spotId));
+      setRows((currentRows) => currentRows.map((row) => (
+        row.targetSpotId === spot.spotId
+          ? {
+            ...row,
+            targetSpotId: undefined,
+            targetSpotTitle: undefined,
+            selectedHistoryVersion: undefined,
+            rowMessage: `${spot.spotTitle} was removed from this guide. Choose another spot.`,
+            rowMessageTone: 'warning' as const,
+          }
+          : row
+      )));
+      if (resultsPickerSpotId === spot.spotId) {
+        setResultsPickerSpotId('');
+        setResultsPickerLang('');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSpotManagerError(`Unable to remove the spot: ${message}`);
+    } finally {
+      setSpotManagerDeletingId(null);
     }
   };
 
@@ -852,6 +921,7 @@ export default function TTSPage() {
             ) : null}
 
             {trackSummariesError ? <Alert severity="warning">{trackSummariesError}</Alert> : null}
+            {spotManagerError ? <Alert severity="warning">{spotManagerError}</Alert> : null}
 
             {sharedGuideTarget ? (
               <Typography variant="body2" color="text.secondary">
@@ -859,6 +929,114 @@ export default function TTSPage() {
                   ? 'Loading guide spots…'
                   : `${spotOptions.length} spot target${spotOptions.length === 1 ? '' : 's'} available in this guide.`}
               </Typography>
+            ) : null}
+
+            {sharedGuideTarget ? (
+              <Paper
+                elevation={0}
+                sx={{
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  borderRadius: 3,
+                  p: 2,
+                  bgcolor: 'background.default',
+                }}
+              >
+                <Stack spacing={2}>
+                  <Stack spacing={0.5}>
+                    <Typography variant="subtitle2" fontWeight={700}>
+                      Manage Spots
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Create reusable spot targets for this guide, assign them to the selected job, and remove spots you no longer need.
+                    </Typography>
+                  </Stack>
+
+                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.25}>
+                    <TextField
+                      label="Spot Title"
+                      value={spotManagerTitle}
+                      onChange={(event) => setSpotManagerTitle(event.target.value)}
+                      placeholder={selectedJobRow ? `Seed ${selectedJobRow.id.replace('row-', 'Row ')}` : 'Spot title'}
+                      disabled={spotManagerCreating || spotManagerDeletingId !== null}
+                      fullWidth
+                    />
+                    <FormControl sx={{ minWidth: { xs: '100%', md: 220 } }}>
+                      <InputLabel id="spot-manager-language-label">Initial Language</InputLabel>
+                      <Select
+                        labelId="spot-manager-language-label"
+                        value={spotManagerLang}
+                        label="Initial Language"
+                        onChange={(event) => setSpotManagerLang(event.target.value)}
+                        disabled={spotManagerCreating || spotManagerDeletingId !== null}
+                      >
+                        {SUPPORTED_LANGUAGES.map((language) => (
+                          <MenuItem key={language.code} value={language.code}>
+                            {language.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <Button
+                      variant="contained"
+                      disabled={spotManagerCreating || spotManagerDeletingId !== null || !spotManagerTitle.trim() || !spotManagerLang}
+                      onClick={() => {
+                        void handleCreateSpot();
+                      }}
+                    >
+                      {spotManagerCreating ? 'Creating…' : 'Add Spot'}
+                    </Button>
+                  </Stack>
+
+                  {spotOptions.length === 0 ? (
+                    <Alert severity="info">No spots exist in this guide yet.</Alert>
+                  ) : (
+                    <Stack spacing={1}>
+                      {spotOptions.map((spot) => (
+                        <Paper
+                          key={spot.spotId}
+                          elevation={0}
+                          sx={{
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 2.5,
+                            p: 1.5,
+                          }}
+                        >
+                          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
+                            <Stack spacing={0.75}>
+                              <Typography variant="body2" fontWeight={700}>
+                                {spot.spotTitle}
+                              </Typography>
+                              <Stack direction="row" spacing={0.75} sx={{ flexWrap: 'wrap' }}>
+                                {spot.languages.map((language) => (
+                                  <Chip key={`${spot.spotId}-${language}`} size="small" label={langLabel(language)} />
+                                ))}
+                                <Chip
+                                  size="small"
+                                  color={spot.hasGeneratedAudio ? 'success' : 'default'}
+                                  label={spot.hasGeneratedAudio ? 'Has history' : 'New target'}
+                                />
+                              </Stack>
+                            </Stack>
+                            <Button
+                              variant="text"
+                              color="inherit"
+                              startIcon={<DeleteOutlineIcon />}
+                              disabled={spotManagerCreating || spotManagerDeletingId === spot.spotId}
+                              onClick={() => {
+                                void handleDeleteSpot(spot);
+                              }}
+                            >
+                              {spotManagerDeletingId === spot.spotId ? 'Removing…' : 'Remove Spot'}
+                            </Button>
+                          </Stack>
+                        </Paper>
+                      ))}
+                    </Stack>
+                  )}
+                </Stack>
+              </Paper>
             ) : null}
 
             {quickCreateExpanded ? (
@@ -942,9 +1120,8 @@ export default function TTSPage() {
               <TableHead>
                 <TableRow>
                   <TableCell sx={{ fontWeight: 700, minWidth: 320 }}>Input Script</TableCell>
-                  <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Input Language</TableCell>
+                  <TableCell sx={{ fontWeight: 700, minWidth: 300 }}>Languages</TableCell>
                   <TableCell sx={{ fontWeight: 700, minWidth: 260 }}>Target Spot</TableCell>
-                  <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Target Language</TableCell>
                   <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Actions</TableCell>
                   <TableCell sx={{ fontWeight: 700, minWidth: 320 }}>Output Script</TableCell>
                   <TableCell sx={{ fontWeight: 700, minWidth: 280 }}>Output Audio</TableCell>
@@ -1015,6 +1192,29 @@ export default function TTSPage() {
                               ))}
                             </Select>
                           </FormControl>
+                          <FormControl fullWidth disabled={!sharedGuideTarget}>
+                            <InputLabel id={`tts-target-language-label-${row.id}`}>Target Language</InputLabel>
+                            <Select
+                              labelId={`tts-target-language-label-${row.id}`}
+                              value={row.targetLang}
+                              label="Target Language"
+                              onChange={(event) => {
+                                updateRow(row.id, (currentRow) => ({
+                                  ...currentRow,
+                                  targetLang: event.target.value,
+                                  selectedHistoryVersion: undefined,
+                                  rowMessage: `Target language set to ${langLabel(event.target.value)}.`,
+                                  rowMessageTone: 'info',
+                                }));
+                              }}
+                            >
+                              {rowLanguageOptions.map((language) => (
+                                <MenuItem key={language} value={language}>
+                                  {langLabel(language)}
+                                </MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
                           <Button
                             variant="outlined"
                             size="small"
@@ -1027,7 +1227,7 @@ export default function TTSPage() {
                           <Typography
                             variant="caption"
                             sx={{
-                              minHeight: 36,
+                              minHeight: 52,
                               color: row.rowMessageTone === 'warning' ? 'warning.main' : 'text.secondary',
                             }}
                           >
@@ -1090,50 +1290,7 @@ export default function TTSPage() {
                             >
                               Browse Saved Results
                             </Button>
-                            <Button
-                              variant="text"
-                              size="small"
-                              color="inherit"
-                              disabled={!sharedGuideTarget}
-                              onClick={() => {
-                                void handleCreateSpotForRow(row.id);
-                              }}
-                            >
-                              Create Spot
-                            </Button>
                           </Stack>
-                        </Stack>
-                      </TableCell>
-                      <TableCell>
-                        <Stack spacing={1.25}>
-                          <FormControl fullWidth disabled={!sharedGuideTarget}>
-                            <InputLabel id={`tts-target-language-label-${row.id}`}>Target Language</InputLabel>
-                            <Select
-                              labelId={`tts-target-language-label-${row.id}`}
-                              value={row.targetLang}
-                              label="Target Language"
-                              onChange={(event) => {
-                                updateRow(row.id, (currentRow) => ({
-                                  ...currentRow,
-                                  targetLang: event.target.value,
-                                  selectedHistoryVersion: undefined,
-                                  rowMessage: `Target language set to ${langLabel(event.target.value)}.`,
-                                  rowMessageTone: 'info',
-                                }));
-                              }}
-                            >
-                              {rowLanguageOptions.map((language) => (
-                                <MenuItem key={language} value={language}>
-                                  {langLabel(language)}
-                                </MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          <Typography variant="caption" color="text.secondary">
-                            {rowHasHistory
-                              ? 'Saved audio already exists for this spot and language.'
-                              : 'No saved audio yet for this spot and language. Audio Director will open in generation mode.'}
-                          </Typography>
                         </Stack>
                       </TableCell>
                       <TableCell>
