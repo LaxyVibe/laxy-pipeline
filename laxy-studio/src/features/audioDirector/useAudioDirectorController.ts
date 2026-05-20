@@ -5,7 +5,6 @@ import {
   bootstrapAudioSession,
   enhanceScript,
   generateAudioForLanguage,
-  generateCharacter,
   generateDirectorNote,
   generateJapaneseHiragana,
 } from '../../api';
@@ -18,7 +17,6 @@ import {
   buildExcerpt,
   createDefaultDirectorNote,
   createDefaultSettings,
-  draftCharacterFromPrompt,
   estimateTokensForSettings,
   isScriptEnhancementActive,
   PRESET_AUDIO_CHARACTERS,
@@ -26,7 +24,6 @@ import {
   resolveCompiledPrompt,
   validateEnhancedScript,
   type AudioGuideSettings,
-  type AudioMvpCharacter,
   type AudioPoiDraft,
   type ContentVersion,
   type ScriptEnhancementLimit,
@@ -51,7 +48,6 @@ import type {
 import {
   AUDIO_DIRECTOR_DRAFT_STORAGE_KEY,
   buildGenerationStateKey,
-  createEmptyCharacterDraft,
   createEmptyValidation,
   createSessionId,
   detectLanguageCode,
@@ -60,7 +56,6 @@ import {
   preprocessScriptForLanguage,
   readStoredAudioDirectorDraft,
   sleep,
-  toCharacterDraft,
   upsertLanguageAudio,
   upsertLanguageSrt,
   writeLocalStorage,
@@ -106,9 +101,6 @@ export function useAudioDirectorController() {
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [designerPrompt, setDesignerPrompt] = useState('');
-  const [editingCharacterId, setEditingCharacterId] = useState<string | null>(null);
-  const [characterCreatorOpen, setCharacterCreatorOpen] = useState(false);
   const [configPreviewOpen, setConfigPreviewOpen] = useState(false);
   const [characterPickerOpen, setCharacterPickerOpen] = useState(false);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
@@ -116,10 +108,6 @@ export function useAudioDirectorController() {
   const [directorNotePrompt, setDirectorNotePrompt] = useState('');
   const [directorNoteGenerating, setDirectorNoteGenerating] = useState(false);
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
-  const [isGeneratingCharacter, setIsGeneratingCharacter] = useState(false);
-
-  const [characterDraft, setCharacterDraft] = useState(createEmptyCharacterDraft());
-  const [customCharacters, setCustomCharacters] = useState<AudioMvpCharacter[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [manuscriptText, setManuscriptText] = useState('');
   const [items, setItems] = useState<AudioPoiDraft[]>([]);
@@ -152,10 +140,7 @@ export function useAudioDirectorController() {
   const busyOperationSeqRef = useRef(0);
   const [busyOperations, setBusyOperations] = useState<Array<{ id: number; label: string }>>([]);
 
-  const allCharacters = useMemo(
-    () => [...PRESET_AUDIO_CHARACTERS, ...customCharacters],
-    [customCharacters],
-  );
+  const allCharacters = PRESET_AUDIO_CHARACTERS;
   const scriptEnhancementEnabled = isScriptEnhancementActive(globalSettings.scriptEnhancementLimit);
   const combinedGenerationHistory = useMemo(
     () => [...generationHistory, ...storedGenerationHistory].sort((left, right) => right.generatedAt - left.generatedAt),
@@ -237,7 +222,6 @@ export function useAudioDirectorController() {
     if (launchedFromTts) {
       resetScriptBoundState();
       setManuscriptText('');
-      setCustomCharacters(saved.customCharacters ?? []);
       setGlobalSettings(saved.globalSettings ?? defaultSettings);
       setReadingAssistCache(saved.readingAssistCache ?? {});
       setItems([]);
@@ -247,7 +231,6 @@ export function useAudioDirectorController() {
     setManuscriptText(saved.manuscriptText ?? '');
     setSessionId(saved.sessionId ?? null);
     setCoreLanguage(saved.coreLanguage ?? 'en');
-    setCustomCharacters(saved.customCharacters ?? []);
     setGlobalSettings(saved.globalSettings ?? defaultSettings);
     setEnhancementCache(saved.enhancementCache ?? {});
     setReadingAssistCache(saved.readingAssistCache ?? {});
@@ -258,6 +241,24 @@ export function useAudioDirectorController() {
   useEffect(() => {
     setItems((previous) => resolveScriptDraft(manuscriptText, previous));
   }, [manuscriptText]);
+
+  useEffect(() => {
+    const hasSelectedCharacter = PRESET_AUDIO_CHARACTERS.some((character) => character.id === globalSettings.characterId);
+    if (hasSelectedCharacter) return;
+
+    const fallbackCharacter = PRESET_AUDIO_CHARACTERS[0];
+    const recommendation = recommendVoice({
+      character: fallbackCharacter,
+      manuscriptText,
+      contentVersion: globalSettings.contentVersion,
+    });
+    setGlobalSettings((previous) => ({
+      ...previous,
+      characterId: fallbackCharacter.id,
+      voiceId: recommendation.recommendedVoiceId,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
+    }));
+  }, [globalSettings.characterId, globalSettings.contentVersion, manuscriptText]);
 
   useEffect(() => {
     if (!embeddedHistoryTarget) return;
@@ -371,14 +372,13 @@ export function useAudioDirectorController() {
       scriptEnhancementEnabled,
       globalSettings,
       items,
-      customCharacters,
+      customCharacters: [],
       enhancementCache,
       readingAssistCache,
       generationHistory,
     } satisfies AudioDirectorDraft);
   }, [
     coreLanguage,
-    customCharacters,
     enhancementCache,
     globalSettings,
     generationHistory,
@@ -779,111 +779,6 @@ export function useAudioDirectorController() {
     } finally {
       setDirectorNoteGenerating(false);
       endBusyOperation(busyOperationId);
-    }
-  };
-
-  const openCreateCharacterDialog = () => {
-    setEditingCharacterId(null);
-    setDesignerPrompt('');
-    setCharacterDraft(createEmptyCharacterDraft());
-    setCharacterCreatorOpen(true);
-  };
-
-  const openEditCharacterDialog = (characterId: string) => {
-    const character = customCharacters.find((item) => item.id === characterId);
-    if (!character) return;
-    setEditingCharacterId(characterId);
-    setDesignerPrompt('');
-    setCharacterDraft(toCharacterDraft(character));
-    setCharacterCreatorOpen(true);
-  };
-
-  const closeCharacterCreator = () => {
-    setCharacterCreatorOpen(false);
-    setDesignerPrompt('');
-    setEditingCharacterId(null);
-    setCharacterDraft(createEmptyCharacterDraft());
-  };
-
-  const handleSaveCharacter = () => {
-    if (!characterDraft.name.trim() || !characterDraft.role.trim()) return;
-
-    const nextCharacterBase: AudioMvpCharacter = {
-      id: editingCharacterId ?? `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      source: 'custom',
-      ...characterDraft,
-      name: characterDraft.name.trim(),
-      role: characterDraft.role.trim(),
-      coreTimbre: characterDraft.coreTimbre.trim(),
-      personalityDNA: characterDraft.personalityDNA.trim(),
-      linguisticFingerprint: characterDraft.linguisticFingerprint.trim(),
-      brandPersona: characterDraft.brandPersona.trim(),
-      accent: characterDraft.accent.trim(),
-      staticInstruction: characterDraft.staticInstruction.trim(),
-    };
-
-    const recommendation = recommendVoice({
-      character: nextCharacterBase,
-      manuscriptText,
-      contentVersion: globalSettings.contentVersion,
-    });
-    const nextCharacter: AudioMvpCharacter = {
-      ...nextCharacterBase,
-      recommendedVoiceId: recommendation.recommendedVoiceId,
-    };
-
-    setCustomCharacters((previous) => {
-      const withoutExisting = previous.filter((item) => item.id !== nextCharacter.id);
-      return [nextCharacter, ...withoutExisting];
-    });
-
-    setGlobalSettings((previous) => ({
-      ...previous,
-      characterId: nextCharacter.id,
-      voiceId: recommendation.recommendedVoiceId,
-      directorNote: clearCompiledPromptCustomization(previous.directorNote),
-    }));
-
-    closeCharacterCreator();
-  };
-
-  const handleDraftCharacter = async () => {
-    if (!designerPrompt.trim()) return;
-    const busyOperationId = beginBusyOperation('Generating character profile…');
-    setIsGeneratingCharacter(true);
-    try {
-      const response = await generateCharacter({ designerPrompt });
-      const character = response.character;
-      setCharacterDraft({
-        name: character.name,
-        role: character.role,
-        avatar: character.avatar,
-        genderIdentity: character.genderIdentity,
-        coreTimbre: character.coreTimbre,
-        personalityDNA: character.personalityDNA,
-        linguisticFingerprint: character.linguisticFingerprint,
-        brandPersona: character.brandPersona,
-        accent: character.accent ?? '',
-        staticInstruction: character.staticInstruction,
-        recommendedVoiceId: undefined,
-      });
-      setEditingCharacterId(null);
-    } catch (error) {
-      console.error('Character generation failed:', error);
-      const drafted = draftCharacterFromPrompt(designerPrompt);
-      setCharacterDraft(toCharacterDraft(drafted));
-      setEditingCharacterId(null);
-    } finally {
-      setIsGeneratingCharacter(false);
-      endBusyOperation(busyOperationId);
-    }
-  };
-
-  const handleDeleteCharacter = (characterId: string) => {
-    setCustomCharacters((previous) => previous.filter((item) => item.id !== characterId));
-    if (globalSettings.characterId === characterId) {
-      const fallback = PRESET_AUDIO_CHARACTERS[0];
-      setGlobalSettings(createDefaultSettings(fallback));
     }
   };
 
@@ -1388,8 +1283,6 @@ export function useAudioDirectorController() {
     analysisPhase,
     audioFiles,
     canAdvance,
-    characterCreatorOpen,
-    characterDraft,
     characterPickerOpen,
     configPreviewOpen,
     coreLanguage,
@@ -1398,13 +1291,10 @@ export function useAudioDirectorController() {
     currentJapaneseReadingText,
     currentScriptLabel,
     currentScriptText,
-    customCharacters,
     detectedLangLabel,
-    designerPrompt,
     directorNoteEditorOpen,
     directorNoteGenerating,
     directorNotePrompt,
-    editingCharacterId,
     estimatedTokens,
     femaleVoices,
     generationError,
@@ -1417,10 +1307,8 @@ export function useAudioDirectorController() {
     generationHistory: combinedGenerationHistory,
     handleCompiledPromptChange,
     handleCurrentScriptTextChange,
-    handleDeleteCharacter,
     handleDirectorNoteFieldChange,
     handleDownloadConfig,
-    handleDraftCharacter,
     handleEnhanceActiveLanguage,
     handleEnhancedScriptChange,
     handleGenerateJapaneseReading,
@@ -1431,7 +1319,6 @@ export function useAudioDirectorController() {
     handleGlobalVoiceChange,
     handleJapaneseReadingTextChange,
     handleNavigate,
-    handleSaveCharacter,
     handleSaveToBackend,
     handleScriptEnhancementLimitChange,
     handleTxtUpload,
@@ -1441,7 +1328,6 @@ export function useAudioDirectorController() {
     isEnhancing,
     isGenerating,
     isGeneratingJapaneseReading,
-    isGeneratingCharacter,
     isHydratingHistory,
     lastGenerationLatencyMs,
     activeBusyLabel,
@@ -1449,8 +1335,6 @@ export function useAudioDirectorController() {
     items,
     maleVoices,
     manuscriptText,
-    openCreateCharacterDialog,
-    openEditCharacterDialog,
     playingVoiceId,
     progressSummary,
     promptPreviewPayload,
@@ -1462,12 +1346,9 @@ export function useAudioDirectorController() {
     scriptEnhancementEnabled,
     selectedCharacter,
     selectedVoice,
-    setCharacterCreatorOpen,
-    setCharacterDraft,
     setCharacterPickerOpen,
     setConfigPreviewOpen,
     setCoreLanguage,
-    setDesignerPrompt,
     setDirectorNoteEditorOpen,
     setDirectorNotePrompt,
     setManuscriptText,
@@ -1477,6 +1358,5 @@ export function useAudioDirectorController() {
     txtInputRef,
     voicePickerOpen,
     setVoicePickerOpen,
-    closeCharacterCreator,
   };
 }

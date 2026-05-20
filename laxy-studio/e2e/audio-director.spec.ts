@@ -92,7 +92,11 @@ test.describe('Audio Director one-page workspace', () => {
     await expect(page.getByLabel('Play audio').first()).toBeVisible();
 
     await page.getByRole('button', { name: /Character/ }).click();
-    await expect(page.getByRole('dialog', { name: 'Select Character' })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Character Library' })).toBeVisible();
+    await expect(page.getByText('John')).toBeVisible();
+    await expect(page.getByText('Linda')).toBeVisible();
+    await expect(page.getByText('Alex')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'New Character' })).toHaveCount(0);
     await page.keyboard.press('Escape');
 
     await page.getByRole('button', { name: /Voice/ }).click();

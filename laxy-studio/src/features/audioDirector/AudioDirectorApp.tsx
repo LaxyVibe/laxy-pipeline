@@ -6,7 +6,6 @@ import { useEffect, useState } from 'react';
 import { useAudioDirectorController } from './useAudioDirectorController';
 import { audioDirectorStyles, audioDirectorTheme } from './theme';
 import AnalysisOverlay from './components/AnalysisOverlay';
-import CharacterEditorDialog from './components/dialogs/CharacterEditorDialog';
 import CharacterPickerDialog from './components/dialogs/CharacterPickerDialog';
 import ConfigPreviewDialog from './components/dialogs/ConfigPreviewDialog';
 import DirectorNoteDialog from './components/dialogs/DirectorNoteDialog';
@@ -269,9 +268,6 @@ export default function AudioDirectorApp() {
         <CharacterPickerDialog
           characters={controller.allCharacters}
           onClose={() => controller.setCharacterPickerOpen(false)}
-          onCreate={controller.openCreateCharacterDialog}
-          onDelete={controller.handleDeleteCharacter}
-          onEdit={controller.openEditCharacterDialog}
           onSelect={(characterId) => {
             controller.handleGlobalCharacterChange(characterId);
             controller.setCharacterPickerOpen(false);
@@ -311,19 +307,6 @@ export default function AudioDirectorApp() {
           onStyleChange={(value) => controller.handleDirectorNoteFieldChange('style', value)}
           open={controller.directorNoteEditorOpen}
           settings={controller.globalSettings}
-        />
-
-        <CharacterEditorDialog
-          characterDraft={controller.characterDraft}
-          designerPrompt={controller.designerPrompt}
-          editingCharacterId={controller.editingCharacterId}
-          isGeneratingCharacter={controller.isGeneratingCharacter}
-          onClose={controller.closeCharacterCreator}
-          onDesignerPromptChange={controller.setDesignerPrompt}
-          onDraftChange={controller.setCharacterDraft}
-          onGenerateDraft={controller.handleDraftCharacter}
-          onSave={controller.handleSaveCharacter}
-          open={controller.characterCreatorOpen}
         />
 
         <ConfigPreviewDialog

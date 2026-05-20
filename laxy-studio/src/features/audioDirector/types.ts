@@ -1,6 +1,5 @@
 import type {
   AudioGuideSettings,
-  AudioMvpCharacter,
   AudioPoiDraft,
   ScriptEnhancementValidation,
 } from '../audioMvp/model';
@@ -9,8 +8,6 @@ import type { LanguageAudio, LanguageSRT } from '../../types/entity';
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 export type ProgressStatus = 'idle' | 'preparing' | 'enhancing' | 'generating' | 'done' | 'error';
 export type WizardScreen = 'guide-settings' | 'script-polish' | 'audio-production';
-
-export type CharacterEditorDraft = Omit<AudioMvpCharacter, 'id' | 'source'>;
 
 export type EnhancementEntry = {
   sourceText: string;
@@ -44,7 +41,7 @@ export type AudioDirectorDraft = {
   scriptEnhancementEnabled: boolean;
   globalSettings: AudioGuideSettings;
   items: AudioPoiDraft[];
-  customCharacters: AudioMvpCharacter[];
+  customCharacters: unknown[];
   enhancementCache: Record<string, Record<string, EnhancementEntry>>;
   readingAssistCache: Record<string, Record<string, JapaneseReadingEntry>>;
   generationHistory: GenerationHistoryEntry[];

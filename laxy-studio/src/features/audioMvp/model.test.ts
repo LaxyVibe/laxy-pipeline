@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AUDIO_DIRECTOR_SAMPLE_CONTEXT,
   AUDIO_MVP_VOICES,
   PRESET_AUDIO_CHARACTERS,
   TTS_SCRIPT_FIDELITY_INSTRUCTION,
@@ -65,17 +64,19 @@ describe('resolveCompiledPrompt', () => {
     expect(prompt).toContain(TTS_SCRIPT_FIDELITY_INSTRUCTION);
   });
 
-  it('uses the fixed sample context instead of echoing the current script', () => {
+  it('uses the selected character output sentence as sample context instead of echoing the current script', () => {
     const settings = createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]);
+    const selectedCharacter = PRESET_AUDIO_CHARACTERS[0];
     const prompt = resolveCompiledPrompt({
       settings,
-      character: PRESET_AUDIO_CHARACTERS[0],
+      character: selectedCharacter,
       voice: AUDIO_MVP_VOICES[0],
       scriptText: 'きょうもよいてんきですね。',
     });
 
     expect(prompt).toContain('## SAMPLE CONTEXT');
-    expect(prompt).toContain(AUDIO_DIRECTOR_SAMPLE_CONTEXT);
+    expect(prompt).toContain(selectedCharacter.staticInstruction);
+    expect(prompt.split(selectedCharacter.staticInstruction)).toHaveLength(2);
     expect(prompt).not.toContain('きょうもよいてんきですね。');
   });
 });

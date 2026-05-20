@@ -12,7 +12,7 @@ import {
   type AudioPoiDraft,
   type ScriptEnhancementValidation,
 } from '../audioMvp/model';
-import type { AudioDirectorDraft, CharacterEditorDraft } from './types';
+import type { AudioDirectorDraft } from './types';
 
 export const AUDIO_DIRECTOR_DRAFT_STORAGE_KEY = 'audio-director-draft-v2';
 export const LEGACY_AUDIO_DIRECTOR_DRAFT_STORAGE_KEY = 'audio-director-draft-v1';
@@ -218,38 +218,6 @@ export function downloadJson(filename: string, payload: unknown) {
 
 export function downloadTextFile(filename: string, content: string, mimeType: string) {
   downloadBlob(filename, new Blob([content], { type: mimeType }));
-}
-
-export function createEmptyCharacterDraft(): CharacterEditorDraft {
-  return {
-    name: '',
-    role: '',
-    avatar: '🎙️',
-    genderIdentity: 'neutral',
-    coreTimbre: '',
-    personalityDNA: '',
-    linguisticFingerprint: '',
-    brandPersona: '',
-    accent: '',
-    staticInstruction: '',
-    recommendedVoiceId: AUDIO_MVP_VOICES[0]?.id,
-  };
-}
-
-export function toCharacterDraft(character: AudioMvpCharacter): CharacterEditorDraft {
-  return {
-    name: character.name,
-    role: character.role,
-    avatar: character.avatar,
-    genderIdentity: character.genderIdentity,
-    coreTimbre: character.coreTimbre,
-    personalityDNA: character.personalityDNA,
-    linguisticFingerprint: character.linguisticFingerprint,
-    brandPersona: character.brandPersona,
-    accent: character.accent,
-    staticInstruction: character.staticInstruction,
-    recommendedVoiceId: character.recommendedVoiceId,
-  };
 }
 
 export function buildGenerationStateKey(language: string, spotId: string): string {
