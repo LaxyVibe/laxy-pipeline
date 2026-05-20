@@ -16,13 +16,14 @@ describe('audio director history helpers', () => {
       target: {
         tenantId: 'tenant-a',
         guideId: 'guide-1',
+        guideTitle: 'National Museum Tour',
         spotId: 'spot-2',
         spotTitle: 'Main Hall',
         lang: 'ja',
         launchId: 'launch-1',
       },
       cacheBust: 123,
-    })).toBe('/audio-director?screen=audio-production&source=tts&guideId=guide-1&spotId=spot-2&lang=ja&tenantId=tenant-a&spotTitle=Main+Hall&launchId=launch-1&ts=123');
+    })).toBe('/audio-director?screen=audio-production&source=tts&guideId=guide-1&spotId=spot-2&lang=ja&tenantId=tenant-a&guideTitle=National+Museum+Tour&spotTitle=Main+Hall&launchId=launch-1&ts=123');
   });
 
   it('omits tenantId from launcher urls when no tenant claim is available', () => {
@@ -45,11 +46,12 @@ describe('audio director history helpers', () => {
 
   it('reads spot titles back from iframe query params', () => {
     expect(readAudioHistoryTarget(new URLSearchParams(
-      'guideId=guide-1&spotId=spot-2&lang=ja&spotTitle=Main+Hall&launchId=launch-1',
+      'guideId=guide-1&spotId=spot-2&lang=ja&guideTitle=National+Museum+Tour&spotTitle=Main+Hall&launchId=launch-1',
     ))).toEqual({
       guideId: 'guide-1',
       spotId: 'spot-2',
       lang: 'ja',
+      guideTitle: 'National Museum Tour',
       spotTitle: 'Main Hall',
       tenantId: undefined,
       launchId: 'launch-1',

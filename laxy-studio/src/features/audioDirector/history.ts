@@ -91,6 +91,9 @@ export function buildAudioDirectorHistoryUrl(args: {
   if (args.target.tenantId) {
     params.set('tenantId', args.target.tenantId);
   }
+  if (args.target.guideTitle) {
+    params.set('guideTitle', args.target.guideTitle);
+  }
   if (args.target.spotTitle) {
     params.set('spotTitle', args.target.spotTitle);
   }
@@ -108,6 +111,7 @@ export function readAudioHistoryTarget(searchParams: URLSearchParams): AudioHist
   const guideId = readString(searchParams.get('guideId'));
   const spotId = readString(searchParams.get('spotId'));
   const lang = readString(searchParams.get('lang'));
+  const guideTitle = readOptionalTitle(searchParams.get('guideTitle'));
   const spotTitle = readOptionalTitle(searchParams.get('spotTitle'));
   const launchId = readString(searchParams.get('launchId'));
   if (!guideId || !spotId || !lang) {
@@ -118,6 +122,7 @@ export function readAudioHistoryTarget(searchParams: URLSearchParams): AudioHist
     guideId,
     spotId,
     lang,
+    guideTitle: guideTitle || undefined,
     spotTitle: spotTitle || undefined,
     launchId: launchId || undefined,
   };

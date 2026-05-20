@@ -145,13 +145,14 @@ function normalizeAudioDirectorDraft(
   const value = raw as Partial<AudioDirectorDraft>;
   const defaultSettings = {
     contentVersion: 'standard',
-    characterId: PRESET_AUDIO_CHARACTERS[0].id,
-    voiceId: PRESET_AUDIO_CHARACTERS[0].recommendedVoiceId ?? AUDIO_MVP_VOICES[0].id,
+    characterId: '',
+    voiceId: AUDIO_MVP_VOICES[0].id,
     scriptEnhancementLimit: 'none',
     directorNote: {
       scene: '',
       style: '',
       pacing: '',
+      tone: '',
       compiledPromptOverride: '',
       isPromptCustomized: false,
     },

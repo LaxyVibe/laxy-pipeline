@@ -25,6 +25,7 @@ type Props = {
   compiledPrompt: string;
   characterAvatar: string;
   characterName: string;
+  characterSelected?: boolean;
   voiceId: string;
   voiceName: string;
   isGenerating: boolean;
@@ -51,6 +52,7 @@ export default function TtsScriptSection(props: Props) {
     compiledPrompt,
     characterAvatar,
     characterName,
+    characterSelected = true,
     voiceId,
     voiceName,
     isGenerating,
@@ -95,7 +97,7 @@ export default function TtsScriptSection(props: Props) {
       sx={{
         display: 'grid',
         gap: { xs: 1.5, md: 2 },
-        gridTemplateColumns: 'minmax(0, 0.9fr) minmax(0, 1.8fr) minmax(0, 1fr)',
+        gridTemplateColumns: 'minmax(0, 0.9fr) minmax(0, 1.55fr) minmax(0, 1.15fr)',
         alignItems: 'stretch',
         height: { xs: 'calc(100vh - 152px)', md: 'calc(100vh - 164px)' },
         minHeight: 0,
@@ -105,8 +107,63 @@ export default function TtsScriptSection(props: Props) {
         <CardContent sx={{ p: { xs: 2.25, md: 2.5 }, height: '100%' }}>
           <Stack spacing={1.75}>
             <Typography variant="overline" sx={{ color: 'text.secondary', letterSpacing: '0.14em' }}>
-              Character & Voice Actor
+              Voice Actor & Character
             </Typography>
+
+            <ButtonBase
+              onClick={() => {
+                void onPreviewVoice(voiceId);
+              }}
+              sx={{
+                width: '100%',
+                px: 1.25,
+                py: 1,
+                borderRadius: '14px',
+                bgcolor: 'rgba(255,255,255,0.96)',
+                border: '1px solid rgba(31, 92, 79, 0.10)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 0.75,
+                boxShadow: '0 8px 20px rgba(31, 43, 38, 0.08)',
+                textAlign: 'left',
+                opacity: characterSelected ? 1 : 0.72,
+              }}
+            >
+              <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
+                <PlayCircleOutlineIcon sx={{ fontSize: 18, color: 'text.secondary', flexShrink: 0 }} />
+                <Stack spacing={0.1} sx={{ minWidth: 0 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      minWidth: 0,
+                      fontWeight: 700,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {voiceName}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Voice actor
+                  </Typography>
+                </Stack>
+              </Stack>
+
+              <Tooltip title="Change voice">
+                <IconButton
+                  size="small"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenVoicePicker();
+                  }}
+                  aria-label="Change voice"
+                >
+                  <SwapHorizOutlinedIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </Tooltip>
+            </ButtonBase>
 
             <ButtonBase
               onClick={onOpenCharacterPicker}
@@ -147,121 +204,58 @@ export default function TtsScriptSection(props: Props) {
                 {characterName}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Voice actor
+                {characterSelected ? 'Character' : 'Choose a character to start'}
               </Typography>
             </Stack>
 
-            <ButtonBase
-              onClick={() => onPreviewVoice(voiceId)}
-              sx={{
-                width: '100%',
-                px: 1.25,
-                py: 1,
-                borderRadius: '14px',
-                bgcolor: 'rgba(255,255,255,0.96)',
-                border: '1px solid rgba(31, 92, 79, 0.10)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 0.75,
-                boxShadow: '0 8px 20px rgba(31, 43, 38, 0.08)',
-                textAlign: 'left',
-              }}
-            >
-              <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
-                <PlayCircleOutlineIcon sx={{ fontSize: 18, color: 'text.secondary', flexShrink: 0 }} />
-                <Typography
-                  variant="body2"
-                  sx={{
-                    minWidth: 0,
-                    fontWeight: 700,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {voiceName}
-                </Typography>
-              </Stack>
-
-              <Tooltip title="Change voice">
-                <IconButton
-                  size="small"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onOpenVoicePicker();
-                  }}
-                  aria-label="Change voice"
-                >
-                  <SwapHorizOutlinedIcon sx={{ fontSize: 18 }} />
-                </IconButton>
-              </Tooltip>
-            </ButtonBase>
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Card sx={{ ...audioDirectorStyles.sectionCard, height: '100%', minHeight: 0, overflow: 'hidden' }}>
-        <CardContent sx={{ p: { xs: 2.25, md: 2.5 }, height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <Stack spacing={1.25} sx={{ height: '100%', minHeight: 0 }}>
-            <Stack direction="row" spacing={1.25} alignItems="center">
+            <Stack spacing={0.75}>
+              <Typography variant="overline" sx={{ color: 'text.secondary', letterSpacing: '0.14em' }}>
+                Performance Hint
+              </Typography>
               <ButtonBase
                 onClick={onOpenDirectorNote}
                 sx={{
-                  position: 'relative',
-                  width: 56,
-                  height: 56,
+                  width: '100%',
+                  px: 1.25,
+                  py: 1.1,
                   borderRadius: '14px',
-                  display: 'grid',
-                  placeItems: 'center',
-                  bgcolor: 'rgba(31, 92, 79, 0.10)',
-                  boxShadow: '0 12px 28px rgba(31, 43, 38, 0.08)',
-                  flexShrink: 0,
+                  bgcolor: 'rgba(255,255,255,0.96)',
+                  border: '1px solid rgba(31, 92, 79, 0.10)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 0.75,
+                  boxShadow: '0 8px 20px rgba(31, 43, 38, 0.08)',
+                  textAlign: 'left',
                 }}
               >
-                <LocalMoviesOutlinedIcon sx={{ fontSize: 28 }} />
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    right: -4,
-                    bottom: -4,
-                    width: 22,
-                    height: 22,
-                    borderRadius: '999px',
-                    display: 'grid',
-                    placeItems: 'center',
-                    bgcolor: 'rgba(255,255,255,0.94)',
-                    border: '1px solid rgba(31, 92, 79, 0.12)',
-                    boxShadow: '0 6px 14px rgba(31, 43, 38, 0.10)',
-                  }}
-                >
-                  <EditOutlinedIcon sx={{ fontSize: 12, color: 'text.secondary' }} />
-                </Box>
+                <Stack direction="row" spacing={0.9} alignItems="center" sx={{ minWidth: 0 }}>
+                  <Box
+                    sx={{
+                      width: 38,
+                      height: 38,
+                      borderRadius: '12px',
+                      display: 'grid',
+                      placeItems: 'center',
+                      bgcolor: 'rgba(31, 92, 79, 0.10)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <LocalMoviesOutlinedIcon sx={{ fontSize: 20 }} />
+                  </Box>
+                  <Stack spacing={0.1} sx={{ minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                      Open Performance Hint
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Where, who, what, how
+                    </Typography>
+                  </Stack>
+                </Stack>
+
+                <EditOutlinedIcon sx={{ fontSize: 18, color: 'text.secondary', flexShrink: 0 }} />
               </ButtonBase>
-
-              <Stack spacing={0.25}>
-                <Typography variant="overline" sx={{ color: 'text.secondary', letterSpacing: '0.14em' }}>
-                  Director&apos;s Notes
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Scene, style, pacing
-                </Typography>
-              </Stack>
             </Stack>
-
-            <Box sx={{ height: editorHeight, minHeight: editorHeight, display: 'flex' }}>
-              <TextField
-                multiline
-                minRows={1}
-                fullWidth
-                value={compiledPrompt}
-                onChange={(event) => onChangeCompiledPrompt(event.target.value)}
-                sx={scrollingTextFieldSx}
-              />
-            </Box>
-            <Typography variant="caption" color="text.secondary">
-              Refine the final narration direction that will guide the generated performance.
-            </Typography>
           </Stack>
         </CardContent>
       </Card>
@@ -379,6 +373,30 @@ export default function TtsScriptSection(props: Props) {
                 </Stack>
               </Stack>
             </Box>
+          </Stack>
+        </CardContent>
+      </Card>
+
+      <Card sx={{ ...audioDirectorStyles.sectionCard, height: '100%', minHeight: 0, overflow: 'hidden' }}>
+        <CardContent sx={{ p: { xs: 2.25, md: 2.5 }, height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <Stack spacing={1.25} sx={{ height: '100%', minHeight: 0 }}>
+            <Typography variant="overline" sx={{ color: 'text.secondary', letterSpacing: '0.14em' }}>
+              TTS Prompt
+            </Typography>
+
+            <Box sx={{ height: editorHeight, minHeight: editorHeight, display: 'flex' }}>
+              <TextField
+                multiline
+                minRows={1}
+                fullWidth
+                value={compiledPrompt}
+                onChange={(event) => onChangeCompiledPrompt(event.target.value)}
+                sx={scrollingTextFieldSx}
+              />
+            </Box>
+            <Typography variant="caption" color="text.secondary">
+              Review the reflected prompt before generation.
+            </Typography>
           </Stack>
         </CardContent>
       </Card>

@@ -19,7 +19,6 @@ import {
   enhanceScript,
   generateAudioForLanguage,
   generateCharacter,
-  generateDirectorNote,
   generateJapaneseHiragana,
   type GenerateCharacterResponse,
 } from '../../api';
@@ -108,6 +107,42 @@ function isWizardScreen(value: string | null): value is WizardScreen {
   return value !== null && AUDIO_DIRECTOR_WIZARD_STEPS.includes(value as WizardScreen);
 }
 
+function resetPerformanceHint(settings: AudioGuideSettings): AudioGuideSettings {
+  return {
+    ...settings,
+    directorNote: createDefaultDirectorNote(settings.contentVersion),
+  };
+}
+
+function resetPerformanceHintForItems(items: AudioPoiDraft[]): AudioPoiDraft[] {
+  return items.map((item) => (
+    item.overrideSettings
+      ? {
+        ...item,
+        overrideSettings: resetPerformanceHint(item.overrideSettings),
+      }
+      : item
+  ));
+}
+
+function clearCharacterSelection(settings: AudioGuideSettings): AudioGuideSettings {
+  return {
+    ...settings,
+    characterId: '',
+  };
+}
+
+function clearCharacterSelectionForItems(items: AudioPoiDraft[]): AudioPoiDraft[] {
+  return items.map((item) => (
+    item.overrideSettings
+      ? {
+        ...item,
+        overrideSettings: clearCharacterSelection(item.overrideSettings),
+      }
+      : item
+  ));
+}
+
 export function useAudioDirectorController() {
   const [searchParams, setSearchParams] = useSearchParams();
   const txtInputRef = useRef<HTMLInputElement | null>(null);
@@ -133,6 +168,11 @@ export function useAudioDirectorController() {
     const normalized = typeof raw === 'string' ? raw.trim() : '';
     return normalized || undefined;
   }, [searchParams]);
+  const searchGuideTitle = useMemo(() => {
+    const raw = searchParams.get('guideTitle');
+    const normalized = typeof raw === 'string' ? raw.trim() : '';
+    return normalized || undefined;
+  }, [searchParams]);
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -140,8 +180,6 @@ export function useAudioDirectorController() {
   const [characterPickerOpen, setCharacterPickerOpen] = useState(false);
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
   const [directorNoteEditorOpen, setDirectorNoteEditorOpen] = useState(false);
-  const [directorNotePrompt, setDirectorNotePrompt] = useState('');
-  const [directorNoteGenerating, setDirectorNoteGenerating] = useState(false);
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [manuscriptText, setManuscriptText] = useState('');
@@ -149,7 +187,7 @@ export function useAudioDirectorController() {
   const [coreLanguage, setCoreLanguage] = useState('en');
   const [enhancementCache, setEnhancementCache] = useState<Record<string, Record<string, EnhancementEntry>>>({});
   const [readingAssistCache, setReadingAssistCache] = useState<Record<string, Record<string, JapaneseReadingEntry>>>({});
-  const defaultSettings = useMemo(() => createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]), []);
+  const defaultSettings = useMemo(() => createDefaultSettings(), []);
   const [globalSettings, setGlobalSettings] = useState<AudioGuideSettings>(defaultSettings);
   const [audioFiles, setAudioFiles] = useState<LanguageAudio[]>([]);
   const [srtFiles, setSrtFiles] = useState<LanguageSRT[]>([]);
@@ -195,6 +233,7 @@ export function useAudioDirectorController() {
   const [characterDesignerGenerating, setCharacterDesignerGenerating] = useState(false);
   const [editingCharacterId, setEditingCharacterId] = useState<string | null>(null);
   const [pendingDeleteCharacterId, setPendingDeleteCharacterId] = useState<string | null>(null);
+  const [hasExplicitVoiceSelection, setHasExplicitVoiceSelection] = useState(false);
 
   const allCharacters = useMemo(
     () => [...PRESET_AUDIO_CHARACTERS, ...customCharacters],
@@ -202,6 +241,8 @@ export function useAudioDirectorController() {
   );
   const effectiveTenantId = claimTenantId || embeddedHistoryTarget?.tenantId || searchTenantId;
   const effectiveGuideId = embeddedHistoryTarget?.guideId || searchGuideId;
+  const effectiveGuideTitle = embeddedHistoryTarget?.guideTitle || searchGuideTitle;
+  const effectiveSpotTitle = embeddedHistoryTarget?.spotTitle;
   const characterLibraryScope = useMemo(() => {
     if (effectiveTenantId) {
       return {
@@ -323,10 +364,18 @@ export function useAudioDirectorController() {
       return;
     }
 
+    const savedGlobalSettings = clearCharacterSelection(
+      resetPerformanceHint(saved.globalSettings ?? defaultSettings),
+    );
+    const savedItems = clearCharacterSelectionForItems(
+      resetPerformanceHintForItems(saved.items ?? []),
+    );
+
     if (launchedFromTts) {
       resetScriptBoundState();
       setManuscriptText('');
-      setGlobalSettings(saved.globalSettings ?? defaultSettings);
+      setGlobalSettings(savedGlobalSettings);
+      setHasExplicitVoiceSelection(false);
       setCustomCharacters(saved.customCharacters ?? []);
       setReadingAssistCache(saved.readingAssistCache ?? {});
       setItems([]);
@@ -336,12 +385,13 @@ export function useAudioDirectorController() {
     setManuscriptText(saved.manuscriptText ?? '');
     setSessionId(saved.sessionId ?? null);
     setCoreLanguage(saved.coreLanguage ?? 'en');
-    setGlobalSettings(saved.globalSettings ?? defaultSettings);
+    setGlobalSettings(savedGlobalSettings);
+    setHasExplicitVoiceSelection(false);
     setCustomCharacters(saved.customCharacters ?? []);
     setEnhancementCache(saved.enhancementCache ?? {});
     setReadingAssistCache(saved.readingAssistCache ?? {});
     setGenerationHistory(saved.generationHistory ?? []);
-    setItems(resolveScriptDraft(saved.manuscriptText ?? '', saved.items ?? []));
+    setItems(resolveScriptDraft(saved.manuscriptText ?? '', savedItems));
   }, [defaultSettings, launchedFromTts]);
 
   useEffect(() => {
@@ -396,35 +446,6 @@ export function useAudioDirectorController() {
   useEffect(() => {
     setItems((previous) => resolveScriptDraft(manuscriptText, previous));
   }, [manuscriptText]);
-
-  useEffect(() => {
-    if (tenantScopeLoading) return;
-    if (characterLibraryScope && !customCharactersHydrated) return;
-
-    const hasSelectedCharacter = allCharacters.some((character) => character.id === globalSettings.characterId);
-    if (hasSelectedCharacter) return;
-
-    const fallbackCharacter = PRESET_AUDIO_CHARACTERS[0];
-    const recommendation = recommendVoice({
-      character: fallbackCharacter,
-      manuscriptText,
-      contentVersion: globalSettings.contentVersion,
-    });
-    setGlobalSettings((previous) => ({
-      ...previous,
-      characterId: fallbackCharacter.id,
-      voiceId: recommendation.recommendedVoiceId,
-      directorNote: clearCompiledPromptCustomization(previous.directorNote),
-    }));
-  }, [
-    allCharacters,
-    customCharactersHydrated,
-    globalSettings.characterId,
-    globalSettings.contentVersion,
-    manuscriptText,
-    characterLibraryScope,
-    tenantScopeLoading,
-  ]);
 
   useEffect(() => {
     if (!embeddedHistoryTarget) return;
@@ -612,7 +633,7 @@ export function useAudioDirectorController() {
     item.overrideEnabled && item.overrideSettings ? item.overrideSettings : globalSettings
   );
 
-  const selectedCharacter = getCharacter(globalSettings.characterId) ?? PRESET_AUDIO_CHARACTERS[0];
+  const selectedCharacter = getCharacter(globalSettings.characterId) ?? null;
   const selectedVoice = getVoice(globalSettings.voiceId);
 
   useEffect(() => {
@@ -622,11 +643,17 @@ export function useAudioDirectorController() {
   }, [allCharacters, globalSettings.characterId]);
 
   const globalRecommendation = useMemo(
-    () => recommendVoice({
-      character: selectedCharacter,
-      manuscriptText,
-      contentVersion: globalSettings.contentVersion,
-    }),
+    () => (selectedCharacter
+      ? recommendVoice({
+        character: selectedCharacter,
+        manuscriptText,
+        contentVersion: globalSettings.contentVersion,
+      })
+      : {
+        recommendedVoiceId: '',
+        reason: 'Select a character to receive a voice recommendation.',
+        fallbackVoiceIds: [],
+      }),
     [globalSettings.contentVersion, manuscriptText, selectedCharacter],
   );
 
@@ -640,13 +667,17 @@ export function useAudioDirectorController() {
   );
 
   const globalCompiledPrompt = useMemo(
-    () => resolveCompiledPrompt({
-      settings: globalSettings,
-      character: selectedCharacter,
-      voice: selectedVoice,
-      scriptText: manuscriptText,
-    }),
-    [globalSettings, manuscriptText, selectedCharacter, selectedVoice],
+    () => (selectedCharacter
+      ? resolveCompiledPrompt({
+        settings: globalSettings,
+        character: selectedCharacter,
+        voice: selectedVoice,
+        scriptText: manuscriptText,
+        poiName: items[0]?.title || effectiveSpotTitle,
+        projectTitle: effectiveGuideTitle,
+      })
+      : ''),
+    [effectiveGuideTitle, effectiveSpotTitle, globalSettings, items, manuscriptText, selectedCharacter, selectedVoice],
   );
 
   const estimatedTokens = useMemo(() => {
@@ -675,23 +706,27 @@ export function useAudioDirectorController() {
       },
       items: items.map((item) => {
         const settings = item.overrideEnabled && item.overrideSettings ? item.overrideSettings : globalSettings;
-        const character = getCharacter(settings.characterId) ?? selectedCharacter;
+        const character = getCharacter(settings.characterId);
         const voice = getVoice(settings.voiceId);
         return {
           spotId: item.spotId,
           spotNumber: item.spotNumber,
-          title: '',
+          title: item.title,
           overrideEnabled: item.overrideEnabled,
           settings: {
             ...settings,
             directorNote: {
               ...settings.directorNote,
-              compiledPrompt: resolveCompiledPrompt({
-                settings,
-                character,
-                voice,
-                scriptText: item.scriptText,
-              }),
+              compiledPrompt: character
+                ? resolveCompiledPrompt({
+                  settings,
+                  character,
+                  voice,
+                  scriptText: item.scriptText,
+                  poiName: item.title || effectiveSpotTitle,
+                  projectTitle: effectiveGuideTitle,
+                })
+                : '',
             },
           },
           enhancement: Object.fromEntries(
@@ -708,6 +743,8 @@ export function useAudioDirectorController() {
       allCharacters,
       audioFiles,
       coreLanguage,
+      effectiveGuideTitle,
+      effectiveSpotTitle,
       enhancementCache,
       globalCompiledPrompt,
       globalSettings,
@@ -728,7 +765,7 @@ export function useAudioDirectorController() {
       scriptEnhancementEnabled,
       requests: items.map((item) => {
         const settings = item.overrideEnabled && item.overrideSettings ? item.overrideSettings : globalSettings;
-        const character = getCharacter(settings.characterId) ?? selectedCharacter;
+        const character = getCharacter(settings.characterId);
         const voice = getVoice(settings.voiceId);
         const sourceText = item.scriptText;
         const effectiveText = scriptEnhancementEnabled
@@ -739,24 +776,33 @@ export function useAudioDirectorController() {
           ? japaneseReadingEntry.hiraganaText
           : effectiveText;
         const preprocessing = preprocessScriptForLanguage(coreLanguage, ttsSourceText);
-        const directorPayload = buildDirectorPayload({
-          settings,
-          character,
-          voice,
-          scriptText: effectiveText,
-        });
-        const contents = directorPayload.compiledPrompt.trim()
-          ? `${directorPayload.compiledPrompt}\n\n#### TRANSCRIPT\n${preprocessing.processedText}`
-          : preprocessing.processedText;
+        const directorPayload = character
+          ? buildDirectorPayload({
+            settings,
+            character,
+            voice,
+            scriptText: effectiveText,
+            poiName: item.title || effectiveSpotTitle,
+            projectTitle: effectiveGuideTitle,
+          })
+          : {
+            scene: settings.directorNote.scene,
+            style: settings.directorNote.style,
+            pacing: settings.directorNote.pacing,
+            compiledPrompt: '',
+            contentVersion: settings.contentVersion,
+            scriptEnhancementLimit: settings.scriptEnhancementLimit,
+          };
+        const contents = directorPayload.compiledPrompt.trim() || preprocessing.processedText;
 
         return {
           spotId: item.spotId,
           spotNumber: item.spotNumber,
-          title: '',
+          title: item.title,
           character: {
-            id: character.id,
-            name: character.name,
-            role: character.role,
+            id: character?.id ?? '',
+            name: character?.name ?? '',
+            role: character?.role ?? '',
           },
           voice: {
             id: voice.id,
@@ -801,6 +847,8 @@ export function useAudioDirectorController() {
     }),
     [
       coreLanguage,
+      effectiveGuideTitle,
+      effectiveSpotTitle,
       enhancementCache,
       globalSettings,
       items,
@@ -867,7 +915,15 @@ export function useAudioDirectorController() {
   };
 
   const handleGlobalCharacterChange = (characterId: string) => {
-    const character = getCharacter(characterId) ?? PRESET_AUDIO_CHARACTERS[0];
+    const character = getCharacter(characterId);
+    if (!character) {
+      setGlobalSettings((previous) => ({
+        ...previous,
+        characterId: '',
+        directorNote: clearCompiledPromptCustomization(previous.directorNote),
+      }));
+      return;
+    }
     const recommendation = recommendVoice({
       character,
       manuscriptText,
@@ -877,7 +933,9 @@ export function useAudioDirectorController() {
     setGlobalSettings((previous) => ({
       ...previous,
       characterId,
-      voiceId: recommendation.recommendedVoiceId,
+      voiceId: hasExplicitVoiceSelection && previous.voiceId
+        ? previous.voiceId
+        : recommendation.recommendedVoiceId,
       directorNote: clearCompiledPromptCustomization(previous.directorNote),
     }));
   };
@@ -1037,7 +1095,7 @@ export function useAudioDirectorController() {
       }
       setCustomCharacters((previous) => previous.filter((item) => item.id !== character.id));
       if (globalSettings.characterId === character.id) {
-        handleGlobalCharacterChange(PRESET_AUDIO_CHARACTERS[0].id);
+        handleGlobalCharacterChange('');
       }
       if (editingCharacterId === character.id) {
         setCharacterDesignerOpen(false);
@@ -1061,6 +1119,7 @@ export function useAudioDirectorController() {
   ]);
 
   const handleGlobalVoiceChange = (voiceId: string) => {
+    setHasExplicitVoiceSelection(true);
     setGlobalSettings((previous) => ({
       ...previous,
       voiceId,
@@ -1083,11 +1142,11 @@ export function useAudioDirectorController() {
     }));
   };
 
-  const handleDirectorNoteFieldChange = (field: 'scene' | 'style' | 'pacing', value: string) => {
+  const handleDirectorNoteFieldChange = (field: 'scene' | 'style' | 'pacing' | 'tone', value: string) => {
     setGlobalSettings((previous) => ({
       ...previous,
       directorNote: {
-        ...previous.directorNote,
+        ...clearCompiledPromptCustomization(previous.directorNote),
         [field]: value,
       },
     }));
@@ -1102,36 +1161,6 @@ export function useAudioDirectorController() {
         isPromptCustomized: true,
       },
     }));
-  };
-
-  const handleGenerateDirectorNote = async () => {
-    const scriptContent = items.map((item) => item.scriptText).filter(Boolean).join('\n\n');
-    if (!scriptContent.trim()) return;
-    const busyOperationId = beginBusyOperation('Generating director note…');
-    setDirectorNoteGenerating(true);
-    try {
-      const result = await generateDirectorNote({
-        scriptContent,
-        characterName: selectedCharacter.name,
-        characterRole: selectedCharacter.role,
-        contentVersion: globalSettings.contentVersion,
-        context: directorNotePrompt.trim() || undefined,
-      });
-      setGlobalSettings((previous) => ({
-        ...previous,
-        directorNote: {
-          ...previous.directorNote,
-          scene: result.directorNote.scene || previous.directorNote.scene,
-          style: result.directorNote.style || previous.directorNote.style,
-          pacing: result.directorNote.pacing || previous.directorNote.pacing,
-        },
-      }));
-    } catch (error) {
-      console.error('Director note generation failed:', error);
-    } finally {
-      setDirectorNoteGenerating(false);
-      endBusyOperation(busyOperationId);
-    }
   };
 
   const persistSessionSnapshot = async () => {
@@ -1211,6 +1240,12 @@ export function useAudioDirectorController() {
     );
     setIsEnhancing(true);
     try {
+      if (!selectedCharacter) {
+        setGenerationError('Select a character before polishing the script.');
+        setCharacterPickerOpen(true);
+        return existingLanguageCache;
+      }
+
       for (const item of targetItems) {
         updateBusyOperation(
           busyOperationId,
@@ -1218,6 +1253,9 @@ export function useAudioDirectorController() {
         );
         const settings = getItemSettings(item);
         const character = getCharacter(settings.characterId) ?? selectedCharacter;
+        if (!character) {
+          throw new Error('Select a character before polishing the script.');
+        }
         const sourceText = item.scriptText;
         const existing = existingLanguageCache[item.spotId];
         if (!forceRegenerate && existing && existing.sourceText === sourceText) {
@@ -1388,6 +1426,11 @@ export function useAudioDirectorController() {
       setGenerationError('Add guide text first to prepare audio.');
       return;
     }
+    if (!selectedCharacter) {
+      setGenerationError('Select a character before generating audio.');
+      setCharacterPickerOpen(true);
+      return;
+    }
 
     const language = coreLanguage;
     setGenerationError(null);
@@ -1424,6 +1467,9 @@ export function useAudioDirectorController() {
         const settings = getItemSettings(item);
         const character = getCharacter(settings.characterId) ?? selectedCharacter;
         const voice = getVoice(settings.voiceId);
+        if (!character) {
+          throw new Error('Select a character before generating audio.');
+        }
         const stateKey = buildGenerationStateKey(language, item.spotId);
         const generationTarget = embeddedHistoryTarget && embeddedHistoryTarget.lang === language
           ? embeddedHistoryTarget
@@ -1489,6 +1535,8 @@ export function useAudioDirectorController() {
             character,
             voice,
             scriptText: effectiveText,
+            poiName: requestTitle,
+            projectTitle: effectiveGuideTitle,
           }),
         });
 
@@ -1657,8 +1705,6 @@ export function useAudioDirectorController() {
     currentScriptText,
     detectedLangLabel,
     directorNoteEditorOpen,
-    directorNoteGenerating,
-    directorNotePrompt,
     estimatedTokens,
     femaleVoices,
     generationError,
@@ -1679,7 +1725,6 @@ export function useAudioDirectorController() {
     handleGenerateCharacterProfile,
     handleGenerateJapaneseReading,
     handlePhoneticOverridesChange,
-    handleGenerateDirectorNote,
     handleGlobalCharacterChange,
     handleGlobalContentVersionChange,
     handleGlobalVoiceChange,
@@ -1722,7 +1767,6 @@ export function useAudioDirectorController() {
     setConfigPreviewOpen,
     setCoreLanguage,
     setDirectorNoteEditorOpen,
-    setDirectorNotePrompt,
     setManuscriptText,
     srtFiles,
     summaryPayload,

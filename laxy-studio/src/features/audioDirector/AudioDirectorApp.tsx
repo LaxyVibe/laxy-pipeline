@@ -12,6 +12,7 @@ import ConfigPreviewDialog from './components/dialogs/ConfigPreviewDialog';
 import DirectorNoteDialog from './components/dialogs/DirectorNoteDialog';
 import VoicePickerDialog from './components/dialogs/VoicePickerDialog';
 import DeployVersionFooter from '../../components/DeployVersionFooter';
+import AudioDirectorHero from './components/AudioDirectorHero';
 import GenerationHistoryRail from './components/panels/GenerationHistoryRail';
 import ScriptPolishSection from './components/panels/ScriptPolishSection';
 import TtsScriptSection from './components/panels/TtsScriptSection';
@@ -70,8 +71,13 @@ export default function AudioDirectorApp() {
   const launchSearchParams = new URLSearchParams(window.location.search);
   const launchId = launchSearchParams.get('launchId')?.trim() || undefined;
   const launchedFromTts = launchSearchParams.get('source') === 'tts' && Boolean(launcherWindow);
+  const launchGuideTitle = launchSearchParams.get('guideTitle')?.trim() || '';
   const launchSpotTitle = launchSearchParams.get('spotTitle')?.trim() || launchSearchParams.get('spotId')?.trim() || '';
   const launchLang = launchSearchParams.get('lang')?.trim() || '';
+  const headerTitle = launchGuideTitle && launchSpotTitle
+    ? `${launchGuideTitle} · ${launchSpotTitle}`
+    : launchGuideTitle || launchSpotTitle || 'Audio Director';
+  const headerSubtitle = launchLang ? `${langLabel(launchLang)} narration workspace` : 'Narration workspace';
 
   useEffect(() => {
     if (controller.resultDialogRequestAt) {
@@ -81,12 +87,12 @@ export default function AudioDirectorApp() {
 
   useEffect(() => {
     const titlePrefix = hasUnreadGeneratedResult ? '🔔 ' : '';
-    if (!launchSpotTitle || !launchLang) {
+    if ((!launchGuideTitle && !launchSpotTitle) || !launchLang) {
       document.title = `${titlePrefix}Audio Director`;
       return;
     }
-    document.title = `${titlePrefix}${launchSpotTitle} · ${langLabel(launchLang)} · Audio Director`;
-  }, [hasUnreadGeneratedResult, launchLang, launchSpotTitle]);
+    document.title = `${titlePrefix}${headerTitle} · ${langLabel(launchLang)} · Audio Director`;
+  }, [hasUnreadGeneratedResult, headerTitle, launchGuideTitle, launchLang, launchSpotTitle]);
 
   useEffect(() => {
     if (!controller.generationCompletedAt) return;
@@ -150,16 +156,21 @@ export default function AudioDirectorApp() {
       <Box sx={audioDirectorStyles.page}>
         <Container maxWidth="xl" sx={{ pb: 4 }}>
           <Stack spacing={2} sx={{ minWidth: 0 }}>
+            <AudioDirectorHero
+              title={headerTitle}
+              subtitle={headerSubtitle}
+            />
             <TtsScriptSection
               scriptText={controller.currentScriptText}
               compiledPrompt={controller.globalCompiledPrompt}
-              characterAvatar={controller.selectedCharacter.avatar}
-              characterName={controller.selectedCharacter.name}
+              characterAvatar={controller.selectedCharacter?.avatar ?? '＋'}
+              characterName={controller.selectedCharacter?.name ?? 'Select a character'}
+              characterSelected={Boolean(controller.selectedCharacter)}
               voiceId={controller.selectedVoice.id}
               voiceName={controller.selectedVoice.name}
               isGenerating={controller.isGenerating}
               isGeneratingJapaneseReading={controller.isGeneratingJapaneseReading}
-              generateDisabled={controller.currentScriptText.trim().length === 0}
+              generateDisabled={!controller.selectedCharacter || controller.currentScriptText.trim().length === 0}
               japaneseReadingStale={controller.currentJapaneseReadingStale}
               japaneseReadingText={controller.currentJapaneseReadingText}
               onChangeScript={controller.handleCurrentScriptTextChange}
@@ -316,19 +327,11 @@ export default function AudioDirectorApp() {
         />
 
         <DirectorNoteDialog
-          compiledPrompt={controller.globalCompiledPrompt}
-          directorNotePrompt={controller.directorNotePrompt}
-          hasScript={controller.items.some((item) => item.scriptText.trim())}
-          isGenerating={controller.directorNoteGenerating}
           onClose={() => controller.setDirectorNoteEditorOpen(false)}
-          onCompiledPromptChange={controller.handleCompiledPromptChange}
-          onContentVersionChange={controller.handleGlobalContentVersionChange}
-          onDirectorNotePromptChange={controller.setDirectorNotePrompt}
-          onGenerate={controller.handleGenerateDirectorNote}
-          onPacingChange={(value) => controller.handleDirectorNoteFieldChange('pacing', value)}
-          onSceneChange={(value) => controller.handleDirectorNoteFieldChange('scene', value)}
-          onScriptEnhancementLimitChange={controller.handleScriptEnhancementLimitChange}
-          onStyleChange={(value) => controller.handleDirectorNoteFieldChange('style', value)}
+          onEnvironmentChange={(value) => controller.handleDirectorNoteFieldChange('scene', value)}
+          onGoalChange={(value) => controller.handleDirectorNoteFieldChange('pacing', value)}
+          onTargetAudienceChange={(value) => controller.handleDirectorNoteFieldChange('style', value)}
+          onToneChange={(value) => controller.handleDirectorNoteFieldChange('tone', value)}
           open={controller.directorNoteEditorOpen}
           settings={controller.globalSettings}
         />

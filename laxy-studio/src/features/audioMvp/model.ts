@@ -43,6 +43,7 @@ export interface DirectorNoteDraft {
   scene: string;
   style: string;
   pacing: string;
+  tone: string;
   compiledPromptOverride: string;
   isPromptCustomized: boolean;
 }
@@ -289,12 +290,13 @@ export function buildExcerpt(text: string): string {
 }
 
 export function createDefaultDirectorNote(
-  contentVersion: ContentVersion,
+  _contentVersion: ContentVersion,
 ): DirectorNoteDraft {
   return {
-    scene: defaultScene(),
-    style: defaultStyle(contentVersion),
-    pacing: defaultPacingForContentVersion(contentVersion),
+    scene: '',
+    style: '',
+    pacing: '',
+    tone: '',
     compiledPromptOverride: '',
     isPromptCustomized: false,
   };
@@ -310,11 +312,11 @@ export function clearCompiledPromptCustomization(
   };
 }
 
-export function createDefaultSettings(character: AudioMvpCharacter): AudioGuideSettings {
-  const fallbackVoiceId = character.recommendedVoiceId ?? AUDIO_MVP_VOICES[0].id;
+export function createDefaultSettings(character?: AudioMvpCharacter): AudioGuideSettings {
+  const fallbackVoiceId = character?.recommendedVoiceId ?? AUDIO_MVP_VOICES[0].id;
   return {
     contentVersion: 'standard',
-    characterId: character.id,
+    characterId: character?.id ?? '',
     voiceId: fallbackVoiceId,
     scriptEnhancementLimit: 'none',
     directorNote: createDefaultDirectorNote('standard'),
@@ -374,6 +376,11 @@ export function normalizeDirectorNoteDraft(
       ?? stringValue(value.missionOfSpeech)
       ?? fallback.style,
     pacing: stringValue(value.pacing) ?? stringValue(value.pacingAndEnergy) ?? fallback.pacing,
+    tone: stringValue(value.tone)
+      ?? stringValue(value.how)
+      ?? stringValue(value.manner)
+      ?? stringValue(value.accent)
+      ?? fallback.tone,
     compiledPromptOverride,
     isPromptCustomized: value.isPromptCustomized === true || Boolean(compiledPromptOverride.trim()),
   };
@@ -473,31 +480,6 @@ export function normalizeAudioPoiDraft(
     overrideEnabled,
     overrideSettings,
   };
-}
-
-function defaultScene(): string {
-  return 'A guided tour setting where the voice feels present, welcoming, and confidently paced.';
-}
-
-function defaultStyle(
-  contentVersion: ContentVersion,
-): string {
-  const versionGoal = contentVersion === 'kid'
-    ? 'make the story easy for younger listeners to follow'
-    : contentVersion === 'long'
-      ? 'give the listener more room to absorb detail and atmosphere'
-      : 'guide the listener through the key points with clarity';
-  return `${versionGoal.charAt(0).toUpperCase()}${versionGoal.slice(1)} without sounding promotional or meta.`;
-}
-
-function defaultPacingForContentVersion(contentVersion: ContentVersion): string {
-  if (contentVersion === 'long') {
-    return 'Measured and spacious, with clear emphasis on names, dates, and visual details.';
-  }
-  if (contentVersion === 'kid') {
-    return 'Warm and lightly animated, with shorter thought units and reassuring pauses.';
-  }
-  return 'Steady and clean, with short pauses after key information.';
 }
 
 export function resolvePoiDrafts(
@@ -692,40 +674,40 @@ export function resolveCompiledPrompt(args: {
   character: AudioMvpCharacter;
   voice: AudioMvpVoice;
   scriptText: string;
+  poiName?: string;
+  projectTitle?: string;
 }): string {
-  const { settings, character, voice } = args;
+  const { settings, character, scriptText, poiName, projectTitle } = args;
   const { directorNote } = settings;
   const sampleContext = character.staticInstruction.trim() || AUDIO_DIRECTOR_SAMPLE_CONTEXT;
   if (directorNote.isPromptCustomized && directorNote.compiledPromptOverride.trim()) {
     return directorNote.compiledPromptOverride.trim();
   }
 
+  const resolvedPoiName = poiName?.trim() || 'POI Name';
+  const resolvedProjectTitle = projectTitle?.trim() || 'Project Title';
+  const placeholderScene = [
+    'Placeholder 1 (dummy):',
+    `Environment: ${directorNote.scene.trim() || 'unspecified'}.`,
+    `Target audience: ${directorNote.style.trim() || 'unspecified'}.`,
+    `Expectation/goal: ${directorNote.pacing.trim() || 'unspecified'}.`,
+  ].join(' ');
+  const placeholderDirection = [
+    'Placeholder 2 (dummy):',
+    `Tone/Accent/Manner: ${directorNote.tone.trim() || 'unspecified'}.`,
+  ].join(' ');
+
   return [
-    `Character: ${character.name} (${character.role}).`,
-    `Preferred voice model: ${voice.id}. Voice quality: ${voice.summary}.`,
-    '',
-    '## AUDIO PROFILE',
-    `Core timbre: ${character.coreTimbre}`,
-    `Personality DNA: ${character.personalityDNA}`,
-    `Linguistic fingerprint: ${character.linguisticFingerprint}`,
-    `Brand persona: ${character.brandPersona}`,
-    character.accent ? `Accent: ${character.accent}` : '',
-    '',
-    '## THE SCENE',
-    directorNote.scene,
-    '',
-    "## DIRECTOR'S NOTES",
-    `Style: ${directorNote.style}`,
-    `Pacing: ${directorNote.pacing}`,
-    contentVersionInstruction(settings.contentVersion),
-    scriptEnhancementInstruction(settings.scriptEnhancementLimit),
-    '',
-    '## SAMPLE CONTEXT',
+    `# AUDIO PROFILE: ${character.name}`,
+    `## "[${character.role}/${resolvedPoiName}]"`,
+    `## THE SCENE: ${resolvedProjectTitle}`,
+    placeholderScene,
+    "### DIRECTOR'S NOTES",
+    placeholderDirection,
+    '### SAMPLE CONTEXT',
     sampleContext,
-    '',
-    TTS_SCRIPT_FIDELITY_INSTRUCTION,
-    '',
-    'Stay in character, avoid meta commentary, and produce a natural ready-to-speak delivery.',
+    '#### TRANSCRIPT',
+    scriptText.trim(),
   ].filter(Boolean).join('\n');
 }
 
@@ -888,6 +870,8 @@ export function buildDirectorPayload(args: {
   character: AudioMvpCharacter;
   voice: AudioMvpVoice;
   scriptText: string;
+  poiName?: string;
+  projectTitle?: string;
 }): {
   scene: string;
   style: string;
@@ -896,12 +880,12 @@ export function buildDirectorPayload(args: {
   contentVersion: ContentVersion;
   scriptEnhancementLimit: ScriptEnhancementLimit;
 } {
-  const { settings, character, voice, scriptText } = args;
+  const { settings, character, voice, scriptText, poiName, projectTitle } = args;
   return {
     scene: settings.directorNote.scene,
     style: settings.directorNote.style,
     pacing: settings.directorNote.pacing,
-    compiledPrompt: resolveCompiledPrompt({ settings, character, voice, scriptText }),
+    compiledPrompt: resolveCompiledPrompt({ settings, character, voice, scriptText, poiName, projectTitle }),
     contentVersion: settings.contentVersion,
     scriptEnhancementLimit: settings.scriptEnhancementLimit,
   };

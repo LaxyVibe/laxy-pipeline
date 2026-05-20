@@ -48,7 +48,7 @@ type Props = {
   onOpenAdvancedEditor: () => void;
   onContentVersionChange: (contentVersion: ContentVersion) => void;
   onScriptEnhancementLimitChange: (limit: ScriptEnhancementLimit) => void;
-  onDirectorNoteFieldChange: (field: 'scene' | 'style' | 'pacing', value: string) => void;
+  onDirectorNoteFieldChange: (field: 'scene' | 'style' | 'pacing' | 'tone', value: string) => void;
 };
 
 export default function DirectorNoteSection(props: Props) {
