@@ -1107,15 +1107,27 @@ class PipelineExecutor:
 
     async def generate_character(
         self,
-        designer_prompt: str,
+        *,
+        name: str,
+        gender: str,
+        role: str,
+        context: str,
     ) -> dict[str, Any]:
-        """Generate a full character profile from a free-text designer prompt."""
+        """Generate a full character profile from structured Character Designer input."""
         prompt_text = load_prompt("generate_character")
         model = MODELS["flash"]
         temperature = TEMPERATURES.get("generate_character", 0.8)
 
+        normalized_name = name.strip()
+        normalized_gender = gender.strip()
+        normalized_role = role.strip()
+        normalized_context = context.strip()
         user_message = (
-            f"Character concept:\n{designer_prompt}\n\n"
+            "Admin input:\n"
+            f"Name: {normalized_name}\n"
+            f"Gender: {normalized_gender}\n"
+            f"Role: {normalized_role}\n"
+            f"Context: {normalized_context}\n\n"
             "Generate the character profile as a single JSON object."
         )
 
@@ -1145,9 +1157,9 @@ class PipelineExecutor:
         character = _json.loads(raw)
 
         required_fields = [
-            "name", "role", "avatar", "genderIdentity",
+            "name", "gender", "role", "context", "avatar", "genderIdentity",
             "coreTimbre", "personalityDNA", "linguisticFingerprint",
-            "brandPersona", "staticInstruction",
+            "brandPersona", "staticInstruction", "audioProfileMarkdown",
         ]
         for field in required_fields:
             if field not in character or not character[field]:
@@ -1158,6 +1170,12 @@ class PipelineExecutor:
 
         if "accent" not in character:
             character["accent"] = ""
+
+        character["name"] = str(character["name"]).strip() or normalized_name
+        character["gender"] = str(character["gender"]).strip() or normalized_gender
+        character["role"] = str(character["role"]).strip() or normalized_role
+        character["context"] = str(character["context"]).strip() or normalized_context
+        character["audioProfileMarkdown"] = str(character["audioProfileMarkdown"]).strip()
 
         return {"success": True, "character": character}
 

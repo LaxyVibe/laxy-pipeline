@@ -535,6 +535,79 @@ describe('generateJapaneseHiragana', () => {
   });
 });
 
+describe('generateCharacter', () => {
+  it('calls generate-character with structured character designer fields', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        character: {
+          name: 'John',
+          gender: 'Male',
+          role: 'Museum Manager',
+          context: 'A knowledgeable person who has a formal and confident tone.',
+          avatar: '🏛️',
+          genderIdentity: 'masculine',
+          coreTimbre: 'Deep and resonant.',
+          personalityDNA: 'Formal and confident.',
+          linguisticFingerprint: 'Measured and respectful.',
+          brandPersona: 'Quietly authoritative.',
+          accent: '',
+          staticInstruction: 'You are John, a male Museum Manager with a deep, resonant voice.',
+          audioProfileMarkdown: '# AUDIO PROFILE: John\n## ROLE: Museum Manager\n### SAMPLE CONTEXT:\nYou are John, a male Museum Manager with a deep, resonant voice.',
+        },
+      }),
+    });
+
+    const { generateCharacter } = await import('./api');
+    const result = await generateCharacter({
+      name: 'John',
+      gender: 'Male',
+      role: 'Museum Manager',
+      context: 'A knowledgeable person who has a formal and confident tone.',
+    });
+
+    const calledUrl = String((global.fetch as any).mock.calls[0][0]);
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(calledUrl).toMatch(/\/pipeline\/generate-character|generate-character-/);
+    expect(body).toEqual({
+      name: 'John',
+      gender: 'Male',
+      role: 'Museum Manager',
+      context: 'A knowledgeable person who has a formal and confident tone.',
+    });
+    expect(result.character.audioProfileMarkdown).toContain('### SAMPLE CONTEXT:');
+  });
+
+  it('rejects invalid character response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        character: {
+          role: 'Museum Manager',
+        },
+      }),
+    });
+
+    const { generateCharacter } = await import('./api');
+    await expect(
+      generateCharacter({
+        name: 'John',
+        gender: 'Male',
+        role: 'Museum Manager',
+        context: 'A knowledgeable person who has a formal and confident tone.',
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SHAPE',
+    });
+  });
+});
+
 describe('enhanceScript', () => {
   it('passes cue density through to the enhancement endpoint', async () => {
     global.fetch = vi.fn().mockResolvedValue({

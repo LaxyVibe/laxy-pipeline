@@ -72,6 +72,10 @@ service cloud.firestore {
         || (isClientAdmin() && sameTenant(tenantId));
     }
 
+    match /tenants/{tenantId}/audioCharacters/{characterId} {
+      allow read, create, update, delete: if isSuperAdmin() || sameTenant(tenantId);
+    }
+
     // Legacy top-level users collection for self-profile reads
     match /users/{userId} {
       allow read: if isSuperAdmin() || (isSignedIn() && request.auth.uid == userId);

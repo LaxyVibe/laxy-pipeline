@@ -1,5 +1,6 @@
 import type {
   AudioGuideSettings,
+  AudioMvpCharacter,
   AudioPoiDraft,
   ScriptEnhancementValidation,
 } from '../audioMvp/model';
@@ -41,7 +42,7 @@ export type AudioDirectorDraft = {
   scriptEnhancementEnabled: boolean;
   globalSettings: AudioGuideSettings;
   items: AudioPoiDraft[];
-  customCharacters: unknown[];
+  customCharacters: AudioMvpCharacter[];
   enhancementCache: Record<string, Record<string, EnhancementEntry>>;
   readingAssistCache: Record<string, Record<string, JapaneseReadingEntry>>;
   generationHistory: GenerationHistoryEntry[];

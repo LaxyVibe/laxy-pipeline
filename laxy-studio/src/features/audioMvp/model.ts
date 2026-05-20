@@ -20,15 +20,23 @@ export interface AudioMvpCharacter {
   name: string;
   role: string;
   avatar: string;
+  gender?: string;
   genderIdentity: CharacterGenderIdentity;
+  context?: string;
   coreTimbre: string;
   personalityDNA: string;
   linguisticFingerprint: string;
   brandPersona: string;
   accent: string;
   staticInstruction: string;
+  audioProfileMarkdown?: string;
   recommendedVoiceId?: string;
   source: 'preset' | 'custom';
+  tenantId?: string;
+  guideId?: string;
+  createdBy?: string;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface DirectorNoteDraft {
@@ -207,7 +215,9 @@ export const PRESET_AUDIO_CHARACTERS: AudioMvpCharacter[] = [
     name: 'John',
     role: 'Museum Manager',
     avatar: '🏛️',
+    gender: 'Male',
     genderIdentity: 'masculine',
+    context: 'A knowledgeable person who has a formal and confident tone.',
     coreTimbre: 'A deep, resonant, and clear vocal timbre with composed projection.',
     personalityDNA: 'A knowledgeable museum manager with a formal and confident tone.',
     linguisticFingerprint: 'Measured, respectful pacing that delivers cultural detail with poise and precision.',
@@ -222,7 +232,9 @@ export const PRESET_AUDIO_CHARACTERS: AudioMvpCharacter[] = [
     name: 'Linda',
     role: 'Kid Story Teller',
     avatar: '📚',
+    gender: 'Female',
     genderIdentity: 'feminine',
+    context: 'A warm mom-like storyteller who naturally handles kids and young audiences.',
     coreTimbre: 'A naturally bright, high-pitched, and velvety timbre with a built-in vocal smile.',
     personalityDNA: 'A warm mom-like storyteller who naturally handles kids and young audiences.',
     linguisticFingerprint: 'Gentle, melodic cadence with inviting, playful delivery that keeps young imaginations engaged.',
@@ -237,7 +249,9 @@ export const PRESET_AUDIO_CHARACTERS: AudioMvpCharacter[] = [
     name: 'Alex',
     role: 'Local Tour Guide',
     avatar: '🗺️',
+    gender: 'Male',
     genderIdentity: 'masculine',
+    context: 'Energetic local guide who feels satisfied when telling the story of his own town.',
     coreTimbre: 'A crisp, forward-projecting, and highly energetic timbre.',
     personalityDNA: 'Energetic local guide who feels satisfied when telling the story of his own town.',
     linguisticFingerprint: 'Conversational, welcoming phrasing with a spirited, upbeat cadence that attracts listeners.',
@@ -315,6 +329,21 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+function timestampMillis(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'object' && value !== null) {
+    const candidate = value as { toMillis?: () => number; seconds?: number; nanoseconds?: number };
+    if (typeof candidate.toMillis === 'function') {
+      const millis = candidate.toMillis();
+      return Number.isFinite(millis) ? millis : undefined;
+    }
+    if (typeof candidate.seconds === 'number') {
+      return (candidate.seconds * 1000) + Math.floor((candidate.nanoseconds ?? 0) / 1_000_000);
+    }
+  }
+  return undefined;
+}
+
 function isContentVersion(value: unknown): value is ContentVersion {
   return value === 'standard' || value === 'long' || value === 'kid';
 }
@@ -383,16 +412,42 @@ export function normalizeAudioMvpCharacter(value: unknown): AudioMvpCharacter | 
     name,
     role,
     avatar: stringValue(value.avatar) ?? '🎙️',
+    gender: stringValue(value.gender),
     genderIdentity: isCharacterGenderIdentity(value.genderIdentity) ? value.genderIdentity : 'neutral',
+    context: stringValue(value.context),
     coreTimbre: stringValue(value.coreTimbre) ?? '',
     personalityDNA: stringValue(value.personalityDNA) ?? '',
     linguisticFingerprint: stringValue(value.linguisticFingerprint) ?? '',
     brandPersona: stringValue(value.brandPersona) ?? '',
     accent: stringValue(value.accent) ?? '',
     staticInstruction,
+    audioProfileMarkdown: stringValue(value.audioProfileMarkdown) ?? buildCharacterAudioProfileMarkdown({
+      name,
+      role,
+      staticInstruction,
+    }),
     recommendedVoiceId: stringValue(value.recommendedVoiceId),
     source: value.source === 'preset' ? 'preset' : 'custom',
+    tenantId: stringValue(value.tenantId),
+    guideId: stringValue(value.guideId),
+    createdBy: stringValue(value.createdBy),
+    createdAt: timestampMillis(value.createdAt),
+    updatedAt: timestampMillis(value.updatedAt),
   };
+}
+
+export function buildCharacterAudioProfileMarkdown(args: {
+  name: string;
+  role: string;
+  staticInstruction: string;
+}): string {
+  const { name, role, staticInstruction } = args;
+  return [
+    `# AUDIO PROFILE: ${name}`,
+    `## ROLE: ${role}`,
+    '### SAMPLE CONTEXT:',
+    staticInstruction.trim(),
+  ].join('\n');
 }
 
 export function normalizeAudioPoiDraft(

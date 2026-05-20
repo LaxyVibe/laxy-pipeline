@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { useAudioDirectorController } from './useAudioDirectorController';
 import { audioDirectorStyles, audioDirectorTheme } from './theme';
 import AnalysisOverlay from './components/AnalysisOverlay';
+import CharacterDesignerDialog from './components/dialogs/CharacterDesignerDialog';
 import CharacterPickerDialog from './components/dialogs/CharacterPickerDialog';
 import ConfigPreviewDialog from './components/dialogs/ConfigPreviewDialog';
 import DirectorNoteDialog from './components/dialogs/DirectorNoteDialog';
@@ -266,14 +267,37 @@ export default function AudioDirectorApp() {
         </Dialog>
 
         <CharacterPickerDialog
-          characters={controller.allCharacters}
+          activeTab={controller.characterPickerTab}
+          canManageCustomCharacters={controller.canManageCustomCharacters}
+          customCharacters={controller.customCharacters}
+          customCharactersError={controller.customCharactersError}
+          customCharactersLoading={controller.customCharactersLoading}
           onClose={() => controller.setCharacterPickerOpen(false)}
+          onCreateCustomCharacter={controller.openCreateCharacterDesigner}
+          onDeleteCustomCharacter={controller.handleDeleteCustomCharacter}
+          onEditCustomCharacter={controller.openEditCharacterDesigner}
           onSelect={(characterId) => {
             controller.handleGlobalCharacterChange(characterId);
             controller.setCharacterPickerOpen(false);
           }}
+          onTabChange={controller.setCharacterPickerTab}
           open={controller.characterPickerOpen}
+          pendingDeleteCharacterId={controller.pendingDeleteCharacterId}
+          presetCharacters={controller.allCharacters.filter((character) => character.source === 'preset')}
           selectedCharacterId={controller.globalSettings.characterId}
+        />
+
+        <CharacterDesignerDialog
+          generatedProfile={controller.characterDesignerPreview}
+          generateError={controller.characterDesignerError}
+          initialValues={controller.characterDesignerInitialValues}
+          isGenerating={controller.characterDesignerGenerating}
+          isSaving={controller.characterDesignerSaving}
+          mode={controller.characterDesignerMode}
+          onClose={controller.closeCharacterDesigner}
+          onGenerate={controller.handleGenerateCharacterProfile}
+          onSave={controller.handleSaveCustomCharacter}
+          open={controller.characterDesignerOpen}
         />
 
         <VoicePickerDialog

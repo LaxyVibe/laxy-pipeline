@@ -8,6 +8,7 @@ from contracts.pipeline_contract import (
     AudioSessionBootstrapRequest,
     AudioGenerateLanguageRequest,
     AudioGenerateRequest,
+    GenerateCharacterRequest,
     GenerateJapaneseHiraganaRequest,
     PublishGuideRequest,
     PublishStatusRequest,
@@ -182,6 +183,24 @@ def test_generate_japanese_hiragana_request_requires_script_content() -> None:
         "scriptContent": "明日、軽やかに風景を描く。",
     })
     assert payload.scriptContent == "明日、軽やかに風景を描く。"
+
+
+def test_generate_character_request_requires_structured_fields() -> None:
+    with pytest.raises(ValidationError):
+        GenerateCharacterRequest.model_validate({
+            "name": "John",
+            "gender": "Male",
+            "role": "Museum Manager",
+        })
+
+    payload = GenerateCharacterRequest.model_validate({
+        "name": "John",
+        "gender": "Male",
+        "role": "Museum Manager",
+        "context": "A knowledgeable person who has a formal and confident tone.",
+    })
+    assert payload.name == "John"
+    assert payload.context == "A knowledgeable person who has a formal and confident tone."
 
 
 def test_translate_language_request_requires_target_and_core_language() -> None:

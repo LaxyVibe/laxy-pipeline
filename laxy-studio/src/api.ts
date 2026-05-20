@@ -1068,14 +1068,19 @@ export async function generateJapaneseHiragana(
 // ── Character Generation AI ──
 
 export interface GenerateCharacterRequest {
-  designerPrompt: string;
+  name: string;
+  gender: string;
+  role: string;
+  context: string;
 }
 
 export interface GenerateCharacterResponse {
   success: boolean;
   character: {
     name: string;
+    gender: string;
     role: string;
+    context: string;
     avatar: string;
     genderIdentity: 'masculine' | 'feminine' | 'neutral';
     coreTimbre: string;
@@ -1084,6 +1089,7 @@ export interface GenerateCharacterResponse {
     brandPersona: string;
     accent: string;
     staticInstruction: string;
+    audioProfileMarkdown: string;
   };
 }
 
@@ -1107,7 +1113,7 @@ export async function generateCharacter(
     });
   }
   const data = payload as GenerateCharacterResponse;
-  if (!data.character || !data.character.name) {
+  if (!data.character || !data.character.name || !data.character.staticInstruction || !data.character.audioProfileMarkdown) {
     throw new ApiRequestError({
       status: 502,
       code: 'INVALID_RESPONSE_SHAPE',

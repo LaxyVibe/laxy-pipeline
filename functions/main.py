@@ -2270,11 +2270,14 @@ def generate_japanese_hiragana(req: https_fn.Request) -> https_fn.Response:
 )
 def generate_character(req: https_fn.Request) -> https_fn.Response:
     """
-    Generate a full character profile from a designer prompt using AI.
+    Generate a full character profile from structured Character Designer inputs.
 
     Request body:
     {
-        "designerPrompt": "Warm local guide who treats visitors like welcomed guests..."
+        "name": "John",
+        "gender": "Male",
+        "role": "Museum Manager",
+        "context": "A knowledgeable person who has a formal and confident tone."
     }
 
     Response:
@@ -2282,7 +2285,9 @@ def generate_character(req: https_fn.Request) -> https_fn.Response:
         "success": true,
         "character": {
             "name": "...",
+            "gender": "...",
             "role": "...",
+            "context": "...",
             "avatar": "...",
             "genderIdentity": "feminine" | "masculine" | "neutral",
             "coreTimbre": "...",
@@ -2290,7 +2295,8 @@ def generate_character(req: https_fn.Request) -> https_fn.Response:
             "linguisticFingerprint": "...",
             "brandPersona": "...",
             "accent": "...",
-            "staticInstruction": "..."
+            "staticInstruction": "...",
+            "audioProfileMarkdown": "# AUDIO PROFILE: ..."
         }
     }
     """
@@ -2330,13 +2336,20 @@ def generate_character(req: https_fn.Request) -> https_fn.Response:
             executor = get_executor()
             result = _run_async(
                 executor.generate_character(
-                    designer_prompt=payload.designerPrompt,
+                    name=payload.name,
+                    gender=payload.gender,
+                    role=payload.role,
+                    context=payload.context,
                 )
             )
             _write_audit_log(
                 "pipeline.generate_character",
                 resource="character_generation",
-                details={"promptLength": len(payload.designerPrompt)},
+                details={
+                    "nameLength": len(payload.name),
+                    "roleLength": len(payload.role),
+                    "contextLength": len(payload.context),
+                },
                 success=True,
             )
             return _json_response(result)

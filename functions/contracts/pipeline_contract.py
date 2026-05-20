@@ -106,7 +106,10 @@ class GenerateJapaneseHiraganaRequest(BaseModel):
 
 
 class GenerateCharacterRequest(BaseModel):
-    designerPrompt: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    gender: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    context: str = Field(min_length=1)
 
 
 class TranslateLanguageRequest(BaseModel):

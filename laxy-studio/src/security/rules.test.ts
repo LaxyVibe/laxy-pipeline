@@ -114,6 +114,20 @@ describeIfEmulator('Firestore rules', () => {
     await assertFails(tenantAAdmin.doc('tenants/tenant-b/users/user-2').get());
   });
 
+  it('allows tenant-scoped character library reads and writes for same-tenant signed-in admins/editors only', async () => {
+    await getTestEnv().withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await db.doc('tenants/tenant-a/audioCharacters/char-1').set({ name: 'John' });
+      await db.doc('tenants/tenant-b/audioCharacters/char-2').set({ name: 'Alex' });
+    });
+
+    const tenantAEditor = clientEditorContext('tenant-a').firestore();
+    await assertSucceeds(tenantAEditor.doc('tenants/tenant-a/audioCharacters/char-1').get());
+    await assertFails(tenantAEditor.doc('tenants/tenant-b/audioCharacters/char-2').get());
+    await assertSucceeds(tenantAEditor.doc('tenants/tenant-a/audioCharacters/char-3').set({ name: 'Linda' }));
+    await assertSucceeds(superAdminContext().firestore().doc('tenants/tenant-b/audioCharacters/char-2').get());
+  });
+
   it('scopes pipeline session reads by context.tenantId for non-super-admin users', async () => {
     await getTestEnv().withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();

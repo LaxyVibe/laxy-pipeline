@@ -1,13 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from 'firebase/firestore';
 import {
   bootstrapAudioSession,
   enhanceScript,
   generateAudioForLanguage,
+  generateCharacter,
   generateDirectorNote,
   generateJapaneseHiragana,
+  type GenerateCharacterResponse,
 } from '../../api';
+import { getCustomClaims } from '../../admin/auth/authenticator';
+import { useAuthStore } from '../../authStore';
 import { initFirebase } from '../../firebase';
 import { SUPPORTED_LANGUAGES, langLabel, type LanguageAudio, type LanguageSRT } from '../../types/entity';
 import {
@@ -19,15 +36,23 @@ import {
   createDefaultSettings,
   estimateTokensForSettings,
   isScriptEnhancementActive,
+  normalizeAudioMvpCharacter,
   PRESET_AUDIO_CHARACTERS,
   recommendVoice,
   resolveCompiledPrompt,
   validateEnhancedScript,
   type AudioGuideSettings,
+  type AudioMvpCharacter,
   type AudioPoiDraft,
   type ContentVersion,
   type ScriptEnhancementLimit,
 } from '../audioMvp/model';
+import {
+  buildCustomCharacterRecord,
+  buildCustomCharacterFirestorePayload,
+  createEmptyCharacterDesignerValues,
+  type CharacterDesignerValues,
+} from './characterLibrary';
 import {
   buildAudioTrackDocId,
   buildGenerationHistoryFromVersions,
@@ -98,6 +123,16 @@ export function useAudioDirectorController() {
     () => (launchedFromTts ? readAudioHistoryTarget(searchParams) : null),
     [launchedFromTts, searchParams],
   );
+  const searchTenantId = useMemo(() => {
+    const raw = searchParams.get('tenantId');
+    const normalized = typeof raw === 'string' ? raw.trim() : '';
+    return normalized || undefined;
+  }, [searchParams]);
+  const searchGuideId = useMemo(() => {
+    const raw = searchParams.get('guideId');
+    const normalized = typeof raw === 'string' ? raw.trim() : '';
+    return normalized || undefined;
+  }, [searchParams]);
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -139,8 +174,53 @@ export function useAudioDirectorController() {
   });
   const busyOperationSeqRef = useRef(0);
   const [busyOperations, setBusyOperations] = useState<Array<{ id: number; label: string }>>([]);
+  const storeUser = useAuthStore((state) => state.user);
+  const { auth } = initFirebase();
+  const currentUser = storeUser ?? auth.currentUser;
+  const [claimTenantId, setClaimTenantId] = useState<string | undefined>();
+  const [tenantScopeLoading, setTenantScopeLoading] = useState(true);
+  const [customCharacters, setCustomCharacters] = useState<AudioMvpCharacter[]>([]);
+  const [customCharactersLoading, setCustomCharactersLoading] = useState(false);
+  const [customCharactersError, setCustomCharactersError] = useState<string | null>(null);
+  const [customCharactersHydrated, setCustomCharactersHydrated] = useState(false);
+  const [characterPickerTab, setCharacterPickerTab] = useState<'preset' | 'custom'>('preset');
+  const [characterDesignerOpen, setCharacterDesignerOpen] = useState(false);
+  const [characterDesignerMode, setCharacterDesignerMode] = useState<'create' | 'edit'>('create');
+  const [characterDesignerInitialValues, setCharacterDesignerInitialValues] = useState<CharacterDesignerValues>(
+    createEmptyCharacterDesignerValues(),
+  );
+  const [characterDesignerPreview, setCharacterDesignerPreview] = useState<GenerateCharacterResponse['character'] | null>(null);
+  const [characterDesignerError, setCharacterDesignerError] = useState<string | null>(null);
+  const [characterDesignerSaving, setCharacterDesignerSaving] = useState(false);
+  const [characterDesignerGenerating, setCharacterDesignerGenerating] = useState(false);
+  const [editingCharacterId, setEditingCharacterId] = useState<string | null>(null);
+  const [pendingDeleteCharacterId, setPendingDeleteCharacterId] = useState<string | null>(null);
 
-  const allCharacters = PRESET_AUDIO_CHARACTERS;
+  const allCharacters = useMemo(
+    () => [...PRESET_AUDIO_CHARACTERS, ...customCharacters],
+    [customCharacters],
+  );
+  const effectiveTenantId = claimTenantId || embeddedHistoryTarget?.tenantId || searchTenantId;
+  const effectiveGuideId = embeddedHistoryTarget?.guideId || searchGuideId;
+  const characterLibraryScope = useMemo(() => {
+    if (effectiveTenantId) {
+      return {
+        kind: 'tenant' as const,
+        path: ['tenants', effectiveTenantId, 'audioCharacters'] as const,
+        tenantId: effectiveTenantId,
+        guideId: undefined,
+      };
+    }
+    if (effectiveGuideId) {
+      return {
+        kind: 'guide' as const,
+        path: ['guides', effectiveGuideId, 'audioCharacters'] as const,
+        tenantId: undefined,
+        guideId: effectiveGuideId,
+      };
+    }
+    return null;
+  }, [effectiveGuideId, effectiveTenantId]);
   const scriptEnhancementEnabled = isScriptEnhancementActive(globalSettings.scriptEnhancementLimit);
   const combinedGenerationHistory = useMemo(
     () => [...generationHistory, ...storedGenerationHistory].sort((left, right) => right.generatedAt - left.generatedAt),
@@ -184,6 +264,30 @@ export function useAudioDirectorController() {
     });
   }, []);
 
+  useEffect(() => {
+    if (!currentUser) {
+      setClaimTenantId(undefined);
+      setTenantScopeLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setTenantScopeLoading(true);
+    void getCustomClaims(currentUser).then((claims) => {
+      if (cancelled) return;
+      setClaimTenantId(claims.tenantId);
+      setTenantScopeLoading(false);
+    }).catch(() => {
+      if (cancelled) return;
+      setClaimTenantId(undefined);
+      setTenantScopeLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser]);
+
   const applyEmbeddedScriptPayload = useCallback((payload: { text: string; language: string | null }) => {
     const normalizedPayload = {
       text: payload.text,
@@ -223,6 +327,7 @@ export function useAudioDirectorController() {
       resetScriptBoundState();
       setManuscriptText('');
       setGlobalSettings(saved.globalSettings ?? defaultSettings);
+      setCustomCharacters(saved.customCharacters ?? []);
       setReadingAssistCache(saved.readingAssistCache ?? {});
       setItems([]);
       return;
@@ -232,6 +337,7 @@ export function useAudioDirectorController() {
     setSessionId(saved.sessionId ?? null);
     setCoreLanguage(saved.coreLanguage ?? 'en');
     setGlobalSettings(saved.globalSettings ?? defaultSettings);
+    setCustomCharacters(saved.customCharacters ?? []);
     setEnhancementCache(saved.enhancementCache ?? {});
     setReadingAssistCache(saved.readingAssistCache ?? {});
     setGenerationHistory(saved.generationHistory ?? []);
@@ -239,11 +345,63 @@ export function useAudioDirectorController() {
   }, [defaultSettings, launchedFromTts]);
 
   useEffect(() => {
+    if (tenantScopeLoading) return;
+    if (!characterLibraryScope) {
+      setCustomCharactersLoading(false);
+      setCustomCharactersError(null);
+      setCustomCharactersHydrated(true);
+      return;
+    }
+
+    const { db } = initFirebase();
+    const characterCollectionRef = characterLibraryScope.kind === 'tenant'
+      ? collection(db, 'tenants', characterLibraryScope.tenantId, 'audioCharacters')
+      : collection(db, 'guides', characterLibraryScope.guideId, 'audioCharacters');
+    const libraryQuery = query(
+      characterCollectionRef,
+      orderBy('updatedAt', 'desc'),
+    );
+
+    setCustomCharactersLoading(true);
+    setCustomCharactersError(null);
+    setCustomCharactersHydrated(false);
+
+    const unsubscribe = onSnapshot(
+      libraryQuery,
+      (snapshot) => {
+        const nextCharacters = snapshot.docs
+          .map((item) => normalizeAudioMvpCharacter({
+            id: item.id,
+            ...item.data(),
+            source: 'custom',
+            tenantId: characterLibraryScope.tenantId,
+            guideId: characterLibraryScope.guideId,
+          }))
+          .filter((item): item is AudioMvpCharacter => Boolean(item));
+        setCustomCharacters(nextCharacters);
+        setCustomCharactersLoading(false);
+        setCustomCharactersHydrated(true);
+      },
+      (error) => {
+        setCustomCharacters([]);
+        setCustomCharactersLoading(false);
+        setCustomCharactersHydrated(true);
+        setCustomCharactersError(error.message || 'Unable to load tenant characters.');
+      },
+    );
+
+    return unsubscribe;
+  }, [characterLibraryScope, tenantScopeLoading]);
+
+  useEffect(() => {
     setItems((previous) => resolveScriptDraft(manuscriptText, previous));
   }, [manuscriptText]);
 
   useEffect(() => {
-    const hasSelectedCharacter = PRESET_AUDIO_CHARACTERS.some((character) => character.id === globalSettings.characterId);
+    if (tenantScopeLoading) return;
+    if (characterLibraryScope && !customCharactersHydrated) return;
+
+    const hasSelectedCharacter = allCharacters.some((character) => character.id === globalSettings.characterId);
     if (hasSelectedCharacter) return;
 
     const fallbackCharacter = PRESET_AUDIO_CHARACTERS[0];
@@ -258,7 +416,15 @@ export function useAudioDirectorController() {
       voiceId: recommendation.recommendedVoiceId,
       directorNote: clearCompiledPromptCustomization(previous.directorNote),
     }));
-  }, [globalSettings.characterId, globalSettings.contentVersion, manuscriptText]);
+  }, [
+    allCharacters,
+    customCharactersHydrated,
+    globalSettings.characterId,
+    globalSettings.contentVersion,
+    manuscriptText,
+    characterLibraryScope,
+    tenantScopeLoading,
+  ]);
 
   useEffect(() => {
     if (!embeddedHistoryTarget) return;
@@ -372,13 +538,14 @@ export function useAudioDirectorController() {
       scriptEnhancementEnabled,
       globalSettings,
       items,
-      customCharacters: [],
+      customCharacters,
       enhancementCache,
       readingAssistCache,
       generationHistory,
     } satisfies AudioDirectorDraft);
   }, [
     coreLanguage,
+    customCharacters,
     enhancementCache,
     globalSettings,
     generationHistory,
@@ -447,6 +614,12 @@ export function useAudioDirectorController() {
 
   const selectedCharacter = getCharacter(globalSettings.characterId) ?? PRESET_AUDIO_CHARACTERS[0];
   const selectedVoice = getVoice(globalSettings.voiceId);
+
+  useEffect(() => {
+    const nextSelectedCharacter = getCharacter(globalSettings.characterId);
+    if (!nextSelectedCharacter) return;
+    setCharacterPickerTab(nextSelectedCharacter.source === 'custom' ? 'custom' : 'preset');
+  }, [allCharacters, globalSettings.characterId]);
 
   const globalRecommendation = useMemo(
     () => recommendVoice({
@@ -700,6 +873,7 @@ export function useAudioDirectorController() {
       manuscriptText,
       contentVersion: globalSettings.contentVersion,
     });
+    setCharacterPickerTab(character.source === 'custom' ? 'custom' : 'preset');
     setGlobalSettings((previous) => ({
       ...previous,
       characterId,
@@ -707,6 +881,184 @@ export function useAudioDirectorController() {
       directorNote: clearCompiledPromptCustomization(previous.directorNote),
     }));
   };
+
+  const resetCharacterDesignerState = useCallback(() => {
+    setCharacterDesignerPreview(null);
+    setCharacterDesignerError(null);
+    setCharacterDesignerGenerating(false);
+    setCharacterDesignerSaving(false);
+    setEditingCharacterId(null);
+    setCharacterDesignerInitialValues(createEmptyCharacterDesignerValues());
+  }, []);
+
+  const openCreateCharacterDesigner = useCallback(() => {
+    setCharacterPickerOpen(false);
+    setCharacterDesignerMode('create');
+    setCharacterDesignerInitialValues(createEmptyCharacterDesignerValues());
+    setCharacterDesignerPreview(null);
+    setCharacterDesignerError(null);
+    setEditingCharacterId(null);
+    setCharacterDesignerOpen(true);
+  }, []);
+
+  const openEditCharacterDesigner = useCallback((character: AudioMvpCharacter) => {
+    setCharacterPickerOpen(false);
+    setCharacterDesignerMode('edit');
+    setCharacterDesignerInitialValues({
+      name: character.name,
+      gender: character.gender ?? '',
+      role: character.role,
+      context: character.context ?? '',
+    });
+    setCharacterDesignerPreview(null);
+    setCharacterDesignerError(null);
+    setEditingCharacterId(character.id);
+    setCharacterDesignerOpen(true);
+  }, []);
+
+  const closeCharacterDesigner = useCallback(() => {
+    if (characterDesignerGenerating || characterDesignerSaving) return;
+    setCharacterDesignerOpen(false);
+    resetCharacterDesignerState();
+  }, [characterDesignerGenerating, characterDesignerSaving, resetCharacterDesignerState]);
+
+  const handleGenerateCharacterProfile = useCallback(async (values: CharacterDesignerValues) => {
+    const busyOperationId = beginBusyOperation('Designing character profile…');
+    setCharacterDesignerGenerating(true);
+    setCharacterDesignerError(null);
+    setCharacterDesignerPreview(null);
+    try {
+      const result = await generateCharacter(values);
+      setCharacterDesignerPreview(result.character);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCharacterDesignerError(`Character profile generation failed: ${message}`);
+    } finally {
+      setCharacterDesignerGenerating(false);
+      endBusyOperation(busyOperationId);
+    }
+  }, [beginBusyOperation, endBusyOperation]);
+
+  const handleSaveCustomCharacter = useCallback(async (values: CharacterDesignerValues) => {
+    if (!currentUser?.uid) {
+      setCharacterDesignerError('A signed-in user is required to save custom characters.');
+      return;
+    }
+    if (!characterDesignerPreview) {
+      setCharacterDesignerError('Generate the character profile before saving.');
+      return;
+    }
+
+    const busyOperationId = beginBusyOperation(
+      characterDesignerMode === 'create' ? 'Saving custom character…' : 'Updating custom character…',
+    );
+    setCharacterDesignerSaving(true);
+    setCharacterDesignerError(null);
+    try {
+      const documentId = editingCharacterId ?? `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      if (characterLibraryScope) {
+        const { db } = initFirebase();
+        const collectionRef = characterLibraryScope.kind === 'tenant'
+          ? collection(db, 'tenants', characterLibraryScope.tenantId, 'audioCharacters')
+          : collection(db, 'guides', characterLibraryScope.guideId, 'audioCharacters');
+        const documentRef = doc(collectionRef, documentId);
+        const payload = buildCustomCharacterFirestorePayload({
+          tenantId: characterLibraryScope.tenantId,
+          guideId: characterLibraryScope.guideId,
+          createdBy: currentUser.uid,
+          values,
+          character: characterDesignerPreview,
+        });
+        await setDoc(
+          documentRef,
+          editingCharacterId
+            ? {
+              ...payload,
+              updatedAt: serverTimestamp(),
+            }
+            : {
+              ...payload,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            },
+          { merge: Boolean(editingCharacterId) },
+        );
+      }
+      const existingCharacter = customCharacters.find((item) => item.id === documentId);
+      const optimisticCharacter = buildCustomCharacterRecord({
+        id: documentId,
+        tenantId: characterLibraryScope?.tenantId,
+        guideId: characterLibraryScope?.guideId,
+        createdBy: currentUser.uid,
+        values,
+        character: characterDesignerPreview,
+        createdAt: existingCharacter?.createdAt ?? Date.now(),
+        updatedAt: Date.now(),
+      });
+      setCustomCharacters((previous) => {
+        const remaining = previous.filter((item) => item.id !== documentId);
+        return [optimisticCharacter, ...remaining];
+      });
+      handleGlobalCharacterChange(documentId);
+      setCharacterDesignerOpen(false);
+      resetCharacterDesignerState();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCharacterDesignerError(`Saving custom character failed: ${message}`);
+    } finally {
+      setCharacterDesignerSaving(false);
+      endBusyOperation(busyOperationId);
+    }
+  }, [
+    beginBusyOperation,
+    characterDesignerMode,
+    characterDesignerPreview,
+    characterLibraryScope,
+    customCharacters,
+    currentUser?.uid,
+    editingCharacterId,
+    endBusyOperation,
+    handleGlobalCharacterChange,
+    resetCharacterDesignerState,
+  ]);
+
+  const handleDeleteCustomCharacter = useCallback(async (character: AudioMvpCharacter) => {
+    if (!window.confirm(`Delete ${character.name} from this character library?`)) return;
+
+    const busyOperationId = beginBusyOperation(`Deleting ${character.name}…`);
+    setPendingDeleteCharacterId(character.id);
+    try {
+      if (characterLibraryScope) {
+        const { db } = initFirebase();
+        const collectionRef = characterLibraryScope.kind === 'tenant'
+          ? collection(db, 'tenants', characterLibraryScope.tenantId, 'audioCharacters')
+          : collection(db, 'guides', characterLibraryScope.guideId, 'audioCharacters');
+        await deleteDoc(doc(collectionRef, character.id));
+      }
+      setCustomCharacters((previous) => previous.filter((item) => item.id !== character.id));
+      if (globalSettings.characterId === character.id) {
+        handleGlobalCharacterChange(PRESET_AUDIO_CHARACTERS[0].id);
+      }
+      if (editingCharacterId === character.id) {
+        setCharacterDesignerOpen(false);
+        resetCharacterDesignerState();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCustomCharactersError(`Deleting character failed: ${message}`);
+    } finally {
+      setPendingDeleteCharacterId(null);
+      endBusyOperation(busyOperationId);
+    }
+  }, [
+    beginBusyOperation,
+    editingCharacterId,
+    endBusyOperation,
+    globalSettings.characterId,
+    handleGlobalCharacterChange,
+    resetCharacterDesignerState,
+    characterLibraryScope,
+  ]);
 
   const handleGlobalVoiceChange = (voiceId: string) => {
     setGlobalSettings((previous) => ({
@@ -1283,9 +1635,21 @@ export function useAudioDirectorController() {
     analysisPhase,
     audioFiles,
     canAdvance,
+    canManageCustomCharacters: Boolean(currentUser?.uid),
     characterPickerOpen,
+    characterPickerTab,
+    characterDesignerError,
+    characterDesignerGenerating,
+    characterDesignerInitialValues,
+    characterDesignerMode,
+    characterDesignerOpen,
+    characterDesignerPreview,
+    characterDesignerSaving,
     configPreviewOpen,
     coreLanguage,
+    customCharacters,
+    customCharactersError,
+    customCharactersLoading,
     currentScreen,
     currentJapaneseReadingStale,
     currentJapaneseReadingText,
@@ -1307,18 +1671,23 @@ export function useAudioDirectorController() {
     generationHistory: combinedGenerationHistory,
     handleCompiledPromptChange,
     handleCurrentScriptTextChange,
+    handleDeleteCustomCharacter,
     handleDirectorNoteFieldChange,
     handleDownloadConfig,
     handleEnhanceActiveLanguage,
     handleEnhancedScriptChange,
+    handleGenerateCharacterProfile,
     handleGenerateJapaneseReading,
     handlePhoneticOverridesChange,
     handleGenerateDirectorNote,
     handleGlobalCharacterChange,
     handleGlobalContentVersionChange,
     handleGlobalVoiceChange,
+    handleSaveCustomCharacter,
     handleJapaneseReadingTextChange,
     handleNavigate,
+    openCreateCharacterDesigner,
+    openEditCharacterDesigner,
     handleSaveToBackend,
     handleScriptEnhancementLimitChange,
     handleTxtUpload,
@@ -1335,6 +1704,7 @@ export function useAudioDirectorController() {
     items,
     maleVoices,
     manuscriptText,
+    pendingDeleteCharacterId,
     playingVoiceId,
     progressSummary,
     promptPreviewPayload,
@@ -1346,7 +1716,9 @@ export function useAudioDirectorController() {
     scriptEnhancementEnabled,
     selectedCharacter,
     selectedVoice,
+    closeCharacterDesigner,
     setCharacterPickerOpen,
+    setCharacterPickerTab,
     setConfigPreviewOpen,
     setCoreLanguage,
     setDirectorNoteEditorOpen,
