@@ -143,11 +143,14 @@ export function useAudioDirectorController() {
   const [analysisPhase, setAnalysisPhase] = useState(0);
   const [detectedLangLabel, setDetectedLangLabel] = useState<string | null>(null);
   const [resultDialogRequestAt, setResultDialogRequestAt] = useState<number | null>(null);
+  const [generationCompletedAt, setGenerationCompletedAt] = useState<number | null>(null);
   const [progressSummary, setProgressSummary] = useState({
     completed: 0,
     total: 0,
     currentLabel: '',
   });
+  const busyOperationSeqRef = useRef(0);
+  const [busyOperations, setBusyOperations] = useState<Array<{ id: number; label: string }>>([]);
 
   const allCharacters = useMemo(
     () => [...PRESET_AUDIO_CHARACTERS, ...customCharacters],
@@ -158,6 +161,25 @@ export function useAudioDirectorController() {
     () => [...generationHistory, ...storedGenerationHistory].sort((left, right) => right.generatedAt - left.generatedAt),
     [generationHistory, storedGenerationHistory],
   );
+  const activeBusyLabel = busyOperations[busyOperations.length - 1]?.label ?? null;
+  const hasBusyOverlay = busyOperations.length > 0;
+
+  const beginBusyOperation = useCallback((label: string) => {
+    const id = busyOperationSeqRef.current + 1;
+    busyOperationSeqRef.current = id;
+    setBusyOperations((previous) => [...previous, { id, label }]);
+    return id;
+  }, []);
+
+  const updateBusyOperation = useCallback((id: number, label: string) => {
+    setBusyOperations((previous) => previous.map((operation) => (
+      operation.id === id ? { ...operation, label } : operation
+    )));
+  }, []);
+
+  const endBusyOperation = useCallback((id: number) => {
+    setBusyOperations((previous) => previous.filter((operation) => operation.id !== id));
+  }, []);
 
   const resetScriptBoundState = useCallback(() => {
     setSessionId(null);
@@ -243,6 +265,7 @@ export function useAudioDirectorController() {
     let cancelled = false;
 
     const hydrateHistory = async () => {
+      const busyOperationId = beginBusyOperation('Loading saved audio history…');
       setIsHydratingHistory(true);
       setStoredGenerationHistory([]);
 
@@ -266,6 +289,7 @@ export function useAudioDirectorController() {
           : null;
 
         if (!summary) {
+          updateBusyOperation(busyOperationId, 'Searching for saved audio history…');
           const summarySnapshot = await getDocs(query(
             collection(db, 'guides', embeddedHistoryTarget.guideId, 'audioTracks'),
             where('spotId', '==', embeddedHistoryTarget.spotId),
@@ -289,6 +313,7 @@ export function useAudioDirectorController() {
           return;
         }
 
+        updateBusyOperation(busyOperationId, 'Loading saved versions…');
         const versionsSnapshot = await getDocs(query(
           collection(db, 'guides', embeddedHistoryTarget.guideId, 'audioTracks', summary.id, 'versions'),
           orderBy('createdAt', 'desc'),
@@ -327,6 +352,7 @@ export function useAudioDirectorController() {
         if (!cancelled) {
           setIsHydratingHistory(false);
         }
+        endBusyOperation(busyOperationId);
       }
     };
 
@@ -335,7 +361,7 @@ export function useAudioDirectorController() {
     return () => {
       cancelled = true;
     };
-  }, [embeddedHistoryTarget]);
+  }, [beginBusyOperation, embeddedHistoryTarget, endBusyOperation, updateBusyOperation]);
 
   useEffect(() => {
     writeLocalStorage(AUDIO_DIRECTOR_DRAFT_STORAGE_KEY, {
@@ -729,6 +755,7 @@ export function useAudioDirectorController() {
   const handleGenerateDirectorNote = async () => {
     const scriptContent = items.map((item) => item.scriptText).filter(Boolean).join('\n\n');
     if (!scriptContent.trim()) return;
+    const busyOperationId = beginBusyOperation('Generating director note…');
     setDirectorNoteGenerating(true);
     try {
       const result = await generateDirectorNote({
@@ -751,6 +778,7 @@ export function useAudioDirectorController() {
       console.error('Director note generation failed:', error);
     } finally {
       setDirectorNoteGenerating(false);
+      endBusyOperation(busyOperationId);
     }
   };
 
@@ -821,6 +849,7 @@ export function useAudioDirectorController() {
 
   const handleDraftCharacter = async () => {
     if (!designerPrompt.trim()) return;
+    const busyOperationId = beginBusyOperation('Generating character profile…');
     setIsGeneratingCharacter(true);
     try {
       const response = await generateCharacter({ designerPrompt });
@@ -846,6 +875,7 @@ export function useAudioDirectorController() {
       setEditingCharacterId(null);
     } finally {
       setIsGeneratingCharacter(false);
+      endBusyOperation(busyOperationId);
     }
   };
 
@@ -902,6 +932,7 @@ export function useAudioDirectorController() {
   };
 
   const handleSaveToBackend = async () => {
+    const busyOperationId = beginBusyOperation('Saving session snapshot…');
     setSaveStatus('saving');
     setSaveMessage(null);
     try {
@@ -912,6 +943,8 @@ export function useAudioDirectorController() {
       const message = error instanceof Error ? error.message : String(error);
       setSaveStatus('error');
       setSaveMessage(`Save failed: ${message}`);
+    } finally {
+      endBusyOperation(busyOperationId);
     }
   };
 
@@ -926,10 +959,16 @@ export function useAudioDirectorController() {
   ): Promise<Record<string, EnhancementEntry>> => {
     const existingLanguageCache = enhancementCache[language] ?? {};
     const nextLanguageCache: Record<string, EnhancementEntry> = { ...existingLanguageCache };
-
+    const busyOperationId = beginBusyOperation(
+      forceRegenerate ? `Regenerating polished ${langLabel(language)} script…` : `Generating polished ${langLabel(language)} script…`,
+    );
     setIsEnhancing(true);
     try {
       for (const item of targetItems) {
+        updateBusyOperation(
+          busyOperationId,
+          `${forceRegenerate ? 'Regenerating' : 'Generating'} polished ${langLabel(language)} script for ${item.title.trim() || item.spotId}…`,
+        );
         const settings = getItemSettings(item);
         const character = getCharacter(settings.characterId) ?? selectedCharacter;
         const sourceText = item.scriptText;
@@ -960,6 +999,7 @@ export function useAudioDirectorController() {
       }
     } finally {
       setIsEnhancing(false);
+      endBusyOperation(busyOperationId);
     }
 
     setEnhancementCache((previous) => ({
@@ -1087,9 +1127,11 @@ export function useAudioDirectorController() {
     if (existing && existing.sourceText === sourceText && existing.hiraganaText.trim()) {
       return existing;
     }
-
+    const busyOperationId = beginBusyOperation(`Generating Hiragana reading for ${item.title.trim() || item.spotId}…`);
     const result = await generateJapaneseHiragana({
       scriptContent: sourceText,
+    }).finally(() => {
+      endBusyOperation(busyOperationId);
     });
     return setJapaneseReadingEntry(language, item, sourceText, result.hiraganaText.trim(), false);
   };
@@ -1118,10 +1160,13 @@ export function useAudioDirectorController() {
     let nextSrtFiles: LanguageSRT[] = [];
     let completed = 0;
     const runStartedAt = performance.now();
+    const busyOperationId = beginBusyOperation('Preparing audio generation…');
 
     try {
+      updateBusyOperation(busyOperationId, 'Saving session snapshot…');
       const activeSessionId = await persistSessionSnapshot();
 
+      updateBusyOperation(busyOperationId, `Preparing ${langLabel(language)} audio generation…`);
       setProgressSummary((previous) => ({
         ...previous,
         currentLabel: `Preparing ${langLabel(language)}`,
@@ -1168,6 +1213,10 @@ export function useAudioDirectorController() {
           ...previous,
           currentLabel: 'Generating script',
         }));
+        updateBusyOperation(
+          busyOperationId,
+          `Generating ${langLabel(language)} audio for ${item.title.trim() || requestSpotId}…`,
+        );
 
         const response = await generateAudioForLanguage({
           sessionId: activeSessionId,
@@ -1238,6 +1287,7 @@ export function useAudioDirectorController() {
         ...previous,
         currentLabel: 'Generation complete',
       }));
+      updateBusyOperation(busyOperationId, 'Finalizing generated audio…');
 
       setGenerationHistory((previous) => [
         {
@@ -1251,12 +1301,14 @@ export function useAudioDirectorController() {
         },
         ...previous,
       ]);
+      setGenerationCompletedAt(Date.now());
       setLastGenerationLatencyMs(Math.max(0, Math.round(performance.now() - runStartedAt)));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setGenerationError(`Audio generation failed: ${message}`);
     } finally {
       setIsGenerating(false);
+      endBusyOperation(busyOperationId);
     }
   };
 
@@ -1313,6 +1365,7 @@ export function useAudioDirectorController() {
     }
 
     setGenerationError(null);
+    const busyOperationId = beginBusyOperation('Generating Hiragana reading…');
     setIsGeneratingJapaneseReading(true);
     try {
       const result = await generateJapaneseHiragana({
@@ -1324,6 +1377,7 @@ export function useAudioDirectorController() {
       setGenerationError(`Japanese reading conversion failed: ${message}`);
     } finally {
       setIsGeneratingJapaneseReading(false);
+      endBusyOperation(busyOperationId);
     }
   };
 
@@ -1354,6 +1408,8 @@ export function useAudioDirectorController() {
     estimatedTokens,
     femaleVoices,
     generationError,
+    generationCompletedAt,
+    hasBusyOverlay,
     getItemSettings,
     globalCompiledPrompt,
     globalRecommendation,
@@ -1388,6 +1444,7 @@ export function useAudioDirectorController() {
     isGeneratingCharacter,
     isHydratingHistory,
     lastGenerationLatencyMs,
+    activeBusyLabel,
     itemStates,
     items,
     maleVoices,

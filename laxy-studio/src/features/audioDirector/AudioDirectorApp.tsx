@@ -1,6 +1,6 @@
 import CloseIcon from '@mui/icons-material/Close';
 import GraphicEqOutlinedIcon from '@mui/icons-material/GraphicEqOutlined';
-import { Badge, Box, Container, Dialog, DialogContent, DialogTitle, Fab, IconButton, Stack, Typography } from '@mui/material';
+import { Backdrop, Badge, Box, CircularProgress, Container, Dialog, DialogContent, DialogTitle, Fab, IconButton, Paper, Stack, Typography } from '@mui/material';
 import { ThemeProvider } from '@mui/material/styles';
 import { useEffect, useState } from 'react';
 import { useAudioDirectorController } from './useAudioDirectorController';
@@ -15,11 +15,50 @@ import DeployVersionFooter from '../../components/DeployVersionFooter';
 import GenerationHistoryRail from './components/panels/GenerationHistoryRail';
 import ScriptPolishSection from './components/panels/ScriptPolishSection';
 import TtsScriptSection from './components/panels/TtsScriptSection';
+import { langLabel } from '../../types/entity';
+
+function playWarmCompletionBeep() {
+  const AudioContextCtor = window.AudioContext ?? (window as typeof window & {
+    webkitAudioContext?: typeof AudioContext;
+  }).webkitAudioContext;
+  if (!AudioContextCtor) return;
+
+  const audioContext = new AudioContextCtor();
+  const now = audioContext.currentTime;
+  const masterGain = audioContext.createGain();
+  masterGain.gain.setValueAtTime(0.0001, now);
+  masterGain.gain.exponentialRampToValueAtTime(0.11, now + 0.03);
+  masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.9);
+  masterGain.connect(audioContext.destination);
+
+  const createTone = (frequency: number, startOffset: number, duration: number) => {
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(frequency, now + startOffset);
+    oscillator.frequency.exponentialRampToValueAtTime(frequency * 1.04, now + startOffset + duration);
+    gainNode.gain.setValueAtTime(0.0001, now + startOffset);
+    gainNode.gain.exponentialRampToValueAtTime(0.65, now + startOffset + 0.03);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+    oscillator.connect(gainNode);
+    gainNode.connect(masterGain);
+    oscillator.start(now + startOffset);
+    oscillator.stop(now + startOffset + duration + 0.05);
+  };
+
+  createTone(523.25, 0, 0.28);
+  createTone(659.25, 0.18, 0.34);
+
+  window.setTimeout(() => {
+    void audioContext.close().catch(() => undefined);
+  }, 1400);
+}
 
 export default function AudioDirectorApp() {
   const controller = useAudioDirectorController();
   const [scriptPolishOpen, setScriptPolishOpen] = useState(false);
   const [resultOpen, setResultOpen] = useState(false);
+  const [hasUnreadGeneratedResult, setHasUnreadGeneratedResult] = useState(false);
   const resultCount = controller.generationHistory.reduce(
     (runTotal, run) =>
       runTotal + run.audioFiles.reduce((audioTotal, languageAudio) => audioTotal + (languageAudio.spots?.length ?? 0), 0),
@@ -31,12 +70,47 @@ export default function AudioDirectorApp() {
   const launchSearchParams = new URLSearchParams(window.location.search);
   const launchId = launchSearchParams.get('launchId')?.trim() || undefined;
   const launchedFromTts = launchSearchParams.get('source') === 'tts' && Boolean(launcherWindow);
+  const launchSpotTitle = launchSearchParams.get('spotTitle')?.trim() || launchSearchParams.get('spotId')?.trim() || '';
+  const launchLang = launchSearchParams.get('lang')?.trim() || '';
 
   useEffect(() => {
     if (controller.resultDialogRequestAt) {
       setResultOpen(true);
     }
   }, [controller.resultDialogRequestAt]);
+
+  useEffect(() => {
+    const titlePrefix = hasUnreadGeneratedResult ? '🔔 ' : '';
+    if (!launchSpotTitle || !launchLang) {
+      document.title = `${titlePrefix}Audio Director`;
+      return;
+    }
+    document.title = `${titlePrefix}${launchSpotTitle} · ${langLabel(launchLang)} · Audio Director`;
+  }, [hasUnreadGeneratedResult, launchLang, launchSpotTitle]);
+
+  useEffect(() => {
+    if (!controller.generationCompletedAt) return;
+    setResultOpen(true);
+    setHasUnreadGeneratedResult(true);
+    playWarmCompletionBeep();
+  }, [controller.generationCompletedAt]);
+
+  useEffect(() => {
+    const clearUnreadIfViewed = () => {
+      if (!resultOpen) return;
+      if (document.visibilityState !== 'visible') return;
+      if (!document.hasFocus()) return;
+      setHasUnreadGeneratedResult(false);
+    };
+
+    clearUnreadIfViewed();
+    window.addEventListener('focus', clearUnreadIfViewed);
+    document.addEventListener('visibilitychange', clearUnreadIfViewed);
+    return () => {
+      window.removeEventListener('focus', clearUnreadIfViewed);
+      document.removeEventListener('visibilitychange', clearUnreadIfViewed);
+    };
+  }, [resultOpen]);
 
   const handleChooseAudio = (selection: {
     audioUrl: string;
@@ -48,9 +122,6 @@ export default function AudioDirectorApp() {
     lang?: string;
   }) => {
     if (!selection.audioUrl) return;
-    if (!window.confirm(hasWindowOpener
-      ? 'Use this generated result, send it back to /tts, and close this Audio Director window?'
-      : 'Use this generated result and send its script and audio back to the parent page?')) return;
     if (!launchedFromTts || !launcherWindow) return;
 
     launcherWindow.postMessage(
@@ -267,6 +338,40 @@ export default function AudioDirectorApp() {
           detectedLangLabel={controller.detectedLangLabel}
           open={controller.isAnalyzing}
         />
+
+        <Backdrop
+          open={controller.hasBusyOverlay}
+          sx={{
+            zIndex: (theme) => theme.zIndex.modal + 2,
+            bgcolor: 'rgba(6, 10, 20, 0.76)',
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          <Paper
+            elevation={10}
+            sx={{
+              px: 4,
+              py: 3,
+              minWidth: 320,
+              maxWidth: 'min(92vw, 520px)',
+              borderRadius: 3,
+              bgcolor: 'rgba(18, 25, 42, 0.96)',
+              color: 'common.white',
+            }}
+          >
+            <Stack spacing={2} alignItems="center" textAlign="center">
+              <CircularProgress color="inherit" size={34} thickness={4.5} />
+              <Stack spacing={0.75}>
+                <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                  Audio Director is working
+                </Typography>
+                <Typography variant="body1" sx={{ color: 'rgba(255,255,255,0.84)' }}>
+                  {controller.activeBusyLabel ?? 'Processing request…'}
+                </Typography>
+              </Stack>
+            </Stack>
+          </Paper>
+        </Backdrop>
       </Box>
     </ThemeProvider>
   );

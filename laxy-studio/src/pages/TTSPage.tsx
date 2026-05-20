@@ -99,6 +99,11 @@ type PersistedJobSelection = {
   selectedHistoryVersion: AudioHistorySelection;
 };
 
+type DeleteGuideDialogState = {
+  open: boolean;
+  guide: GuidePickerOption | null;
+};
+
 type AudioDirectorLaunchRecord = {
   jobId: string;
   windowRef: Window | null;
@@ -262,6 +267,10 @@ export default function TTSPage() {
   const [quickCreateLanguages, setQuickCreateLanguages] = useState<string[]>(['en']);
   const [quickCreateCreating, setQuickCreateCreating] = useState(false);
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
+  const [deleteGuideDialog, setDeleteGuideDialog] = useState<DeleteGuideDialogState>({ open: false, guide: null });
+  const [deleteGuideConfirmText, setDeleteGuideConfirmText] = useState('');
+  const [deleteGuideLoading, setDeleteGuideLoading] = useState(false);
+  const [deleteGuideError, setDeleteGuideError] = useState<string | null>(null);
   const [spotManagerTitle, setSpotManagerTitle] = useState('');
   const [spotComposerOpen, setSpotComposerOpen] = useState(false);
   const [spotManagerCreating, setSpotManagerCreating] = useState(false);
@@ -685,6 +694,23 @@ export default function TTSPage() {
     trackSummaries.some((summary) => summary.spotId === job.spotId && summary.lang === job.language && Boolean(summary.hasGeneratedAudio))
   );
 
+  const handleOpenDeleteGuideDialog = () => {
+    if (!selectedGuideOption || deleteGuideLoading) return;
+    setDeleteGuideError(null);
+    setDeleteGuideConfirmText('');
+    setDeleteGuideDialog({
+      open: true,
+      guide: selectedGuideOption,
+    });
+  };
+
+  const handleCloseDeleteGuideDialog = () => {
+    if (deleteGuideLoading) return;
+    setDeleteGuideDialog({ open: false, guide: null });
+    setDeleteGuideConfirmText('');
+    setDeleteGuideError(null);
+  };
+
   const handleCreateMinimalGuide = async () => {
     const guideTitle = quickCreateGuideTitle.trim();
     const seededLanguages = sortLanguageCodes(quickCreateLanguages.filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language)));
@@ -744,6 +770,72 @@ export default function TTSPage() {
       setQuickCreateError(`Unable to create a minimal guide: ${message}`);
     } finally {
       setQuickCreateCreating(false);
+    }
+  };
+
+  const handleDeleteGuide = async () => {
+    const guide = deleteGuideDialog.guide;
+    if (!guide) return;
+    if (deleteGuideConfirmText.trim() !== guide.title) return;
+
+    setDeleteGuideLoading(true);
+    setDeleteGuideError(null);
+
+    try {
+      const { db } = initFirebase();
+      const trackSnapshot = await getDocs(collection(db, 'guides', guide.id, 'audioTracks'));
+      let batch = writeBatch(db);
+      let operationCount = 0;
+
+      const flushBatch = async () => {
+        if (operationCount === 0) return;
+        await batch.commit();
+        batch = writeBatch(db);
+        operationCount = 0;
+      };
+
+      for (const trackDoc of trackSnapshot.docs) {
+        const versionsSnapshot = await getDocs(collection(
+          db,
+          'guides',
+          guide.id,
+          'audioTracks',
+          trackDoc.id,
+          'versions',
+        ));
+
+        for (const versionDoc of versionsSnapshot.docs) {
+          batch.delete(versionDoc.ref);
+          operationCount += 1;
+          if (operationCount >= 400) {
+            await flushBatch();
+          }
+        }
+
+        batch.delete(trackDoc.ref);
+        operationCount += 1;
+        if (operationCount >= 400) {
+          await flushBatch();
+        }
+      }
+
+      batch.delete(doc(db, 'guides', guide.id));
+      operationCount += 1;
+      await flushBatch();
+
+      setGuidePickerGuides((previous) => previous.filter((item) => item.id !== guide.id));
+      setGuidePickerSelectionId((current) => (current === guide.id ? '' : current));
+      if (sharedGuideTarget?.guideId === guide.id) {
+        setSharedGuideTarget(null);
+        setJobs([]);
+        setSelectedSpotId('');
+      }
+      handleCloseDeleteGuideDialog();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDeleteGuideError(`Unable to delete the guide: ${message}`);
+    } finally {
+      setDeleteGuideLoading(false);
     }
   };
 
@@ -859,11 +951,10 @@ export default function TTSPage() {
     const launchId = crypto.randomUUID();
     const popupWindow = window.open(
       'about:blank',
-      `audio-director-${launchId}`,
-      'popup=yes,width=1440,height=960,left=80,top=80,resizable=yes,scrollbars=yes',
+      '_blank',
     );
     if (!popupWindow) {
-      window.alert('Audio Director could not be opened. Please allow pop-up windows for this site and try again.');
+      window.alert('Audio Director could not be opened in a new tab. Please allow new tabs for this site and try again.');
       return;
     }
 
@@ -872,6 +963,7 @@ export default function TTSPage() {
       windowRef: popupWindow,
     };
     bumpOpenAudioDirectorRevision();
+    popupWindow.document.title = `${job.spotTitle} · ${langLabel(job.language)} · Audio Director`;
 
     popupWindow.location.href = buildAudioDirectorHistoryUrl({
       basePath: ROUTES.audioDirector,
@@ -1412,6 +1504,26 @@ export default function TTSPage() {
                     </Typography>
                   </Stack>
                 ) : null}
+                {selectedGuideOption ? (
+                  <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1}
+                    alignItems={{ xs: 'stretch', sm: 'center' }}
+                    justifyContent="space-between"
+                  >
+                    <Typography variant="caption" color="text.secondary">
+                      Selected: {selectedGuideOption.title}
+                    </Typography>
+                    <Button
+                      color="error"
+                      startIcon={<DeleteOutlineIcon />}
+                      onClick={handleOpenDeleteGuideDialog}
+                      disabled={deleteGuideLoading}
+                    >
+                      Remove Guide
+                    </Button>
+                  </Stack>
+                ) : null}
               </Stack>
             )}
           </Stack>
@@ -1443,6 +1555,49 @@ export default function TTSPage() {
               Use Guide
             </Button>
           )}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={deleteGuideDialog.open}
+        onClose={handleCloseDeleteGuideDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Delete Guide</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            {deleteGuideError ? <Alert severity="error">{deleteGuideError}</Alert> : null}
+            <Typography variant="body2" color="text.secondary">
+              This will permanently delete the guide and all saved audio history under it.
+            </Typography>
+            <Typography variant="body2">
+              Type <strong>{deleteGuideDialog.guide?.title ?? ''}</strong> to confirm.
+            </Typography>
+            <TextField
+              label="Guide Title Confirmation"
+              value={deleteGuideConfirmText}
+              onChange={(event) => setDeleteGuideConfirmText(event.target.value)}
+              disabled={deleteGuideLoading}
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseDeleteGuideDialog} disabled={deleteGuideLoading}>
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            startIcon={<DeleteOutlineIcon />}
+            onClick={() => {
+              void handleDeleteGuide();
+            }}
+            disabled={deleteGuideLoading || deleteGuideConfirmText.trim() !== (deleteGuideDialog.guide?.title ?? '')}
+          >
+            {deleteGuideLoading ? 'Deleting…' : 'Delete Guide'}
+          </Button>
         </DialogActions>
       </Dialog>
     </Container>
