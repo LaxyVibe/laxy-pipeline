@@ -608,6 +608,131 @@ describe('generateCharacter', () => {
   });
 });
 
+describe('generateDetailedSceneParagraph', () => {
+  it('calls generate-detailed-scene-paragraph with guide, spot, and character context', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        detailedSceneParagraph:
+          'Late afternoon light pours across the main hall as John stands close to the exhibit, letting the quiet room draw his voice into a warmer register.',
+      }),
+    });
+
+    const { generateDetailedSceneParagraph } = await import('./api');
+    const result = await generateDetailedSceneParagraph({
+      guideName: 'Grand Museum Tour',
+      spotName: 'Main Hall',
+      characterName: 'John',
+      characterRole: 'Museum Manager',
+      characterContext: 'Formal and confident narrator.',
+      characterStaticInstruction: 'You are John, a calm narrator.',
+    });
+
+    const calledUrl = String((global.fetch as any).mock.calls[0][0]);
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(calledUrl).toMatch(/\/pipeline\/generate-detailed-scene-paragraph|generate-detailed-scene-paragraph-/);
+    expect(body).toEqual({
+      guideName: 'Grand Museum Tour',
+      spotName: 'Main Hall',
+      characterName: 'John',
+      characterRole: 'Museum Manager',
+      characterContext: 'Formal and confident narrator.',
+      characterStaticInstruction: 'You are John, a calm narrator.',
+    });
+    expect(result.detailedSceneParagraph).toContain('Late afternoon light');
+  });
+
+  it('rejects invalid detailed scene response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+      }),
+    });
+
+    const { generateDetailedSceneParagraph } = await import('./api');
+    await expect(
+      generateDetailedSceneParagraph({
+        guideName: 'Grand Museum Tour',
+        spotName: 'Main Hall',
+        characterName: 'John',
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SHAPE',
+    });
+  });
+});
+
+describe('generateDetailedPerformanceGuidelines', () => {
+  it('calls generate-detailed-performance-guidelines with raw performance hints and character context', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+        detailedPerformanceGuidelines: [
+          'Style: The "Vocal Smile". The delivery carries contained warmth and a lightly raised soft palate.',
+          'Pace: Speaks with a calm cadence and deliberate 1-second pauses after key facts.',
+          'Accent: Use a refined neutral English accent with careful museum-guide diction.',
+        ].join('\n'),
+      }),
+    });
+
+    const { generateDetailedPerformanceGuidelines } = await import('./api');
+    const result = await generateDetailedPerformanceGuidelines({
+      where: 'A quiet shrine at dusk.',
+      who: 'First-time visitors.',
+      what: 'Create a feeling of reverence.',
+      how: 'Softly, with respectful pauses.',
+      characterName: 'John',
+      characterRole: 'Museum Manager',
+      characterContext: 'Formal and confident narrator.',
+      characterStaticInstruction: 'You are John, a calm narrator.',
+    });
+
+    const calledUrl = String((global.fetch as any).mock.calls[0][0]);
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(calledUrl).toMatch(/\/pipeline\/generate-detailed-performance-guidelines|generate-detailed-performance-guidelines-/);
+    expect(body).toEqual({
+      where: 'A quiet shrine at dusk.',
+      who: 'First-time visitors.',
+      what: 'Create a feeling of reverence.',
+      how: 'Softly, with respectful pauses.',
+      characterName: 'John',
+      characterRole: 'Museum Manager',
+      characterContext: 'Formal and confident narrator.',
+      characterStaticInstruction: 'You are John, a calm narrator.',
+    });
+    expect(result.detailedPerformanceGuidelines).toContain('Style: The "Vocal Smile".');
+  });
+
+  it('rejects invalid detailed performance guidelines response shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        success: true,
+      }),
+    });
+
+    const { generateDetailedPerformanceGuidelines } = await import('./api');
+    await expect(
+      generateDetailedPerformanceGuidelines({
+        characterName: 'John',
+      }),
+    ).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      status: 502,
+      code: 'INVALID_RESPONSE_SHAPE',
+    });
+  });
+});
+
 describe('enhanceScript', () => {
   it('passes cue density through to the enhancement endpoint', async () => {
     global.fetch = vi.fn().mockResolvedValue({

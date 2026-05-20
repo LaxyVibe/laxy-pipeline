@@ -17,6 +17,7 @@ import {
 import {
   bootstrapAudioSession,
   enhanceScript,
+  generateDetailedPerformanceGuidelines,
   generateAudioForLanguage,
   generateCharacter,
   generateJapaneseHiragana,
@@ -30,6 +31,7 @@ import {
   AUDIO_MVP_VOICES,
   buildDirectorPayload,
   clearCompiledPromptCustomization,
+  clearGeneratedPerformanceGuidelines,
   buildExcerpt,
   createDefaultDirectorNote,
   createDefaultSettings,
@@ -673,7 +675,7 @@ export function useAudioDirectorController() {
         character: selectedCharacter,
         voice: selectedVoice,
         scriptText: manuscriptText,
-        poiName: items[0]?.title || effectiveSpotTitle,
+        poiName: effectiveSpotTitle || items[0]?.title,
         projectTitle: effectiveGuideTitle,
       })
       : ''),
@@ -723,7 +725,7 @@ export function useAudioDirectorController() {
                   character,
                   voice,
                   scriptText: item.scriptText,
-                  poiName: item.title || effectiveSpotTitle,
+                  poiName: effectiveSpotTitle || item.title,
                   projectTitle: effectiveGuideTitle,
                 })
                 : '',
@@ -782,7 +784,7 @@ export function useAudioDirectorController() {
             character,
             voice,
             scriptText: effectiveText,
-            poiName: item.title || effectiveSpotTitle,
+            poiName: effectiveSpotTitle || item.title,
             projectTitle: effectiveGuideTitle,
           })
           : {
@@ -920,7 +922,15 @@ export function useAudioDirectorController() {
       setGlobalSettings((previous) => ({
         ...previous,
         characterId: '',
-        directorNote: clearCompiledPromptCustomization(previous.directorNote),
+        directorNote: {
+          ...clearGeneratedPerformanceGuidelines(
+            clearCompiledPromptCustomization(previous.directorNote),
+          ),
+          scene: '',
+          style: '',
+          pacing: '',
+          tone: '',
+        },
       }));
       return;
     }
@@ -936,7 +946,15 @@ export function useAudioDirectorController() {
       voiceId: hasExplicitVoiceSelection && previous.voiceId
         ? previous.voiceId
         : recommendation.recommendedVoiceId,
-      directorNote: clearCompiledPromptCustomization(previous.directorNote),
+      directorNote: {
+        ...clearGeneratedPerformanceGuidelines(
+          clearCompiledPromptCustomization(previous.directorNote),
+        ),
+        scene: '',
+        style: '',
+        pacing: '',
+        tone: '',
+      },
     }));
   };
 
@@ -1057,7 +1075,7 @@ export function useAudioDirectorController() {
         const remaining = previous.filter((item) => item.id !== documentId);
         return [optimisticCharacter, ...remaining];
       });
-      handleGlobalCharacterChange(documentId);
+      void handleGlobalCharacterChange(documentId);
       setCharacterDesignerOpen(false);
       resetCharacterDesignerState();
     } catch (error) {
@@ -1095,7 +1113,7 @@ export function useAudioDirectorController() {
       }
       setCustomCharacters((previous) => previous.filter((item) => item.id !== character.id));
       if (globalSettings.characterId === character.id) {
-        handleGlobalCharacterChange('');
+        void handleGlobalCharacterChange('');
       }
       if (editingCharacterId === character.id) {
         setCharacterDesignerOpen(false);
@@ -1146,10 +1164,58 @@ export function useAudioDirectorController() {
     setGlobalSettings((previous) => ({
       ...previous,
       directorNote: {
-        ...clearCompiledPromptCustomization(previous.directorNote),
+        ...clearGeneratedPerformanceGuidelines(
+          clearCompiledPromptCustomization(previous.directorNote),
+        ),
         [field]: value,
       },
     }));
+  };
+
+  const handleDirectorNoteDialogDone = async () => {
+    const selected = selectedCharacter;
+    const where = globalSettings.directorNote.scene.trim();
+    const who = globalSettings.directorNote.style.trim();
+    const what = globalSettings.directorNote.pacing.trim();
+    const how = globalSettings.directorNote.tone.trim();
+
+    if (!selected || (!where && !who && !what && !how)) {
+      setGlobalSettings((previous) => ({
+        ...previous,
+        directorNote: clearGeneratedPerformanceGuidelines(previous.directorNote),
+      }));
+      setDirectorNoteEditorOpen(false);
+      return;
+    }
+
+    const busyOperationId = beginBusyOperation('Generating detailed performance guidelines…');
+    setGenerationError(null);
+    try {
+      const result = await generateDetailedPerformanceGuidelines({
+        where,
+        who,
+        what,
+        how,
+        characterName: selected.name,
+        characterRole: selected.role,
+        characterContext: selected.context || selected.personalityDNA || undefined,
+        characterStaticInstruction: selected.staticInstruction || undefined,
+      });
+
+      setGlobalSettings((previous) => ({
+        ...previous,
+        directorNote: {
+          ...previous.directorNote,
+          generatedPerformanceGuidelines: result.detailedPerformanceGuidelines.trim(),
+        },
+      }));
+      setDirectorNoteEditorOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setGenerationError(`Detailed performance guidelines generation failed: ${message}`);
+    } finally {
+      endBusyOperation(busyOperationId);
+    }
   };
 
   const handleCompiledPromptChange = (value: string) => {
@@ -1475,7 +1541,7 @@ export function useAudioDirectorController() {
           ? embeddedHistoryTarget
           : null;
         const requestSpotId = generationTarget?.spotId ?? item.spotId;
-        const requestTitle = item.title.trim() || generationTarget?.spotTitle || '';
+        const requestTitle = generationTarget?.spotTitle?.trim() || item.title.trim() || '';
         const sourceText = item.scriptText;
         const enhancementEntry = languageEnhancementEntries[item.spotId];
         const effectiveText = scriptEnhancementEnabled
@@ -1719,6 +1785,7 @@ export function useAudioDirectorController() {
     handleCurrentScriptTextChange,
     handleDeleteCustomCharacter,
     handleDirectorNoteFieldChange,
+    handleDirectorNoteDialogDone,
     handleDownloadConfig,
     handleEnhanceActiveLanguage,
     handleEnhancedScriptChange,

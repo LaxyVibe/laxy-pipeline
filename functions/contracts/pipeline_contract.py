@@ -93,6 +93,26 @@ class GenerateDirectorNoteRequest(BaseModel):
     context: str | None = None
 
 
+class GenerateDetailedSceneParagraphRequest(BaseModel):
+    guideName: str = Field(min_length=1)
+    spotName: str = Field(min_length=1)
+    characterName: str = Field(min_length=1)
+    characterRole: str | None = None
+    characterContext: str | None = None
+    characterStaticInstruction: str | None = None
+
+
+class GenerateDetailedPerformanceGuidelinesRequest(BaseModel):
+    where: str | None = None
+    who: str | None = None
+    what: str | None = None
+    how: str | None = None
+    characterName: str = Field(min_length=1)
+    characterRole: str | None = None
+    characterContext: str | None = None
+    characterStaticInstruction: str | None = None
+
+
 class EnhanceScriptRequest(BaseModel):
     scriptContent: str = Field(min_length=1)
     characterName: str | None = None

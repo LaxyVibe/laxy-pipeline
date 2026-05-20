@@ -16,6 +16,7 @@ type Props = {
   open: boolean;
   settings: AudioGuideSettings;
   onClose: () => void;
+  onDone: () => void;
   onEnvironmentChange: (value: string) => void;
   onTargetAudienceChange: (value: string) => void;
   onGoalChange: (value: string) => void;
@@ -27,6 +28,7 @@ export default function DirectorNoteDialog(props: Props) {
     open,
     settings,
     onClose,
+    onDone,
     onEnvironmentChange,
     onTargetAudienceChange,
     onGoalChange,
@@ -51,7 +53,7 @@ export default function DirectorNoteDialog(props: Props) {
         <Stack spacing={2.5} sx={{ pt: 1 }}>
           <TextField
             label="Where (Environment)"
-            helperText="The physical space, lighting, and ambient atmosphere."
+            helperText="The physical space, lighting, ambient atmosphere, and scene constraints."
             multiline
             minRows={3}
             value={settings.directorNote.scene}
@@ -92,7 +94,7 @@ export default function DirectorNoteDialog(props: Props) {
       </DialogContent>
 
       <DialogActions>
-        <Button onClick={onClose} variant="contained">
+        <Button onClick={onDone} variant="contained">
           Done
         </Button>
       </DialogActions>

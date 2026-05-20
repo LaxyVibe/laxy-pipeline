@@ -67,6 +67,16 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: () => `/${GCP_PROJECT}/${GCP_REGION}/generate_japanese_hiragana`,
         },
+        '/pipeline/generate-detailed-scene-paragraph': {
+          target: 'http://127.0.0.1:5001',
+          changeOrigin: true,
+          rewrite: () => `/${GCP_PROJECT}/${GCP_REGION}/generate_detailed_scene_paragraph`,
+        },
+        '/pipeline/generate-detailed-performance-guidelines': {
+          target: 'http://127.0.0.1:5001',
+          changeOrigin: true,
+          rewrite: () => `/${GCP_PROJECT}/${GCP_REGION}/generate_detailed_performance_guidelines`,
+        },
         '/pipeline': {
           target: 'http://127.0.0.1:5001',
           changeOrigin: true,

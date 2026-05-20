@@ -44,6 +44,7 @@ export interface DirectorNoteDraft {
   style: string;
   pacing: string;
   tone: string;
+  generatedPerformanceGuidelines: string;
   compiledPromptOverride: string;
   isPromptCustomized: boolean;
 }
@@ -297,6 +298,7 @@ export function createDefaultDirectorNote(
     style: '',
     pacing: '',
     tone: '',
+    generatedPerformanceGuidelines: '',
     compiledPromptOverride: '',
     isPromptCustomized: false,
   };
@@ -309,6 +311,15 @@ export function clearCompiledPromptCustomization(
     ...directorNote,
     compiledPromptOverride: '',
     isPromptCustomized: false,
+  };
+}
+
+export function clearGeneratedPerformanceGuidelines(
+  directorNote: DirectorNoteDraft,
+): DirectorNoteDraft {
+  return {
+    ...directorNote,
+    generatedPerformanceGuidelines: '',
   };
 }
 
@@ -381,6 +392,10 @@ export function normalizeDirectorNoteDraft(
       ?? stringValue(value.manner)
       ?? stringValue(value.accent)
       ?? fallback.tone,
+    generatedPerformanceGuidelines:
+      stringValue(value.generatedPerformanceGuidelines)
+      ?? stringValue(value.detailedPerformanceGuidelines)
+      ?? fallback.generatedPerformanceGuidelines,
     compiledPromptOverride,
     isPromptCustomized: value.isPromptCustomized === true || Boolean(compiledPromptOverride.trim()),
   };
@@ -686,24 +701,14 @@ export function resolveCompiledPrompt(args: {
 
   const resolvedPoiName = poiName?.trim() || 'POI Name';
   const resolvedProjectTitle = projectTitle?.trim() || 'Project Title';
-  const placeholderScene = [
-    'Placeholder 1 (dummy):',
-    `Environment: ${directorNote.scene.trim() || 'unspecified'}.`,
-    `Target audience: ${directorNote.style.trim() || 'unspecified'}.`,
-    `Expectation/goal: ${directorNote.pacing.trim() || 'unspecified'}.`,
-  ].join(' ');
-  const placeholderDirection = [
-    'Placeholder 2 (dummy):',
-    `Tone/Accent/Manner: ${directorNote.tone.trim() || 'unspecified'}.`,
-  ].join(' ');
+  const detailedPerformanceGuidelines = directorNote.generatedPerformanceGuidelines.trim();
 
   return [
     `# AUDIO PROFILE: ${character.name}`,
     `## "[${character.role}/${resolvedPoiName}]"`,
     `## THE SCENE: ${resolvedProjectTitle}`,
-    placeholderScene,
-    "### DIRECTOR'S NOTES",
-    placeholderDirection,
+    detailedPerformanceGuidelines ? '## DETAILED PERFORMANCE GUIDELINES' : '',
+    detailedPerformanceGuidelines,
     '### SAMPLE CONTEXT',
     sampleContext,
     '#### TRANSCRIPT',

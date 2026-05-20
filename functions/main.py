@@ -50,7 +50,9 @@ from contracts.pipeline_contract import (
     AudioSessionBootstrapRequest,
     AudioGenerateLanguageRequest,
     AudioGenerateRequest,
+    GenerateDetailedPerformanceGuidelinesRequest,
     EnhanceScriptRequest,
+    GenerateDetailedSceneParagraphRequest,
     GenerateJapaneseHiraganaRequest,
     GenerateCharacterRequest,
     GenerateDirectorNoteRequest,
@@ -2078,6 +2080,186 @@ def generate_director_note(req: https_fn.Request) -> https_fn.Response:
                 "Director note generation failed",
                 500,
                 code="DIRECTOR_NOTE_GENERATION_FAILED",
+                details=str(e),
+                retryable=True,
+            )
+    finally:
+        _clear_request_context(context_token)
+
+
+@https_fn.on_request(
+    memory=options.MemoryOption.GB_1,
+    timeout_sec=120,
+    region="us-central1",
+)
+def generate_detailed_scene_paragraph(req: https_fn.Request) -> https_fn.Response:
+    """
+    Generate the detailed scene paragraph used as Placeholder 1 of the TTS prompt.
+
+    Request body:
+    {
+        "guideName": "Grand Museum Tour",
+        "spotName": "Main Hall",
+        "characterName": "John",
+        "characterRole": "Museum Manager",
+        "characterContext": "Formal and confident narrator",
+        "characterStaticInstruction": "You are John..."
+    }
+
+    Response:
+    {
+        "success": true,
+        "detailedSceneParagraph": "A vivid 3-4 sentence paragraph..."
+    }
+    """
+    if req.method == "OPTIONS":
+        return https_fn.Response("", status=204, headers=_cors_headers())
+
+    context_token = _set_request_context(req, endpoint="generate_detailed_scene_paragraph")
+    try:
+        if req.method != "POST":
+            return _error_response("Method not allowed", 405, code="METHOD_NOT_ALLOWED")
+
+        auth_context, auth_error = _authorise_admin_request(req, require_tenant_scope=False)
+        if auth_error:
+            _write_audit_log(
+                "pipeline.generate_detailed_scene_paragraph.denied",
+                resource="detailed_scene_paragraph",
+                details={"reason": "auth_failed"},
+                success=False,
+            )
+            return auth_error
+
+        try:
+            body = req.get_json(silent=True) or {}
+        except Exception:
+            return _error_response("Invalid JSON body", code="INVALID_JSON_BODY")
+
+        try:
+            payload = GenerateDetailedSceneParagraphRequest.model_validate(body)
+        except ValidationError as e:
+            return _error_response(
+                "Invalid request body",
+                code="INVALID_REQUEST_BODY",
+                details=e.errors(),
+            )
+
+        try:
+            executor = get_executor()
+            result = _run_async(
+                executor.generate_detailed_scene_paragraph(
+                    guide_name=payload.guideName,
+                    spot_name=payload.spotName,
+                    character_name=payload.characterName,
+                    character_role=payload.characterRole,
+                    character_context=payload.characterContext,
+                    character_static_instruction=payload.characterStaticInstruction,
+                )
+            )
+            _write_audit_log(
+                "pipeline.generate_detailed_scene_paragraph",
+                resource="detailed_scene_paragraph",
+                details={
+                    "guideName": payload.guideName,
+                    "spotName": payload.spotName,
+                    "characterName": payload.characterName,
+                },
+                success=True,
+            )
+            return _json_response(result)
+        except Exception as e:
+            logger.error(f"generate_detailed_scene_paragraph error: {e}\n{traceback.format_exc()}")
+            _write_audit_log(
+                "pipeline.generate_detailed_scene_paragraph.failed",
+                resource="detailed_scene_paragraph",
+                details={"error": str(e)},
+                success=False,
+            )
+            return _error_response(
+                "Detailed scene paragraph generation failed",
+                500,
+                code="DETAILED_SCENE_GENERATION_FAILED",
+                details=str(e),
+                retryable=True,
+            )
+    finally:
+        _clear_request_context(context_token)
+
+
+@https_fn.on_request(
+    memory=options.MemoryOption.GB_1,
+    timeout_sec=120,
+    region="us-central1",
+)
+def generate_detailed_performance_guidelines(req: https_fn.Request) -> https_fn.Response:
+    """
+    Generate the Placeholder 2 detailed performance guidelines for the TTS prompt.
+    """
+    if req.method == "OPTIONS":
+        return https_fn.Response("", status=204, headers=_cors_headers())
+
+    context_token = _set_request_context(req, endpoint="generate_detailed_performance_guidelines")
+    try:
+        if req.method != "POST":
+            return _error_response("Method not allowed", 405, code="METHOD_NOT_ALLOWED")
+
+        auth_context, auth_error = _authorise_admin_request(req, require_tenant_scope=False)
+        if auth_error:
+            _write_audit_log(
+                "pipeline.generate_detailed_performance_guidelines.denied",
+                resource="detailed_performance_guidelines",
+                details={"reason": "auth_failed"},
+                success=False,
+            )
+            return auth_error
+
+        try:
+            body = req.get_json(silent=True) or {}
+        except Exception:
+            return _error_response("Invalid JSON body", code="INVALID_JSON_BODY")
+
+        try:
+            payload = GenerateDetailedPerformanceGuidelinesRequest.model_validate(body)
+        except ValidationError as e:
+            return _error_response(
+                "Invalid request body",
+                code="INVALID_REQUEST_BODY",
+                details=e.errors(),
+            )
+
+        try:
+            executor = get_executor()
+            result = _run_async(
+                executor.generate_detailed_performance_guidelines(
+                    where=payload.where,
+                    who=payload.who,
+                    what=payload.what,
+                    how=payload.how,
+                    character_name=payload.characterName,
+                    character_role=payload.characterRole,
+                    character_context=payload.characterContext,
+                    character_static_instruction=payload.characterStaticInstruction,
+                )
+            )
+            _write_audit_log(
+                "pipeline.generate_detailed_performance_guidelines",
+                resource="detailed_performance_guidelines",
+                details={"characterName": payload.characterName},
+                success=True,
+            )
+            return _json_response(result)
+        except Exception as e:
+            logger.error(f"generate_detailed_performance_guidelines error: {e}\n{traceback.format_exc()}")
+            _write_audit_log(
+                "pipeline.generate_detailed_performance_guidelines.failed",
+                resource="detailed_performance_guidelines",
+                details={"error": str(e)},
+                success=False,
+            )
+            return _error_response(
+                "Detailed performance guidelines generation failed",
+                500,
+                code="DETAILED_PERFORMANCE_GUIDELINES_GENERATION_FAILED",
                 details=str(e),
                 retryable=True,
             )

@@ -3,6 +3,7 @@ import {
   AUDIO_MVP_VOICES,
   PRESET_AUDIO_CHARACTERS,
   clearCompiledPromptCustomization,
+  clearGeneratedPerformanceGuidelines,
   createDefaultSettings,
   resolveCompiledPrompt,
   validateEnhancedScript,
@@ -37,6 +38,7 @@ describe('clearCompiledPromptCustomization', () => {
       style: 'Adult visitors',
       pacing: 'Leave them feeling reflective',
       tone: 'Soft British accent',
+      generatedPerformanceGuidelines: 'Style: Test\nPace: Test\nAccent: Test',
       compiledPromptOverride: 'Old character prompt',
       isPromptCustomized: true,
     });
@@ -46,6 +48,31 @@ describe('clearCompiledPromptCustomization', () => {
       style: 'Adult visitors',
       pacing: 'Leave them feeling reflective',
       tone: 'Soft British accent',
+      generatedPerformanceGuidelines: 'Style: Test\nPace: Test\nAccent: Test',
+      compiledPromptOverride: '',
+      isPromptCustomized: false,
+    });
+  });
+});
+
+describe('clearGeneratedPerformanceGuidelines', () => {
+  it('clears generated placeholder 2 guidance while keeping raw where/who/what/how input', () => {
+    const result = clearGeneratedPerformanceGuidelines({
+      scene: 'Quiet gallery',
+      style: 'Adult visitors',
+      pacing: 'Leave them feeling reflective',
+      tone: 'Soft British accent',
+      generatedPerformanceGuidelines: 'Style: Test\nPace: Test\nAccent: Test',
+      compiledPromptOverride: '',
+      isPromptCustomized: false,
+    });
+
+    expect(result).toEqual({
+      scene: 'Quiet gallery',
+      style: 'Adult visitors',
+      pacing: 'Leave them feeling reflective',
+      tone: 'Soft British accent',
+      generatedPerformanceGuidelines: '',
       compiledPromptOverride: '',
       isPromptCustomized: false,
     });
@@ -53,12 +80,13 @@ describe('clearCompiledPromptCustomization', () => {
 });
 
 describe('resolveCompiledPrompt', () => {
-  it('uses the new performance hint prompt structure', () => {
+  it('uses generated detailed performance guidelines and omits placeholder 1', () => {
     const settings = createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]);
-    settings.directorNote.scene = 'Candlelit stone corridor with soft ambient echo';
-    settings.directorNote.style = 'Curious first-time museum visitors';
-    settings.directorNote.pacing = 'Deliver a calm sense of wonder';
-    settings.directorNote.tone = 'Measured, warm, lightly British';
+    settings.directorNote.generatedPerformanceGuidelines = [
+      'Style: The "Reverent Guide". You must hear the deep respect in the tone; the voice stays composed and inwardly focused.',
+      'Pace: Speaks with a calm, unhurried cadence. Insert deliberate 1-second pauses after major historical facts to let the weight sink in.',
+      'Accent: Use the character profile accent baseline with careful museum-guide diction and any user-requested localized pronunciation.',
+    ].join('\n');
     const prompt = resolveCompiledPrompt({
       settings,
       character: PRESET_AUDIO_CHARACTERS[0],
@@ -71,10 +99,11 @@ describe('resolveCompiledPrompt', () => {
     expect(prompt).toContain('# AUDIO PROFILE: John');
     expect(prompt).toContain('## "[Museum Manager/Main Hall]"');
     expect(prompt).toContain('## THE SCENE: Grand Museum Tour');
-    expect(prompt).toContain('Environment: Candlelit stone corridor with soft ambient echo.');
-    expect(prompt).toContain('Target audience: Curious first-time museum visitors.');
-    expect(prompt).toContain('Expectation/goal: Deliver a calm sense of wonder.');
-    expect(prompt).toContain('Tone/Accent/Manner: Measured, warm, lightly British.');
+    expect(prompt).not.toContain('Placeholder 1');
+    expect(prompt).toContain('## DETAILED PERFORMANCE GUIDELINES');
+    expect(prompt).toContain('Style: The "Reverent Guide".');
+    expect(prompt).toContain('Pace: Speaks with a calm, unhurried cadence.');
+    expect(prompt).toContain('Accent: Use the character profile accent baseline');
     expect(prompt).toContain('#### TRANSCRIPT');
     expect(prompt).toContain('Hello world.');
   });

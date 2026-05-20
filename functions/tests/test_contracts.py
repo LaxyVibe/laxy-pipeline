@@ -9,6 +9,7 @@ from contracts.pipeline_contract import (
     AudioGenerateLanguageRequest,
     AudioGenerateRequest,
     GenerateCharacterRequest,
+    GenerateDetailedPerformanceGuidelinesRequest,
     GenerateJapaneseHiraganaRequest,
     PublishGuideRequest,
     PublishStatusRequest,
@@ -201,6 +202,24 @@ def test_generate_character_request_requires_structured_fields() -> None:
     })
     assert payload.name == "John"
     assert payload.context == "A knowledgeable person who has a formal and confident tone."
+
+
+def test_generate_detailed_performance_guidelines_request_requires_character_name() -> None:
+    with pytest.raises(ValidationError):
+        GenerateDetailedPerformanceGuidelinesRequest.model_validate({
+            "where": "Quiet gallery",
+            "how": "Softly",
+        })
+
+    payload = GenerateDetailedPerformanceGuidelinesRequest.model_validate({
+        "where": "Quiet gallery",
+        "who": "Adult visitors",
+        "what": "Create a reflective tone",
+        "how": "Softly",
+        "characterName": "John",
+    })
+    assert payload.characterName == "John"
+    assert payload.where == "Quiet gallery"
 
 
 def test_translate_language_request_requires_target_and_core_language() -> None:

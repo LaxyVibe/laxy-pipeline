@@ -288,7 +288,7 @@ export default function AudioDirectorApp() {
           onDeleteCustomCharacter={controller.handleDeleteCustomCharacter}
           onEditCustomCharacter={controller.openEditCharacterDesigner}
           onSelect={(characterId) => {
-            controller.handleGlobalCharacterChange(characterId);
+            void controller.handleGlobalCharacterChange(characterId);
             controller.setCharacterPickerOpen(false);
           }}
           onTabChange={controller.setCharacterPickerTab}
@@ -328,6 +328,9 @@ export default function AudioDirectorApp() {
 
         <DirectorNoteDialog
           onClose={() => controller.setDirectorNoteEditorOpen(false)}
+          onDone={() => {
+            void controller.handleDirectorNoteDialogDone();
+          }}
           onEnvironmentChange={(value) => controller.handleDirectorNoteFieldChange('scene', value)}
           onGoalChange={(value) => controller.handleDirectorNoteFieldChange('pacing', value)}
           onTargetAudienceChange={(value) => controller.handleDirectorNoteFieldChange('style', value)}

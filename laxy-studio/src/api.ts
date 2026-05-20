@@ -975,6 +975,102 @@ export async function generateDirectorNote(
 }
 
 
+// ── Detailed Scene Paragraph AI Generation ──
+
+export interface GenerateDetailedSceneParagraphRequest {
+  guideName: string;
+  spotName: string;
+  characterName: string;
+  characterRole?: string;
+  characterContext?: string;
+  characterStaticInstruction?: string;
+}
+
+export interface GenerateDetailedSceneParagraphResponse {
+  success: boolean;
+  detailedSceneParagraph: string;
+}
+
+export async function generateDetailedSceneParagraph(
+  request: GenerateDetailedSceneParagraphRequest,
+): Promise<GenerateDetailedSceneParagraphResponse> {
+  const trace = createRequestTraceContext('pipeline.generate_detailed_scene_paragraph');
+  const res = await fetchWithTrace(`${pipelineUrl('generate-detailed-scene-paragraph')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  }, trace);
+  await assertOkOrThrow(res);
+  const payload = await readJsonSafely(res);
+  if (payload == null) {
+    throw new ApiRequestError({
+      status: 502,
+      code: 'INVALID_JSON_RESPONSE',
+      message: 'Invalid JSON response body',
+      retryable: true,
+    });
+  }
+  const data = payload as GenerateDetailedSceneParagraphResponse;
+  if (!data.detailedSceneParagraph || typeof data.detailedSceneParagraph !== 'string') {
+    throw new ApiRequestError({
+      status: 502,
+      code: 'INVALID_RESPONSE_SHAPE',
+      message: 'Missing detailedSceneParagraph in response',
+      retryable: true,
+    });
+  }
+  return data;
+}
+
+
+export interface GenerateDetailedPerformanceGuidelinesRequest {
+  where?: string;
+  who?: string;
+  what?: string;
+  how?: string;
+  characterName: string;
+  characterRole?: string;
+  characterContext?: string;
+  characterStaticInstruction?: string;
+}
+
+export interface GenerateDetailedPerformanceGuidelinesResponse {
+  success: boolean;
+  detailedPerformanceGuidelines: string;
+}
+
+export async function generateDetailedPerformanceGuidelines(
+  request: GenerateDetailedPerformanceGuidelinesRequest,
+): Promise<GenerateDetailedPerformanceGuidelinesResponse> {
+  const trace = createRequestTraceContext('pipeline.generate_detailed_performance_guidelines');
+  const res = await fetchWithTrace(`${pipelineUrl('generate-detailed-performance-guidelines')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  }, trace);
+  await assertOkOrThrow(res);
+  const payload = await readJsonSafely(res);
+  if (payload == null) {
+    throw new ApiRequestError({
+      status: 502,
+      code: 'INVALID_JSON_RESPONSE',
+      message: 'Invalid JSON response body',
+      retryable: true,
+    });
+  }
+  const data = payload as GenerateDetailedPerformanceGuidelinesResponse;
+  if (!data.detailedPerformanceGuidelines || typeof data.detailedPerformanceGuidelines !== 'string') {
+    throw new ApiRequestError({
+      status: 502,
+      code: 'INVALID_RESPONSE_SHAPE',
+      message: 'Missing detailedPerformanceGuidelines in response',
+      retryable: true,
+    });
+  }
+  return data;
+}
+
+
 // ── Script Enhancement AI Generation ──
 
 export interface EnhanceScriptRequest {

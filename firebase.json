@@ -60,6 +60,14 @@
         "function": "generate_director_note"
       },
       {
+        "source": "/pipeline/generate-detailed-scene-paragraph",
+        "function": "generate_detailed_scene_paragraph"
+      },
+      {
+        "source": "/pipeline/generate-detailed-performance-guidelines",
+        "function": "generate_detailed_performance_guidelines"
+      },
+      {
         "source": "/pipeline/enhance-script",
         "function": "enhance_script"
       },

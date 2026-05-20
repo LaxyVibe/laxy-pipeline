@@ -153,6 +153,7 @@ function normalizeAudioDirectorDraft(
       style: '',
       pacing: '',
       tone: '',
+      generatedPerformanceGuidelines: '',
       compiledPromptOverride: '',
       isPromptCustomized: false,
     },

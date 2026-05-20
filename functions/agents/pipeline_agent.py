@@ -983,6 +983,150 @@ class PipelineExecutor:
 
         return {"success": True, "directorNote": result}
 
+    async def generate_detailed_scene_paragraph(
+        self,
+        guide_name: str,
+        spot_name: str,
+        character_name: str,
+        character_role: str | None = None,
+        character_context: str | None = None,
+        character_static_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate the detailed scene paragraph for the TTS prompt."""
+        prompt_text = load_prompt("generate_detailed_scene_paragraph")
+        model = MODELS["flash"]
+        temperature = 0.7
+
+        parts = [
+            f"Guide name: {guide_name}",
+            f"Spot name: {spot_name}",
+            f"Character name: {character_name}",
+        ]
+        if character_role:
+            parts.append(f"Character role: {character_role}")
+        if character_context:
+            parts.append(f"Character context: {character_context}")
+        if character_static_instruction:
+            parts.append(f"Character static instruction: {character_static_instruction}")
+
+        user_message = (
+            "Create the detailed scene paragraph for the TTS prompt based on this context.\n\n"
+            + "\n".join(parts)
+        )
+
+        response = await _retry_generate_content(
+            self._client,
+            timeout_seconds=self._get_step_timeout_seconds("s8_director_note"),
+            retry_context={"operation": "generate_detailed_scene_paragraph"},
+            model=model,
+            contents=user_message,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                temperature=temperature,
+            ),
+        )
+
+        text = response.text if response.text else ""
+        clean = text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+
+        paragraph = ""
+        try:
+            parsed = json.loads(clean)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+
+        if isinstance(parsed, dict):
+            paragraph = str(
+                parsed.get("detailedSceneParagraph")
+                or parsed.get("scene")
+                or parsed.get("paragraph")
+                or ""
+            ).strip()
+
+        if not paragraph:
+            paragraph = clean
+
+        return {"success": True, "detailedSceneParagraph": paragraph.strip()}
+
+    async def generate_detailed_performance_guidelines(
+        self,
+        where: str | None,
+        who: str | None,
+        what: str | None,
+        how: str | None,
+        character_name: str,
+        character_role: str | None = None,
+        character_context: str | None = None,
+        character_static_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate structured Placeholder 2 performance guidelines."""
+        prompt_text = load_prompt("generate_detailed_performance_guidelines")
+        model = MODELS["flash"]
+        temperature = 0.6
+
+        parts = [
+            f"Where: {(where or '').strip() or '(empty)'}",
+            f"Who: {(who or '').strip() or '(empty)'}",
+            f"What: {(what or '').strip() or '(empty)'}",
+            f"How: {(how or '').strip() or '(empty)'}",
+            f"Character name: {character_name}",
+        ]
+        if character_role:
+            parts.append(f"Character role: {character_role}")
+        if character_context:
+            parts.append(f"Character context: {character_context}")
+        if character_static_instruction:
+            parts.append(f"Character static instruction: {character_static_instruction}")
+
+        user_message = (
+            "Create the detailed performance guidelines for the TTS prompt based on this context.\n\n"
+            + "\n".join(parts)
+        )
+
+        response = await _retry_generate_content(
+            self._client,
+            timeout_seconds=self._get_step_timeout_seconds("s8_director_note"),
+            retry_context={"operation": "generate_detailed_performance_guidelines"},
+            model=model,
+            contents=user_message,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                temperature=temperature,
+            ),
+        )
+
+        text = response.text if response.text else ""
+        clean = text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+
+        guidelines = ""
+        try:
+            parsed = json.loads(clean)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+
+        if isinstance(parsed, dict):
+            guidelines = str(
+                parsed.get("detailedPerformanceGuidelines")
+                or parsed.get("guidelines")
+                or parsed.get("performanceGuidelines")
+                or ""
+            ).strip()
+
+        if not guidelines:
+            guidelines = clean
+
+        return {"success": True, "detailedPerformanceGuidelines": guidelines.strip()}
+
     # ── Standalone script enhancement ──
 
     async def enhance_script(
