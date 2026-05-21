@@ -62,6 +62,7 @@ type SharedGuideTarget = {
   guideId: string;
   title: string;
   tenantId?: string;
+  coreLanguage: string;
   languages: string[];
   status: 'existing' | 'minimal-draft';
 };
@@ -92,6 +93,7 @@ type GuidePickerOption = {
   id: string;
   title: string;
   tenantId?: string;
+  coreLanguage: string;
   languages: string[];
   updatedAt: number;
   status?: string;
@@ -155,8 +157,27 @@ function readLanguageCodes(value: unknown): string[] {
   );
 }
 
+function resolveGuideCoreLanguage(value: unknown, languages: string[]): string {
+  const candidate = readText(value);
+  if (candidate && languages.includes(candidate)) return candidate;
+  if (languages.includes('en')) return 'en';
+  return languages[0] ?? 'en';
+}
+
 function sortLanguageCodes(codes: string[]): string[] {
   return [...codes].sort((left, right) => {
+    const leftRank = LANGUAGE_ORDER.get(left) ?? Number.MAX_SAFE_INTEGER;
+    const rightRank = LANGUAGE_ORDER.get(right) ?? Number.MAX_SAFE_INTEGER;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    return left.localeCompare(right);
+  });
+}
+
+function sortLanguageCodesWithPrimary(codes: string[], primaryLanguage: string): string[] {
+  return [...codes].sort((left, right) => {
+    if (left === primaryLanguage && right !== primaryLanguage) return -1;
+    if (right === primaryLanguage && left !== primaryLanguage) return 1;
+
     const leftRank = LANGUAGE_ORDER.get(left) ?? Number.MAX_SAFE_INTEGER;
     const rightRank = LANGUAGE_ORDER.get(right) ?? Number.MAX_SAFE_INTEGER;
     if (leftRank !== rightRank) return leftRank - rightRank;
@@ -193,6 +214,16 @@ function createTtsJob(spotId: string, spotTitle: string, language: string): TtsJ
 
 function promptContainsTranscript(compiledPrompt: string): boolean {
   return compiledPrompt.split('\n').some((line) => line.trim() === '#### TRANSCRIPT');
+}
+
+function syncPromptTranscript(compiledPrompt: string, transcript: string): string {
+  const trimmedPrompt = compiledPrompt.trim();
+  const trimmedTranscript = transcript.trim();
+
+  if (!trimmedPrompt || !trimmedTranscript) return trimmedPrompt;
+  if (!promptContainsTranscript(trimmedPrompt)) return trimmedPrompt;
+
+  return trimmedPrompt.replace(/\n#### TRANSCRIPT[\s\S]*$/, `\n#### TRANSCRIPT\n${trimmedTranscript}`);
 }
 
 function createTtsAudioSessionId(job: TtsJob): string {
@@ -344,6 +375,7 @@ export default function TTSPage() {
   const [quickCreateExpanded, setQuickCreateExpanded] = useState(false);
   const [quickCreateGuideTitle, setQuickCreateGuideTitle] = useState(buildDefaultQuickCreateGuideTitle());
   const [quickCreateLanguages, setQuickCreateLanguages] = useState<string[]>(['en']);
+  const [quickCreateCoreLanguage, setQuickCreateCoreLanguage] = useState<string>('en');
   const [quickCreateCreating, setQuickCreateCreating] = useState(false);
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
   const [deleteGuideDialog, setDeleteGuideDialog] = useState<DeleteGuideDialogState>({ open: false, guide: null });
@@ -398,20 +430,33 @@ export default function TTSPage() {
     const derived = Array.from(new Set(trackSummaries.map((summary) => summary.lang).filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language))));
     return sortLanguageCodes(derived);
   }, [sharedGuideTarget?.languages, trackSummaries]);
+  const effectiveCoreLanguage = sharedGuideTarget?.coreLanguage ?? resolveGuideCoreLanguage('en', effectiveGuideLanguages);
   const visibleJobs = useMemo(
-    () => jobs.filter((job) => job.spotId === selectedSpotId).sort((left, right) => {
-      const leftRank = LANGUAGE_ORDER.get(left.language) ?? Number.MAX_SAFE_INTEGER;
-      const rightRank = LANGUAGE_ORDER.get(right.language) ?? Number.MAX_SAFE_INTEGER;
-      if (leftRank !== rightRank) return leftRank - rightRank;
-      return left.language.localeCompare(right.language);
-    }),
-    [jobs, selectedSpotId],
+    () => {
+      const sortedLanguages = sortLanguageCodesWithPrimary(
+        jobs
+          .filter((job) => job.spotId === selectedSpotId)
+          .map((job) => job.language),
+        effectiveCoreLanguage,
+      );
+      const languageRank = new Map(sortedLanguages.map((language, index) => [language, index]));
+
+      return jobs
+        .filter((job) => job.spotId === selectedSpotId)
+        .sort((left, right) => {
+          const leftRank = languageRank.get(left.language) ?? Number.MAX_SAFE_INTEGER;
+          const rightRank = languageRank.get(right.language) ?? Number.MAX_SAFE_INTEGER;
+          if (leftRank !== rightRank) return leftRank - rightRank;
+          return left.language.localeCompare(right.language);
+        });
+    },
+    [effectiveCoreLanguage, jobs, selectedSpotId],
   );
-  const englishJobBySpotId = useMemo(() => new Map(
+  const primaryLanguageJobBySpotId = useMemo(() => new Map(
     jobs
-      .filter((job) => job.language === 'en')
+      .filter((job) => job.language === effectiveCoreLanguage)
       .map((job) => [job.spotId, job] as const),
-  ), [jobs]);
+  ), [effectiveCoreLanguage, jobs]);
   const copyConfigTargetJob = useMemo(
     () => jobs.find((job) => job.id === copyConfigDialog.targetJobId) ?? null,
     [copyConfigDialog.targetJobId, jobs],
@@ -517,13 +562,14 @@ export default function TTSPage() {
 
   const sendScriptToAudioDirector = (targetWindow: Window | null, job: TtsJob, launchId: string) => {
     if (!targetWindow || targetWindow.closed) return;
+    const compiledPromptForAudioDirector = syncPromptTranscript(job.promptText, job.inputScript);
     targetWindow.postMessage(
       {
         type: 'laxy:script',
         launchId,
         text: job.inputScript,
         language: job.language,
-        compiledPrompt: job.promptText,
+        compiledPrompt: compiledPromptForAudioDirector,
         voiceId: job.voiceId,
         characterId: job.characterId,
         scene: job.performanceHint.scene,
@@ -837,6 +883,10 @@ export default function TTSPage() {
             id: guideDoc.id,
             title: readText(data.title) || readText(data.venueName) || readText(data.name) || guideDoc.id,
             tenantId: readText(data.tenantId) || undefined,
+            coreLanguage: resolveGuideCoreLanguage(
+              data.coreLanguage,
+              readLanguageCodes(data.ttsLanguages),
+            ),
             languages: readLanguageCodes(data.ttsLanguages),
             updatedAt: readTimestampMs(data.updatedAt) || readTimestampMs(data.createdAt),
             status: readText(data.status) || undefined,
@@ -865,6 +915,7 @@ export default function TTSPage() {
       guideId: guide.id,
       title: guide.title,
       tenantId: guide.tenantId,
+      coreLanguage: guide.coreLanguage,
       languages: guide.languages,
       status: guide.createdFrom === 'tts' && guide.status === 'draft' ? 'minimal-draft' : 'existing',
     });
@@ -882,7 +933,13 @@ export default function TTSPage() {
       const next = current.includes(language)
         ? current.filter((item) => item !== language)
         : [...current, language];
-      return sortLanguageCodes(next.filter((item) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(item)));
+      const normalized = sortLanguageCodes(next.filter((item) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(item)));
+      setQuickCreateCoreLanguage((currentCoreLanguage) => (
+        normalized.includes(currentCoreLanguage)
+          ? currentCoreLanguage
+          : normalized[0] ?? ''
+      ));
+      return normalized;
     });
   };
 
@@ -966,8 +1023,12 @@ export default function TTSPage() {
   const handleCreateMinimalGuide = async () => {
     const guideTitle = quickCreateGuideTitle.trim();
     const seededLanguages = sortLanguageCodes(quickCreateLanguages.filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language)));
+    const seededCoreLanguage = seededLanguages.includes(quickCreateCoreLanguage)
+      ? quickCreateCoreLanguage
+      : seededLanguages[0] ?? '';
     if (!guideTitle) return;
     if (seededLanguages.length === 0) return;
+    if (!seededCoreLanguage) return;
 
     setQuickCreateCreating(true);
     setQuickCreateError(null);
@@ -982,6 +1043,8 @@ export default function TTSPage() {
         ...withOptionalTenantId({
           title: guideTitle,
           status: 'draft',
+          coreLanguage: seededCoreLanguage,
+          supportedLanguages: seededLanguages,
           ttsLanguages: seededLanguages,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -995,6 +1058,7 @@ export default function TTSPage() {
         id: guideId,
         title: guideTitle,
         tenantId: tenantId || undefined,
+        coreLanguage: seededCoreLanguage,
         languages: seededLanguages,
         updatedAt: Date.now(),
         status: 'draft',
@@ -1005,6 +1069,7 @@ export default function TTSPage() {
         guideId,
         title: guideTitle,
         tenantId: tenantId || undefined,
+        coreLanguage: seededCoreLanguage,
         languages: seededLanguages,
         status: 'minimal-draft',
       });
@@ -1014,6 +1079,7 @@ export default function TTSPage() {
       setQuickCreateExpanded(false);
       setQuickCreateGuideTitle(buildDefaultQuickCreateGuideTitle());
       setQuickCreateLanguages(['en']);
+      setQuickCreateCoreLanguage('en');
       setQuickCreateError(null);
       setGuidePickerSelectionId(guideId);
       setSpotComposerOpen(true);
@@ -1230,22 +1296,22 @@ export default function TTSPage() {
 
   const handleTranslateFromEnglish = async (jobId: string) => {
     const targetJob = jobs.find((job) => job.id === jobId);
-    if (!targetJob || targetJob.language === 'en') return;
+    if (!targetJob || targetJob.language === effectiveCoreLanguage) return;
 
-    const englishJob = englishJobBySpotId.get(targetJob.spotId);
-    const englishScript = englishJob?.inputScript.trim() ?? '';
-    if (!englishJob || !englishScript) {
+    const primarySourceJob = primaryLanguageJobBySpotId.get(targetJob.spotId);
+    const primarySourceScript = primarySourceJob?.inputScript.trim() ?? '';
+    if (!primarySourceJob || !primarySourceScript) {
       setTranslationErrorByJob((previous) => ({
         ...previous,
-        [jobId]: 'Enter the English script in the English row first.',
+        [jobId]: `Enter the ${langLabel(effectiveCoreLanguage)} script in the primary language row first.`,
       }));
       return;
     }
 
     if (
       targetJob.inputScript.trim()
-      && targetJob.inputScript.trim() !== englishScript
-      && !window.confirm(`Replace the current ${langLabel(targetJob.language)} input script with an AI translation from English?`)
+      && targetJob.inputScript.trim() !== primarySourceScript
+      && !window.confirm(`Replace the current ${langLabel(targetJob.language)} input script with an AI translation from ${langLabel(effectiveCoreLanguage)}?`)
     ) {
       return;
     }
@@ -1265,10 +1331,10 @@ export default function TTSPage() {
           spotId: targetJob.spotId,
           spotNumber: 1,
           title: targetJob.spotTitle,
-          scriptText: englishScript,
+          scriptText: primarySourceScript,
         }],
         targetLanguage: targetJob.language,
-        coreLanguage: 'en',
+        coreLanguage: effectiveCoreLanguage,
       });
 
       const translatedText = result.spots[0]?.translatedText?.trim() ?? '';
@@ -1629,9 +1695,9 @@ export default function TTSPage() {
                               candidate.id !== job.id
                               && Boolean(buildStoredAudioDirectorConfig(candidate))
                             ));
-                            const englishSourceJob = englishJobBySpotId.get(job.spotId);
-                            const canTranslateFromEnglish = job.language !== 'en' && Boolean(englishSourceJob);
-                            const translateDisabled = translationPendingByJob[job.id] || !(englishSourceJob?.inputScript.trim());
+                            const primarySourceJob = primaryLanguageJobBySpotId.get(job.spotId);
+                            const canTranslateFromPrimary = job.language !== effectiveCoreLanguage && Boolean(primarySourceJob);
+                            const translateDisabled = translationPendingByJob[job.id] || !(primarySourceJob?.inputScript.trim());
                             const translateError = translationErrorByJob[job.id];
                             const audioPending = audioPendingByJob[job.id] === true;
                             const audioError = audioErrorByJob[job.id];
@@ -1677,7 +1743,7 @@ export default function TTSPage() {
                                       }}
                                       inputProps={{ 'aria-label': `Input Script ${selectedSpot.spotTitle} ${langLabel(job.language)}` }}
                                     />
-                                    {canTranslateFromEnglish ? (
+                                    {canTranslateFromPrimary ? (
                                       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
                                         <Button
                                           variant="outlined"
@@ -1687,12 +1753,12 @@ export default function TTSPage() {
                                             void handleTranslateFromEnglish(job.id);
                                           }}
                                         >
-                                          {translationPendingByJob[job.id] ? 'Translating…' : 'Translate from English'}
+                                          {translationPendingByJob[job.id] ? 'Translating…' : `Translate from ${langLabel(effectiveCoreLanguage)}`}
                                         </Button>
                                         <Typography variant="caption" color="text.secondary">
-                                          {englishSourceJob?.inputScript.trim()
-                                            ? `Use the English row as the source for ${langLabel(job.language)}.`
-                                            : 'Enter the English row script first to enable AI translation.'}
+                                          {primarySourceJob?.inputScript.trim()
+                                            ? `Use the ${langLabel(effectiveCoreLanguage)} row as the source for ${langLabel(job.language)}.`
+                                            : `Enter the ${langLabel(effectiveCoreLanguage)} row script first to enable AI translation.`}
                                         </Typography>
                                       </Stack>
                                     ) : null}
@@ -1956,6 +2022,21 @@ export default function TTSPage() {
                       ))}
                     </FormGroup>
                   </Box>
+                  <FormControl fullWidth disabled={quickCreateCreating || quickCreateLanguages.length === 0}>
+                    <InputLabel id="primary-language-label">Primary Language</InputLabel>
+                    <Select
+                      labelId="primary-language-label"
+                      value={quickCreateCoreLanguage}
+                      label="Primary Language"
+                      onChange={(event) => setQuickCreateCoreLanguage(event.target.value)}
+                    >
+                      {quickCreateLanguages.map((languageCode) => (
+                        <MenuItem key={languageCode} value={languageCode}>
+                          {langLabel(languageCode)}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
                 </Stack>
               </Paper>
             ) : (
