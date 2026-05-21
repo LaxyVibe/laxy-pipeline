@@ -151,7 +151,18 @@ export function useAudioDirectorController() {
   const analysisRunRef = useRef(0);
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
   const readyPostedRef = useRef(false);
-  const lastEmbeddedPayloadRef = useRef<{ text: string; language: string | null } | null>(null);
+  const lastEmbeddedPayloadRef = useRef<{
+    text: string;
+    language: string | null;
+    compiledPrompt?: string;
+    voiceId?: string;
+    characterId?: string;
+    scene?: string;
+    style?: string;
+    pacing?: string;
+    tone?: string;
+    generatedPerformanceGuidelines?: string;
+  } | null>(null);
   const isEmbedded = window.self !== window.top;
   const hasWindowOpener = window.opener !== null && window.opener !== window;
   const launchedFromTts = searchParams.get('source') === 'tts' && (isEmbedded || hasWindowOpener);
@@ -331,16 +342,43 @@ export function useAudioDirectorController() {
     };
   }, [currentUser]);
 
-  const applyEmbeddedScriptPayload = useCallback((payload: { text: string; language: string | null }) => {
+  const applyEmbeddedScriptPayload = useCallback((payload: {
+    text: string;
+    language: string | null;
+    compiledPrompt?: string;
+    voiceId?: string;
+    characterId?: string;
+    scene?: string;
+    style?: string;
+    pacing?: string;
+    tone?: string;
+    generatedPerformanceGuidelines?: string;
+  }) => {
     const normalizedPayload = {
       text: payload.text,
       language: payload.language,
+      compiledPrompt: payload.compiledPrompt?.trim() || '',
+      voiceId: payload.voiceId?.trim() || '',
+      characterId: payload.characterId?.trim() || '',
+      scene: payload.scene?.trim() || '',
+      style: payload.style?.trim() || '',
+      pacing: payload.pacing?.trim() || '',
+      tone: payload.tone?.trim() || '',
+      generatedPerformanceGuidelines: payload.generatedPerformanceGuidelines?.trim() || '',
     };
     const previousPayload = lastEmbeddedPayloadRef.current;
     if (
       previousPayload
       && previousPayload.text === normalizedPayload.text
       && previousPayload.language === normalizedPayload.language
+      && (previousPayload.compiledPrompt ?? '') === normalizedPayload.compiledPrompt
+      && (previousPayload.voiceId ?? '') === normalizedPayload.voiceId
+      && (previousPayload.characterId ?? '') === normalizedPayload.characterId
+      && (previousPayload.scene ?? '') === normalizedPayload.scene
+      && (previousPayload.style ?? '') === normalizedPayload.style
+      && (previousPayload.pacing ?? '') === normalizedPayload.pacing
+      && (previousPayload.tone ?? '') === normalizedPayload.tone
+      && (previousPayload.generatedPerformanceGuidelines ?? '') === normalizedPayload.generatedPerformanceGuidelines
     ) {
       return;
     }
@@ -348,6 +386,23 @@ export function useAudioDirectorController() {
     lastEmbeddedPayloadRef.current = normalizedPayload;
     resetScriptBoundState();
     setManuscriptText(payload.text);
+    const nextSettings = createDefaultSettings();
+    setGlobalSettings({
+      ...nextSettings,
+      characterId: normalizedPayload.characterId,
+      voiceId: normalizedPayload.voiceId || nextSettings.voiceId,
+      directorNote: {
+        ...createDefaultDirectorNote(nextSettings.contentVersion),
+        scene: normalizedPayload.scene,
+        style: normalizedPayload.style,
+        pacing: normalizedPayload.pacing,
+        tone: normalizedPayload.tone,
+        generatedPerformanceGuidelines: normalizedPayload.generatedPerformanceGuidelines,
+        compiledPromptOverride: normalizedPayload.compiledPrompt,
+        isPromptCustomized: Boolean(normalizedPayload.compiledPrompt),
+      },
+    });
+    setHasExplicitVoiceSelection(Boolean(normalizedPayload.voiceId));
     if (payload.language) {
       setCoreLanguage(payload.language);
     } else {
@@ -603,6 +658,17 @@ export function useAudioDirectorController() {
           language: typeof event.data.language === 'string' && SUPPORTED_LANGUAGE_CODES.has(event.data.language)
           ? event.data.language
           : null,
+          compiledPrompt: typeof event.data.compiledPrompt === 'string' ? event.data.compiledPrompt : '',
+          voiceId: typeof event.data.voiceId === 'string' ? event.data.voiceId : '',
+          characterId: typeof event.data.characterId === 'string' ? event.data.characterId : '',
+          scene: typeof event.data.scene === 'string' ? event.data.scene : '',
+          style: typeof event.data.style === 'string' ? event.data.style : '',
+          pacing: typeof event.data.pacing === 'string' ? event.data.pacing : '',
+          tone: typeof event.data.tone === 'string' ? event.data.tone : '',
+          generatedPerformanceGuidelines:
+            typeof event.data.generatedPerformanceGuidelines === 'string'
+              ? event.data.generatedPerformanceGuidelines
+              : '',
         };
         applyEmbeddedScriptPayload(payload);
       }
@@ -1229,7 +1295,7 @@ export function useAudioDirectorController() {
       setGlobalSettings((previous) => ({
         ...previous,
         directorNote: {
-          ...previous.directorNote,
+          ...clearCompiledPromptCustomization(previous.directorNote),
           generatedPerformanceGuidelines: result.detailedPerformanceGuidelines.trim(),
         },
       }));
@@ -1392,6 +1458,23 @@ export function useAudioDirectorController() {
       ...previous,
       [language]: nextLanguageCache,
     }));
+
+    if (targetItems.some((item) => {
+      const entry = nextLanguageCache[item.spotId];
+      const previousEntry = existingLanguageCache[item.spotId];
+      if (!entry) return false;
+      return (
+        !previousEntry
+        || previousEntry.enhancedText !== entry.enhancedText
+        || previousEntry.sourceText !== entry.sourceText
+        || previousEntry.isEdited !== entry.isEdited
+      );
+    })) {
+      setGlobalSettings((previous) => ({
+        ...previous,
+        directorNote: clearCompiledPromptCustomization(previous.directorNote),
+      }));
+    }
 
     return nextLanguageCache;
   };
@@ -1735,6 +1818,10 @@ export function useAudioDirectorController() {
 
   const handleJapaneseReadingTextChange = (nextText: string) => {
     if (coreLanguage !== 'ja' || !currentItem) return;
+    setGlobalSettings((previous) => ({
+      ...previous,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
+    }));
     setJapaneseReadingEntry(coreLanguage, currentItem, currentScriptText, nextText, true);
   };
 
@@ -1757,6 +1844,10 @@ export function useAudioDirectorController() {
       const result = await generateJapaneseHiragana({
         scriptContent: currentScriptText,
       });
+      setGlobalSettings((previous) => ({
+        ...previous,
+        directorNote: clearCompiledPromptCustomization(previous.directorNote),
+      }));
       setJapaneseReadingEntry(coreLanguage, currentItem, currentScriptText, result.hiraganaText.trim(), false);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

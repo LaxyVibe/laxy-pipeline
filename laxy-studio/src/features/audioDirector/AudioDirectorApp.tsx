@@ -1,8 +1,6 @@
-import CloseIcon from '@mui/icons-material/Close';
-import GraphicEqOutlinedIcon from '@mui/icons-material/GraphicEqOutlined';
-import { Backdrop, Badge, Box, CircularProgress, Container, Dialog, DialogContent, DialogTitle, Fab, IconButton, Paper, Stack, Typography } from '@mui/material';
+import { Backdrop, Box, CircularProgress, Container, Paper, Stack, Typography } from '@mui/material';
 import { ThemeProvider } from '@mui/material/styles';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useAudioDirectorController } from './useAudioDirectorController';
 import { audioDirectorStyles, audioDirectorTheme } from './theme';
 import AnalysisOverlay from './components/AnalysisOverlay';
@@ -10,56 +8,11 @@ import CharacterDesignerDialog from './components/dialogs/CharacterDesignerDialo
 import ConfigPreviewDialog from './components/dialogs/ConfigPreviewDialog';
 import DeployVersionFooter from '../../components/DeployVersionFooter';
 import AudioDirectorHero from './components/AudioDirectorHero';
-import GenerationHistoryRail from './components/panels/GenerationHistoryRail';
 import TtsScriptSection from './components/panels/TtsScriptSection';
 import { langLabel } from '../../types/entity';
 
-function playWarmCompletionBeep() {
-  const AudioContextCtor = window.AudioContext ?? (window as typeof window & {
-    webkitAudioContext?: typeof AudioContext;
-  }).webkitAudioContext;
-  if (!AudioContextCtor) return;
-
-  const audioContext = new AudioContextCtor();
-  const now = audioContext.currentTime;
-  const masterGain = audioContext.createGain();
-  masterGain.gain.setValueAtTime(0.0001, now);
-  masterGain.gain.exponentialRampToValueAtTime(0.11, now + 0.03);
-  masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.9);
-  masterGain.connect(audioContext.destination);
-
-  const createTone = (frequency: number, startOffset: number, duration: number) => {
-    const oscillator = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(frequency, now + startOffset);
-    oscillator.frequency.exponentialRampToValueAtTime(frequency * 1.04, now + startOffset + duration);
-    gainNode.gain.setValueAtTime(0.0001, now + startOffset);
-    gainNode.gain.exponentialRampToValueAtTime(0.65, now + startOffset + 0.03);
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
-    oscillator.connect(gainNode);
-    gainNode.connect(masterGain);
-    oscillator.start(now + startOffset);
-    oscillator.stop(now + startOffset + duration + 0.05);
-  };
-
-  createTone(523.25, 0, 0.28);
-  createTone(659.25, 0.18, 0.34);
-
-  window.setTimeout(() => {
-    void audioContext.close().catch(() => undefined);
-  }, 1400);
-}
-
 export default function AudioDirectorApp() {
   const controller = useAudioDirectorController();
-  const [resultOpen, setResultOpen] = useState(false);
-  const [hasUnreadGeneratedResult, setHasUnreadGeneratedResult] = useState(false);
-  const resultCount = controller.generationHistory.reduce(
-    (runTotal, run) =>
-      runTotal + run.audioFiles.reduce((audioTotal, languageAudio) => audioTotal + (languageAudio.spots?.length ?? 0), 0),
-    0,
-  );
   const isEmbedded = window.self !== window.top;
   const hasWindowOpener = window.opener !== null && window.opener !== window;
   const launcherWindow = hasWindowOpener ? window.opener : (isEmbedded ? window.parent : null);
@@ -75,67 +28,32 @@ export default function AudioDirectorApp() {
   const headerSubtitle = launchLang ? `${langLabel(launchLang)} narration workspace` : 'Narration workspace';
 
   useEffect(() => {
-    if (controller.resultDialogRequestAt) {
-      setResultOpen(true);
-    }
-  }, [controller.resultDialogRequestAt]);
-
-  useEffect(() => {
-    const titlePrefix = hasUnreadGeneratedResult ? '🔔 ' : '';
     if ((!launchGuideTitle && !launchSpotTitle) || !launchLang) {
-      document.title = `${titlePrefix}Audio Director`;
+      document.title = 'Audio Director';
       return;
     }
-    document.title = `${titlePrefix}${headerTitle} · ${langLabel(launchLang)} · Audio Director`;
-  }, [hasUnreadGeneratedResult, headerTitle, launchGuideTitle, launchLang, launchSpotTitle]);
+    document.title = `${headerTitle} · ${langLabel(launchLang)} · Audio Director`;
+  }, [headerTitle, launchGuideTitle, launchLang, launchSpotTitle]);
 
-  useEffect(() => {
-    if (!controller.generationCompletedAt) return;
-    setResultOpen(true);
-    setHasUnreadGeneratedResult(true);
-    playWarmCompletionBeep();
-  }, [controller.generationCompletedAt]);
-
-  useEffect(() => {
-    const clearUnreadIfViewed = () => {
-      if (!resultOpen) return;
-      if (document.visibilityState !== 'visible') return;
-      if (!document.hasFocus()) return;
-      setHasUnreadGeneratedResult(false);
-    };
-
-    clearUnreadIfViewed();
-    window.addEventListener('focus', clearUnreadIfViewed);
-    document.addEventListener('visibilitychange', clearUnreadIfViewed);
-    return () => {
-      window.removeEventListener('focus', clearUnreadIfViewed);
-      document.removeEventListener('visibilitychange', clearUnreadIfViewed);
-    };
-  }, [resultOpen]);
-
-  const handleChooseAudio = (selection: {
-    audioUrl: string;
-    scriptText: string;
-    versionId?: string;
-    storagePath?: string;
-    guideId?: string;
-    spotId?: string;
-    lang?: string;
-  }) => {
-    if (!selection.audioUrl) return;
+  const handleUsePromptInTts = () => {
+    const compiledPrompt = controller.globalCompiledPrompt.trim();
+    if (!compiledPrompt) return;
     if (!launchedFromTts || !launcherWindow) return;
 
     launcherWindow.postMessage(
       {
-        type: 'laxy:result-selected',
+        type: 'laxy:prompt-selected',
         launchId,
-        outputScript: selection.scriptText,
-        outputAudio: selection.audioUrl,
-        versionId: selection.versionId,
-        storagePath: selection.storagePath,
-        guideId: selection.guideId,
-        spotId: selection.spotId,
-        lang: selection.lang,
+        compiledPrompt,
+        voiceId: controller.selectedVoice.id,
+        voiceName: controller.selectedVoice.name,
+        characterId: controller.selectedCharacter?.id ?? '',
+        characterName: controller.selectedCharacter?.name ?? '',
+        scene: controller.globalSettings.directorNote.scene,
+        style: controller.globalSettings.directorNote.style,
+        pacing: controller.globalSettings.directorNote.pacing,
+        tone: controller.globalSettings.directorNote.tone,
+        generatedPerformanceGuidelines: controller.globalSettings.directorNote.generatedPerformanceGuidelines,
       },
       window.location.origin,
     );
@@ -177,14 +95,15 @@ export default function AudioDirectorApp() {
               playingVoiceId={controller.playingVoiceId}
               isGenerating={controller.isGenerating}
               isGeneratingJapaneseReading={controller.isGeneratingJapaneseReading}
-              generateDisabled={!controller.selectedCharacter || controller.currentScriptText.trim().length === 0}
+              generateDisabled={!controller.selectedCharacter || !controller.globalCompiledPrompt.trim()}
+              finalActionLabel={launchedFromTts ? 'Use in TTS Job' : 'Done'}
               japaneseReadingStale={controller.currentJapaneseReadingStale}
               japaneseReadingText={controller.currentJapaneseReadingText}
               generationError={controller.generationError}
               onChangeScript={controller.handleCurrentScriptTextChange}
               onChangeJapaneseReading={controller.handleJapaneseReadingTextChange}
               onChangeCompiledPrompt={controller.handleCompiledPromptChange}
-              onGenerate={controller.runGeneration}
+              onGenerate={handleUsePromptInTts}
               onGenerateJapaneseReading={controller.handleGenerateJapaneseReading}
               onPreviewVoice={controller.handleVoicePreviewRestart}
               onChangeVoice={controller.handleGlobalVoiceChange}
@@ -214,61 +133,6 @@ export default function AudioDirectorApp() {
             <DeployVersionFooter align="left" compact />
           </Stack>
         </Container>
-
-        <Fab
-          color="primary"
-          variant="extended"
-          onClick={() => setResultOpen(true)}
-          sx={{
-            position: 'fixed',
-            right: { xs: 16, md: 24 },
-            bottom: { xs: 16, md: 24 },
-            zIndex: 1200,
-          }}
-        >
-          <Badge
-            badgeContent={resultCount}
-            color="secondary"
-            overlap="circular"
-            sx={{
-              mr: 1,
-              '& .MuiBadge-badge': {
-                fontWeight: 700,
-                minWidth: 18,
-                height: 18,
-              },
-            }}
-          >
-            <GraphicEqOutlinedIcon />
-          </Badge>
-          Result
-        </Fab>
-
-        <Dialog open={resultOpen} onClose={() => setResultOpen(false)} maxWidth="lg" fullWidth>
-          <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Stack>
-              <Typography variant="h6">Generated Audio</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Review generated script audio in a compact list.
-              </Typography>
-            </Stack>
-            <IconButton size="small" onClick={() => setResultOpen(false)}>
-              <CloseIcon fontSize="small" />
-            </IconButton>
-          </DialogTitle>
-          <DialogContent dividers>
-            <GenerationHistoryRail
-              audioFiles={controller.audioFiles}
-              generationHistory={controller.generationHistory}
-              generationError={controller.generationError}
-              isGenerating={controller.isGenerating}
-              itemStates={controller.itemStates}
-              items={controller.items}
-              onChooseAudio={handleChooseAudio}
-              progressSummary={controller.progressSummary}
-            />
-          </DialogContent>
-        </Dialog>
 
         <CharacterDesignerDialog
           generatedProfile={controller.characterDesignerPreview}

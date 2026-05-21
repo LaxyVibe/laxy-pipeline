@@ -4,7 +4,6 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
-import LocalMoviesOutlinedIcon from '@mui/icons-material/LocalMoviesOutlined';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import RadioButtonCheckedOutlinedIcon from '@mui/icons-material/RadioButtonCheckedOutlined';
 import RedoOutlinedIcon from '@mui/icons-material/RedoOutlined';
@@ -72,6 +71,7 @@ type Props = {
   isGenerating: boolean;
   isGeneratingJapaneseReading?: boolean;
   generateDisabled?: boolean;
+  finalActionLabel?: string;
   japaneseReadingStale?: boolean;
   japaneseReadingText?: string;
   generationError?: string | null;
@@ -160,6 +160,7 @@ export default function TtsScriptSection(props: Props) {
     isGenerating,
     isGeneratingJapaneseReading = false,
     generateDisabled = false,
+    finalActionLabel = 'Done',
     japaneseReadingStale = false,
     japaneseReadingText = '',
     generationError = null,
@@ -242,8 +243,8 @@ export default function TtsScriptSection(props: Props) {
   const hasAnyPerformanceHint = performanceHintValues.some((item) => item.value.trim());
   const transcriptVisible = activeStepIndex >= stepIndex('script');
   const previewPrompt = useMemo(
-    () => applyTranscriptVisibilityToPrompt(compiledPrompt, transcriptVisible ? scriptText : ''),
-    [compiledPrompt, scriptText, transcriptVisible],
+    () => applyTranscriptVisibilityToPrompt(compiledPrompt, transcriptVisible),
+    [compiledPrompt, transcriptVisible],
   );
   const canUndoScript = undoStackRef.current.length > 0;
   const canRedoScript = redoStackRef.current.length > 0;
@@ -800,14 +801,10 @@ export default function TtsScriptSection(props: Props) {
                         || (activeStep === 'character' && !characterSelected)
                         || (activeStep === 'script' && !scriptText.trim())
                         || (activeStep === 'script' && isEnhancing)
-                      }
-                      startIcon={
-                        activeStep === 'performance'
-                          ? <LocalMoviesOutlinedIcon />
-                          : undefined
+                        || (activeStep === 'prompt' && generateDisabled)
                       }
                     >
-                      {activeStep === 'prompt' ? 'Generate audio' : 'Next'}
+                      {activeStep === 'prompt' ? finalActionLabel : 'Next'}
                     </Button>
                   </Stack>
                 </StepCard>
@@ -1170,21 +1167,18 @@ function StepCard(props: {
   );
 }
 
-function applyTranscriptVisibilityToPrompt(prompt: string, transcript: string): string {
+function applyTranscriptVisibilityToPrompt(prompt: string, transcriptVisible: boolean): string {
   const transcriptPattern = /\n#### TRANSCRIPT[\s\S]*$/;
 
   if (!transcriptPattern.test(prompt)) {
     return prompt;
   }
 
-  if (!transcript.trim()) {
+  if (!transcriptVisible) {
     return prompt.replace(transcriptPattern, '');
   }
 
-  return prompt.replace(
-    transcriptPattern,
-    `\n#### TRANSCRIPT\n${transcript.trim()}`,
-  );
+  return prompt;
 }
 
 function MarkdownPreview(props: { markdown: string }) {

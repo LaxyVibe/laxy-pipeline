@@ -35,16 +35,18 @@ import {
 } from '@mui/material';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import HeadphonesIcon from '@mui/icons-material/Headphones';
 import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
 import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
 import { collection, doc, getDoc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { getCustomClaims } from '../admin/auth/authenticator';
-import { translateLanguage } from '../api';
+import { bootstrapAudioSession, generateAudioForLanguage, translateLanguage } from '../api';
 import { useAuthStore } from '../authStore';
 import DeployVersionFooter from '../components/DeployVersionFooter';
 import { initFirebase } from '../firebase';
+import { AUDIO_MVP_VOICES } from '../features/audioMvp/model';
 import {
   buildAudioDirectorHistoryUrl,
   buildAudioTrackDocId,
@@ -71,8 +73,19 @@ type TtsJob = {
   spotTitle: string;
   language: string;
   inputScript: string;
-  outputScript: string;
+  promptText: string;
   outputAudio: string;
+  voiceId: string;
+  voiceName: string;
+  characterId: string;
+  characterName: string;
+  performanceHint: {
+    scene: string;
+    style: string;
+    pacing: string;
+    tone: string;
+    generatedPerformanceGuidelines: string;
+  };
   selectedHistoryVersion?: AudioHistorySelection;
 };
 
@@ -94,7 +107,6 @@ type SpotOption = {
 };
 
 type PersistedJobSelection = {
-  outputScript: string;
   outputAudio: string;
   selectedHistoryVersion: AudioHistorySelection;
 };
@@ -107,6 +119,19 @@ type DeleteGuideDialogState = {
 type AudioDirectorLaunchRecord = {
   jobId: string;
   windowRef: Window | null;
+};
+
+type AudioDirectorPromptSelection = {
+  compiledPrompt: string;
+  voiceId: string;
+  voiceName: string;
+  characterId: string;
+  characterName: string;
+  scene: string;
+  style: string;
+  pacing: string;
+  tone: string;
+  generatedPerformanceGuidelines: string;
 };
 
 const AUDIO_DIRECTOR_ORIGIN = window.location.origin;
@@ -156,9 +181,28 @@ function createTtsJob(spotId: string, spotTitle: string, language: string): TtsJ
     spotTitle,
     language,
     inputScript: '',
-    outputScript: '',
+    promptText: '',
     outputAudio: '',
+    voiceId: '',
+    voiceName: '',
+    characterId: '',
+    characterName: '',
+    performanceHint: {
+      scene: '',
+      style: '',
+      pacing: '',
+      tone: '',
+      generatedPerformanceGuidelines: '',
+    },
   };
+}
+
+function promptContainsTranscript(compiledPrompt: string): boolean {
+  return compiledPrompt.split('\n').some((line) => line.trim() === '#### TRANSCRIPT');
+}
+
+function createTtsAudioSessionId(job: TtsJob): string {
+  return `tts-${job.spotId}-${job.language}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
 function buildDefaultQuickCreateGuideTitle(): string {
@@ -278,6 +322,8 @@ export default function TTSPage() {
   const [spotManagerError, setSpotManagerError] = useState<string | null>(null);
   const [translationPendingByJob, setTranslationPendingByJob] = useState<Record<string, boolean>>({});
   const [translationErrorByJob, setTranslationErrorByJob] = useState<Record<string, string>>({});
+  const [audioPendingByJob, setAudioPendingByJob] = useState<Record<string, boolean>>({});
+  const [audioErrorByJob, setAudioErrorByJob] = useState<Record<string, string>>({});
   const [openAudioDirectorRevision, setOpenAudioDirectorRevision] = useState(0);
   const audioDirectorLaunchesRef = useRef<Record<string, AudioDirectorLaunchRecord>>({});
 
@@ -367,6 +413,14 @@ export default function TTSPage() {
         launchId,
         text: job.inputScript,
         language: job.language,
+        compiledPrompt: job.promptText,
+        voiceId: job.voiceId,
+        characterId: job.characterId,
+        scene: job.performanceHint.scene,
+        style: job.performanceHint.style,
+        pacing: job.performanceHint.pacing,
+        tone: job.performanceHint.tone,
+        generatedPerformanceGuidelines: job.performanceHint.generatedPerformanceGuidelines,
       },
       AUDIO_DIRECTOR_ORIGIN,
     );
@@ -394,6 +448,8 @@ export default function TTSPage() {
     setSelectedSpotId('');
     setTranslationPendingByJob({});
     setTranslationErrorByJob({});
+    setAudioPendingByJob({});
+    setAudioErrorByJob({});
   }, [sharedGuideTarget?.guideId]);
 
   useEffect(() => {
@@ -488,7 +544,6 @@ export default function TTSPage() {
             return [
               createJobId(summary.spotId, summary.lang),
               {
-                outputScript: versionRecord.scriptText,
                 outputAudio: versionRecord.audioUrl,
                 selectedHistoryVersion: {
                   versionId: versionRecord.versionId,
@@ -540,7 +595,6 @@ export default function TTSPage() {
               ...existingJob,
               spotTitle: spot.spotTitle,
               language,
-              outputScript: existingJob.outputScript || persistedSelection?.outputScript || '',
               outputAudio: existingJob.outputAudio || persistedSelection?.outputAudio || '',
               selectedHistoryVersion: existingJob.selectedHistoryVersion ?? persistedSelection?.selectedHistoryVersion,
             });
@@ -548,7 +602,6 @@ export default function TTSPage() {
           }
           nextJobs.push({
             ...createTtsJob(spot.spotId, spot.spotTitle, language),
-            outputScript: persistedSelection?.outputScript || '',
             outputAudio: persistedSelection?.outputAudio || '',
             selectedHistoryVersion: persistedSelection?.selectedHistoryVersion,
           });
@@ -594,18 +647,32 @@ export default function TTSPage() {
         return;
       }
 
-      if (event.data?.type === 'laxy:result-selected') {
+      if (event.data?.type === 'laxy:prompt-selected') {
+        const voiceId = typeof event.data.voiceId === 'string' ? event.data.voiceId : '';
+        const fallbackVoiceName = AUDIO_MVP_VOICES.find((voice) => voice.id === voiceId)?.name ?? voiceId;
         updateJob(launchRecord.jobId, (job) => ({
           ...job,
-          outputScript: typeof event.data.outputScript === 'string' ? event.data.outputScript : job.outputScript,
-          outputAudio: typeof event.data.outputAudio === 'string' ? event.data.outputAudio : job.outputAudio,
-          selectedHistoryVersion: {
-            versionId: typeof event.data.versionId === 'string' ? event.data.versionId : job.selectedHistoryVersion?.versionId,
-            storagePath: typeof event.data.storagePath === 'string' ? event.data.storagePath : job.selectedHistoryVersion?.storagePath,
-            guideId: typeof event.data.guideId === 'string' ? event.data.guideId : job.selectedHistoryVersion?.guideId,
-            spotId: typeof event.data.spotId === 'string' ? event.data.spotId : job.selectedHistoryVersion?.spotId,
-            lang: typeof event.data.lang === 'string' ? event.data.lang : job.selectedHistoryVersion?.lang,
+          promptText: typeof event.data.compiledPrompt === 'string' ? event.data.compiledPrompt : job.promptText,
+          voiceId,
+          voiceName: typeof event.data.voiceName === 'string' ? event.data.voiceName : (job.voiceName || fallbackVoiceName),
+          characterId: typeof event.data.characterId === 'string' ? event.data.characterId : job.characterId,
+          characterName: typeof event.data.characterName === 'string' ? event.data.characterName : job.characterName,
+          performanceHint: {
+            scene: typeof event.data.scene === 'string' ? event.data.scene : job.performanceHint.scene,
+            style: typeof event.data.style === 'string' ? event.data.style : job.performanceHint.style,
+            pacing: typeof event.data.pacing === 'string' ? event.data.pacing : job.performanceHint.pacing,
+            tone: typeof event.data.tone === 'string' ? event.data.tone : job.performanceHint.tone,
+            generatedPerformanceGuidelines:
+              typeof event.data.generatedPerformanceGuidelines === 'string'
+                ? event.data.generatedPerformanceGuidelines
+                : job.performanceHint.generatedPerformanceGuidelines,
           },
+          outputAudio: '',
+          selectedHistoryVersion: undefined,
+        }));
+        setAudioErrorByJob((previous) => ({
+          ...previous,
+          [launchRecord.jobId]: '',
         }));
         cleanupAudioDirectorLaunch(launchId);
       }
@@ -1046,6 +1113,134 @@ export default function TTSPage() {
     }
   };
 
+  const handleGenerateAudio = async (jobId: string) => {
+    const job = jobs.find((entry) => entry.id === jobId);
+    const historyTarget = job ? buildHistoryTarget(sharedGuideTarget, job) : null;
+    if (!job || !historyTarget) return;
+
+    const promptText = job.promptText.trim();
+    if (!promptText) {
+      setAudioErrorByJob((previous) => ({
+        ...previous,
+        [jobId]: 'Open Audio Director and return a TTS prompt first.',
+      }));
+      return;
+    }
+    if (!promptContainsTranscript(promptText)) {
+      setAudioErrorByJob((previous) => ({
+        ...previous,
+        [jobId]: 'The TTS prompt is missing the transcript section. Reopen Audio Director and return the prompt again.',
+      }));
+      return;
+    }
+    if (!job.voiceId) {
+      setAudioErrorByJob((previous) => ({
+        ...previous,
+        [jobId]: 'Select a voice in Audio Director before generating audio.',
+      }));
+      return;
+    }
+
+    const sessionId = createTtsAudioSessionId(job);
+    setAudioPendingByJob((previous) => ({
+      ...previous,
+      [jobId]: true,
+    }));
+    setAudioErrorByJob((previous) => ({
+      ...previous,
+      [jobId]: '',
+    }));
+
+    try {
+      await bootstrapAudioSession({
+        sessionId,
+        context: {
+          flow: 'tts-page',
+          guideId: historyTarget.guideId,
+          spotId: historyTarget.spotId,
+          lang: historyTarget.lang,
+        },
+      });
+
+      const response = await generateAudioForLanguage({
+        sessionId,
+        scripts: [{
+          spotId: job.spotId,
+          spotNumber: 1,
+          title: job.spotTitle,
+        }],
+        voiceId: job.voiceId,
+        language: job.language,
+        historyTarget: {
+          tenantId: historyTarget.tenantId,
+          guideId: historyTarget.guideId,
+          spotId: historyTarget.spotId,
+          spotTitle: historyTarget.spotTitle,
+          lang: historyTarget.lang,
+        },
+        directorNote: {
+          scene: job.performanceHint.scene,
+          style: job.performanceHint.style,
+          pacing: job.performanceHint.pacing,
+          compiledPrompt: promptText,
+        },
+      });
+
+      const audioFile = response.audioFiles[0];
+      if (!audioFile?.audioUrl) {
+        throw new Error(audioFile?.error?.trim() || 'The backend did not return a playable audio file.');
+      }
+
+      updateJob(jobId, (currentJob) => ({
+        ...currentJob,
+        outputAudio: audioFile.audioUrl,
+        selectedHistoryVersion: {
+          versionId: audioFile.versionId,
+          storagePath: audioFile.storagePath,
+          guideId: audioFile.guideId,
+          spotId: audioFile.spotId,
+          lang: audioFile.lang ?? currentJob.language,
+        },
+      }));
+      setTrackSummaries((previous) => {
+        const docId = buildAudioTrackDocId(job.spotId, job.language);
+        const generatedAt = audioFile.generatedAtMs ?? Date.now();
+        const nextSummary: AudioTrackSummaryRecord = {
+          id: docId,
+          guideId: historyTarget.guideId,
+          spotId: job.spotId,
+          lang: job.language,
+          spotTitle: job.spotTitle,
+          activeVersionId: audioFile.versionId,
+          latestVersionId: audioFile.versionId,
+          latestGeneratedAt: generatedAt,
+          hasGeneratedAudio: true,
+        };
+        const existingIndex = previous.findIndex((summary) => summary.id === docId);
+        if (existingIndex < 0) {
+          return [nextSummary, ...previous];
+        }
+        const next = [...previous];
+        next[existingIndex] = {
+          ...next[existingIndex],
+          ...nextSummary,
+        };
+        return next;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAudioErrorByJob((previous) => ({
+        ...previous,
+        [jobId]: message,
+      }));
+    } finally {
+      setAudioPendingByJob((previous) => ({
+        ...previous,
+        [jobId]: false,
+      }));
+    }
+  };
+
   const jobHasOpenWindow = (jobId: string): boolean => {
     void openAudioDirectorRevision;
     return findOpenAudioDirectorLaunch(jobId) !== null;
@@ -1222,19 +1417,19 @@ export default function TTSPage() {
                       </Typography>
                       <Typography variant="body2" color="text.secondary">
                         {selectedSpot.hasGeneratedAudio
-                          ? 'Opening a row will show its saved audio history in Audio Director.'
-                          : 'Opening a row will start the first generation for that spot-language pair.'}
+                          ? 'Open Audio Director to refine the prompt, then generate audio directly from the row.'
+                          : 'Use Audio Director to prepare the prompt, then generate the first audio version from this row.'}
                       </Typography>
                     </Box>
 
                     <Box sx={{ overflowX: 'auto' }}>
-                      <Table sx={{ minWidth: 1380 }}>
+                      <Table sx={{ minWidth: 1560 }}>
                         <TableHead>
                           <TableRow>
                             <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Language</TableCell>
                             <TableCell sx={{ fontWeight: 700, minWidth: 360 }}>Input Script</TableCell>
-                            <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Actions</TableCell>
-                            <TableCell sx={{ fontWeight: 700, minWidth: 320 }}>Output Script</TableCell>
+                            <TableCell sx={{ fontWeight: 700, minWidth: 240 }}>Actions</TableCell>
+                            <TableCell sx={{ fontWeight: 700, minWidth: 420 }}>TTS Prompt</TableCell>
                             <TableCell sx={{ fontWeight: 700, minWidth: 280 }}>Output Audio</TableCell>
                           </TableRow>
                         </TableHead>
@@ -1247,6 +1442,8 @@ export default function TTSPage() {
                             const canTranslateFromEnglish = job.language !== 'en' && Boolean(englishSourceJob);
                             const translateDisabled = translationPendingByJob[job.id] || !(englishSourceJob?.inputScript.trim());
                             const translateError = translationErrorByJob[job.id];
+                            const audioPending = audioPendingByJob[job.id] === true;
+                            const audioError = audioErrorByJob[job.id];
 
                             return (
                               <TableRow
@@ -1260,6 +1457,11 @@ export default function TTSPage() {
                                     <Typography variant="caption" color="text.secondary">
                                       {savedHistory ? 'Saved history exists for this language.' : 'No saved history yet for this language.'}
                                     </Typography>
+                                    {job.voiceName ? (
+                                      <Typography variant="caption" color="text.secondary">
+                                        Voice: {job.voiceName}{job.characterName ? ` · ${job.characterName}` : ''}
+                                      </Typography>
+                                    ) : null}
                                   </Stack>
                                 </TableCell>
                                 <TableCell>
@@ -1327,9 +1529,9 @@ export default function TTSPage() {
                                     <Typography variant="caption" color="text.secondary">
                                       {hasOpenWindow
                                         ? 'This row already has an Audio Director window open.'
-                                        : savedHistory
-                                          ? 'Stored results appear in the Audio Director Result rail.'
-                                          : 'Use Audio Director to generate the first result for this row.'}
+                                        : job.promptText.trim()
+                                          ? 'Reopen Audio Director to refine the current prompt and voice.'
+                                          : 'Open Audio Director to build the prompt and choose the voice.'}
                                     </Typography>
                                     {job.selectedHistoryVersion?.versionId ? (
                                       <Typography variant="caption" color="text.secondary">
@@ -1344,23 +1546,49 @@ export default function TTSPage() {
                                     minRows={6}
                                     maxRows={14}
                                     fullWidth
-                                    placeholder="Choose a result in Audio Director to fill this output script"
-                                    value={job.outputScript}
+                                    placeholder="Return a prompt from Audio Director, then fine-tune it here if needed."
+                                    value={job.promptText}
                                     onChange={(event) => {
                                       const nextValue = event.target.value;
                                       updateJob(job.id, (currentJob) => ({
                                         ...currentJob,
-                                        outputScript: nextValue,
+                                        promptText: nextValue,
+                                      }));
+                                      setAudioErrorByJob((previous) => ({
+                                        ...previous,
+                                        [job.id]: '',
                                       }));
                                     }}
-                                    inputProps={{ 'aria-label': `Output Script ${selectedSpot.spotTitle} ${langLabel(job.language)}` }}
+                                    inputProps={{ 'aria-label': `TTS Prompt ${selectedSpot.spotTitle} ${langLabel(job.language)}` }}
                                   />
                                 </TableCell>
                                 <TableCell>
                                   <Stack spacing={1}>
+                                    <Button
+                                      variant="contained"
+                                      size="small"
+                                      startIcon={audioPending ? <CircularProgress color="inherit" size={16} /> : <HeadphonesIcon />}
+                                      disabled={audioPending || !job.promptText.trim() || !job.voiceId}
+                                      onClick={() => {
+                                        void handleGenerateAudio(job.id);
+                                      }}
+                                    >
+                                      {audioPending ? 'Generating…' : 'Generate Audio'}
+                                    </Button>
+                                    <Button
+                                      component="a"
+                                      variant="outlined"
+                                      size="small"
+                                      startIcon={<DownloadOutlinedIcon />}
+                                      href={job.outputAudio || undefined}
+                                      download
+                                      disabled={!job.outputAudio.trim()}
+                                    >
+                                      Download Audio
+                                    </Button>
                                     <TextField
                                       fullWidth
-                                      placeholder="Choose a result in Audio Director to fill this output audio URL"
+                                      placeholder="Generate audio from this row to fill the audio URL"
                                       value={job.outputAudio}
                                       onChange={(event) => {
                                         const nextValue = event.target.value;
@@ -1371,6 +1599,11 @@ export default function TTSPage() {
                                       }}
                                       inputProps={{ 'aria-label': `Output Audio ${selectedSpot.spotTitle} ${langLabel(job.language)}` }}
                                     />
+                                    {audioError ? (
+                                      <Typography variant="caption" color="error.main">
+                                        {audioError}
+                                      </Typography>
+                                    ) : null}
                                     <OutputAudioPreviewButton audioUrl={job.outputAudio} />
                                   </Stack>
                                 </TableCell>
