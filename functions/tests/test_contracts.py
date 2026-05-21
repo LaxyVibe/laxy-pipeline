@@ -121,6 +121,19 @@ def test_audio_generate_request_defaults_voice_and_languages() -> None:
     assert payload.languages == ["en"]
 
 
+def test_audio_generate_request_accepts_missing_script_text() -> None:
+    payload = AudioGenerateRequest.model_validate({
+        "sessionId": "sess-1",
+        "scripts": [{
+            "spotId": "s1",
+            "spotNumber": 1,
+            "title": "Entrance",
+        }],
+    })
+
+    assert payload.scripts[0].scriptText is None
+
+
 def test_audio_generate_request_requires_scripts() -> None:
     with pytest.raises(ValidationError):
         AudioGenerateRequest.model_validate({"sessionId": "sess-1"})
@@ -158,6 +171,19 @@ def test_audio_generate_language_request_accepts_history_target() -> None:
     })
     assert payload.historyTarget is not None
     assert payload.historyTarget.guideId == "guide-1"
+
+
+def test_audio_generate_language_request_accepts_missing_script_text() -> None:
+    payload = AudioGenerateLanguageRequest.model_validate({
+        "sessionId": "sess-1",
+        "language": "en",
+        "scripts": [{
+            "spotId": "s1",
+            "spotNumber": 1,
+            "title": "Entrance",
+        }],
+    })
+    assert payload.scripts[0].scriptText is None
 
 
 def test_audio_session_bootstrap_request_requires_session_id() -> None:

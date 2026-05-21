@@ -740,9 +740,25 @@ def _build_audio_generate_language_stub_response(payload: AudioGenerateLanguageR
 
     audio_files: list[dict[str, Any]] = []
     srt_files: list[dict[str, Any]] = []
+    compiled_prompt = _non_empty(
+        (payload.directorNote or {}).get("compiledPrompt")
+        or (payload.directorNote or {}).get("compiledPromptOverride")
+        or (payload.directorNote or {}).get("stylePrompt")
+    )
+    compiled_transcript = ""
+    if compiled_prompt:
+        transcript_marker = "\n#### TRANSCRIPT\n"
+        if transcript_marker in compiled_prompt:
+            compiled_transcript = compiled_prompt.split(transcript_marker, 1)[1].strip()
+        elif compiled_prompt.startswith("#### TRANSCRIPT\n"):
+            compiled_transcript = compiled_prompt[len("#### TRANSCRIPT\n"):].strip()
 
     for script in payload.scripts:
-        spoken_text = _non_empty(translation_lookup.get(script.spotId)) or _non_empty(script.scriptText)
+        spoken_text = (
+            _non_empty(translation_lookup.get(script.spotId))
+            or compiled_transcript
+            or _non_empty(script.scriptText)
+        )
         if not spoken_text:
             continue
 

@@ -667,6 +667,30 @@ export function useAudioDirectorController() {
     () => AUDIO_MVP_VOICES.filter((voice) => voice.gender === 'male'),
     [],
   );
+  const currentItem = items[0];
+  const currentScriptText = useMemo(() => {
+    if (!currentItem) return manuscriptText;
+    if (!scriptEnhancementEnabled) {
+      return currentItem.scriptText ?? manuscriptText;
+    }
+    return enhancementCache[coreLanguage]?.[currentItem.spotId]?.enhancedText ?? currentItem.scriptText ?? manuscriptText;
+  }, [coreLanguage, currentItem, enhancementCache, manuscriptText, scriptEnhancementEnabled]);
+  const getPreparedScriptForItem = useCallback((language: string, item: AudioPoiDraft) => {
+    const sourceText = item.scriptText;
+    const effectiveText = scriptEnhancementEnabled
+      ? enhancementCache[language]?.[item.spotId]?.enhancedText ?? sourceText
+      : sourceText;
+    const japaneseReadingEntry = language === 'ja' ? readingAssistCache[language]?.[item.spotId] : undefined;
+    const ttsSourceText = language === 'ja' && japaneseReadingEntry?.sourceText === effectiveText
+      ? japaneseReadingEntry.hiraganaText.trim() || effectiveText
+      : effectiveText;
+    const preprocessing = preprocessScriptForLanguage(language, ttsSourceText);
+    return { sourceText, effectiveText, ttsSourceText, preprocessing };
+  }, [enhancementCache, readingAssistCache, scriptEnhancementEnabled]);
+  const currentPreparedScript = useMemo(
+    () => (currentItem ? getPreparedScriptForItem(coreLanguage, currentItem) : null),
+    [coreLanguage, currentItem, getPreparedScriptForItem],
+  );
 
   const globalCompiledPrompt = useMemo(
     () => (selectedCharacter
@@ -674,12 +698,21 @@ export function useAudioDirectorController() {
         settings: globalSettings,
         character: selectedCharacter,
         voice: selectedVoice,
-        scriptText: manuscriptText,
+        scriptText: currentPreparedScript?.preprocessing.processedText ?? currentScriptText,
         poiName: effectiveSpotTitle || items[0]?.title,
         projectTitle: effectiveGuideTitle,
       })
       : ''),
-    [effectiveGuideTitle, effectiveSpotTitle, globalSettings, items, manuscriptText, selectedCharacter, selectedVoice],
+    [
+      currentPreparedScript,
+      currentScriptText,
+      effectiveGuideTitle,
+      effectiveSpotTitle,
+      globalSettings,
+      items,
+      selectedCharacter,
+      selectedVoice,
+    ],
   );
 
   const estimatedTokens = useMemo(() => {
@@ -710,6 +743,7 @@ export function useAudioDirectorController() {
         const settings = item.overrideEnabled && item.overrideSettings ? item.overrideSettings : globalSettings;
         const character = getCharacter(settings.characterId);
         const voice = getVoice(settings.voiceId);
+        const promptScriptText = getPreparedScriptForItem(coreLanguage, item).preprocessing.processedText;
         return {
           spotId: item.spotId,
           spotNumber: item.spotNumber,
@@ -724,7 +758,7 @@ export function useAudioDirectorController() {
                   settings,
                   character,
                   voice,
-                  scriptText: item.scriptText,
+                  scriptText: promptScriptText,
                   poiName: effectiveSpotTitle || item.title,
                   projectTitle: effectiveGuideTitle,
                 })
@@ -747,7 +781,7 @@ export function useAudioDirectorController() {
       coreLanguage,
       effectiveGuideTitle,
       effectiveSpotTitle,
-      enhancementCache,
+      getPreparedScriptForItem,
       globalCompiledPrompt,
       globalSettings,
       items,
@@ -769,21 +803,13 @@ export function useAudioDirectorController() {
         const settings = item.overrideEnabled && item.overrideSettings ? item.overrideSettings : globalSettings;
         const character = getCharacter(settings.characterId);
         const voice = getVoice(settings.voiceId);
-        const sourceText = item.scriptText;
-        const effectiveText = scriptEnhancementEnabled
-          ? enhancementCache[coreLanguage]?.[item.spotId]?.enhancedText ?? sourceText
-          : sourceText;
-        const japaneseReadingEntry = coreLanguage === 'ja' ? readingAssistCache[coreLanguage]?.[item.spotId] : undefined;
-        const ttsSourceText = japaneseReadingEntry && japaneseReadingEntry.sourceText === effectiveText
-          ? japaneseReadingEntry.hiraganaText
-          : effectiveText;
-        const preprocessing = preprocessScriptForLanguage(coreLanguage, ttsSourceText);
+        const { sourceText, effectiveText, ttsSourceText, preprocessing } = getPreparedScriptForItem(coreLanguage, item);
         const directorPayload = character
           ? buildDirectorPayload({
             settings,
             character,
             voice,
-            scriptText: effectiveText,
+            scriptText: preprocessing.processedText,
             poiName: effectiveSpotTitle || item.title,
             projectTitle: effectiveGuideTitle,
           })
@@ -824,7 +850,6 @@ export function useAudioDirectorController() {
               spotId: item.spotId,
               spotNumber: item.spotNumber,
               title: '',
-              scriptText: preprocessing.processedText,
             }],
             voiceId: settings.voiceId,
             language: coreLanguage,
@@ -851,10 +876,9 @@ export function useAudioDirectorController() {
       coreLanguage,
       effectiveGuideTitle,
       effectiveSpotTitle,
-      enhancementCache,
+      getPreparedScriptForItem,
       globalSettings,
       items,
-      readingAssistCache,
       scriptEnhancementEnabled,
       selectedCharacter,
       sessionId,
@@ -1157,6 +1181,7 @@ export function useAudioDirectorController() {
     setGlobalSettings((previous) => ({
       ...previous,
       scriptEnhancementLimit: limit,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
     }));
   };
 
@@ -1184,8 +1209,7 @@ export function useAudioDirectorController() {
         ...previous,
         directorNote: clearGeneratedPerformanceGuidelines(previous.directorNote),
       }));
-      setDirectorNoteEditorOpen(false);
-      return;
+      return true;
     }
 
     const busyOperationId = beginBusyOperation('Generating detailed performance guidelines…');
@@ -1209,13 +1233,24 @@ export function useAudioDirectorController() {
           generatedPerformanceGuidelines: result.detailedPerformanceGuidelines.trim(),
         },
       }));
-      setDirectorNoteEditorOpen(false);
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setGenerationError(`Detailed performance guidelines generation failed: ${message}`);
+      return false;
     } finally {
       endBusyOperation(busyOperationId);
     }
+  };
+
+  const handleGeneratedPerformanceGuidelinesChange = (value: string) => {
+    setGlobalSettings((previous) => ({
+      ...previous,
+      directorNote: {
+        ...clearCompiledPromptCustomization(previous.directorNote),
+        generatedPerformanceGuidelines: value,
+      },
+    }));
   };
 
   const handleCompiledPromptChange = (value: string) => {
@@ -1363,15 +1398,6 @@ export function useAudioDirectorController() {
 
   const handleEnhanceActiveLanguage = async (forceRegenerate = false) => {
     try {
-      if (forceRegenerate) {
-        const editedEntries = Object.values(activeEnhancementEntries).filter((entry) => entry.isEdited);
-        if (
-          editedEntries.length > 0
-          && !window.confirm('Regenerating enhancement will overwrite your edited performance script. Continue?')
-        ) {
-          return;
-        }
-      }
       setGenerationError(null);
       await ensureEnhancementEntries(coreLanguage, items, forceRegenerate);
     } catch (error) {
@@ -1401,6 +1427,11 @@ export function useAudioDirectorController() {
     const existing = enhancementCache[language]?.[item.spotId];
     const sourceText = existing?.sourceText ?? item.scriptText;
     const validation = validateEnhancedScript(nextText);
+
+    setGlobalSettings((previous) => ({
+      ...previous,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
+    }));
 
     setEnhancementCache((previous) => ({
       ...previous,
@@ -1583,7 +1614,6 @@ export function useAudioDirectorController() {
             spotId: requestSpotId,
             spotNumber: item.spotNumber,
             title: requestTitle,
-            scriptText: preprocessing.processedText,
           }],
           voiceId: settings.voiceId,
           language,
@@ -1600,7 +1630,7 @@ export function useAudioDirectorController() {
             settings,
             character,
             voice,
-            scriptText: effectiveText,
+            scriptText: preprocessing.processedText,
             poiName: requestTitle,
             projectTitle: effectiveGuideTitle,
           }),
@@ -1673,17 +1703,7 @@ export function useAudioDirectorController() {
     }
   };
 
-  const currentScriptText = useMemo(() => {
-    const currentItem = items[0];
-    if (!currentItem) return '';
-    if (!scriptEnhancementEnabled) {
-      return currentItem.scriptText ?? '';
-    }
-    return activeEnhancementEntries[currentItem.spotId]?.enhancedText ?? currentItem.scriptText ?? '';
-  }, [activeEnhancementEntries, items, scriptEnhancementEnabled]);
-
   const currentScriptLabel = scriptEnhancementEnabled ? 'Polished script' : 'Original script';
-  const currentItem = items[0];
   const currentJapaneseReadingEntry = useMemo(() => {
     if (coreLanguage !== 'ja' || !currentItem) return undefined;
     return activeReadingEntries[currentItem.spotId];
@@ -1695,6 +1715,11 @@ export function useAudioDirectorController() {
     && (currentJapaneseReadingEntry?.sourceText ?? '') !== currentScriptText;
 
   const handleCurrentScriptTextChange = (nextText: string) => {
+    setGlobalSettings((previous) => ({
+      ...previous,
+      directorNote: clearCompiledPromptCustomization(previous.directorNote),
+    }));
+
     if (!currentItem) {
       setManuscriptText(nextText);
       return;
@@ -1786,6 +1811,7 @@ export function useAudioDirectorController() {
     handleDeleteCustomCharacter,
     handleDirectorNoteFieldChange,
     handleDirectorNoteDialogDone,
+    handleGeneratedPerformanceGuidelinesChange,
     handleDownloadConfig,
     handleEnhanceActiveLanguage,
     handleEnhancedScriptChange,

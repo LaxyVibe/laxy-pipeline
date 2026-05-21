@@ -497,13 +497,15 @@ class TestTtsPromptBuilder:
 
     def test_build_tts_prompt_and_transcript_splits_compiled_prompt(self, executor):
         prompt, transcript = executor._build_tts_prompt_and_transcript(
-            "Hello world.",
+            "",
             {
                 "compiledPrompt": "\n".join([
                     "You are Museum Manager, a calm narrator.",
                     "## THE SCENE",
                     "A calm gallery.",
                     "Stay in character, avoid meta commentary, and produce a natural ready-to-speak delivery.",
+                    "#### TRANSCRIPT",
+                    "Hello world.",
                 ])
             },
         )
@@ -513,6 +515,21 @@ class TestTtsPromptBuilder:
         assert "A calm gallery." in prompt
         assert "ready-to-speak" not in prompt
         assert "Make sure you exactly follow the script when you read it." in prompt
+
+    def test_build_tts_prompt_and_transcript_falls_back_to_explicit_transcript(self, executor):
+        prompt, transcript = executor._build_tts_prompt_and_transcript(
+            "Fallback transcript.",
+            {
+                "compiledPrompt": "\n".join([
+                    "You are Museum Manager, a calm narrator.",
+                    "## THE SCENE",
+                    "A calm gallery.",
+                ])
+            },
+        )
+
+        assert transcript == "Fallback transcript."
+        assert "A calm gallery." in prompt
 
     def test_legacy_director_note_fallback_uses_markdown_sections(self, executor):
         result = executor._build_tts_text(

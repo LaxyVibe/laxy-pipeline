@@ -7,14 +7,10 @@ import { useAudioDirectorController } from './useAudioDirectorController';
 import { audioDirectorStyles, audioDirectorTheme } from './theme';
 import AnalysisOverlay from './components/AnalysisOverlay';
 import CharacterDesignerDialog from './components/dialogs/CharacterDesignerDialog';
-import CharacterPickerDialog from './components/dialogs/CharacterPickerDialog';
 import ConfigPreviewDialog from './components/dialogs/ConfigPreviewDialog';
-import DirectorNoteDialog from './components/dialogs/DirectorNoteDialog';
-import VoicePickerDialog from './components/dialogs/VoicePickerDialog';
 import DeployVersionFooter from '../../components/DeployVersionFooter';
 import AudioDirectorHero from './components/AudioDirectorHero';
 import GenerationHistoryRail from './components/panels/GenerationHistoryRail';
-import ScriptPolishSection from './components/panels/ScriptPolishSection';
 import TtsScriptSection from './components/panels/TtsScriptSection';
 import { langLabel } from '../../types/entity';
 
@@ -57,7 +53,6 @@ function playWarmCompletionBeep() {
 
 export default function AudioDirectorApp() {
   const controller = useAudioDirectorController();
-  const [scriptPolishOpen, setScriptPolishOpen] = useState(false);
   const [resultOpen, setResultOpen] = useState(false);
   const [hasUnreadGeneratedResult, setHasUnreadGeneratedResult] = useState(false);
   const resultCount = controller.generationHistory.reduce(
@@ -166,25 +161,56 @@ export default function AudioDirectorApp() {
               characterAvatar={controller.selectedCharacter?.avatar ?? '＋'}
               characterName={controller.selectedCharacter?.name ?? 'Select a character'}
               characterSelected={Boolean(controller.selectedCharacter)}
+              selectedCharacterId={controller.globalSettings.characterId}
+              presetCharacters={controller.allCharacters.filter((character) => character.source === 'preset')}
+              customCharacters={controller.customCharacters}
+              characterLibraryTab={controller.characterPickerTab}
+              customCharactersLoading={controller.customCharactersLoading}
+              customCharactersError={controller.customCharactersError}
+              canManageCustomCharacters={controller.canManageCustomCharacters}
+              pendingDeleteCharacterId={controller.pendingDeleteCharacterId}
               voiceId={controller.selectedVoice.id}
               voiceName={controller.selectedVoice.name}
+              femaleVoices={controller.femaleVoices}
+              maleVoices={controller.maleVoices}
+              recommendedVoiceId={controller.globalRecommendation.recommendedVoiceId}
+              playingVoiceId={controller.playingVoiceId}
               isGenerating={controller.isGenerating}
               isGeneratingJapaneseReading={controller.isGeneratingJapaneseReading}
               generateDisabled={!controller.selectedCharacter || controller.currentScriptText.trim().length === 0}
               japaneseReadingStale={controller.currentJapaneseReadingStale}
               japaneseReadingText={controller.currentJapaneseReadingText}
+              generationError={controller.generationError}
               onChangeScript={controller.handleCurrentScriptTextChange}
               onChangeJapaneseReading={controller.handleJapaneseReadingTextChange}
               onChangeCompiledPrompt={controller.handleCompiledPromptChange}
               onGenerate={controller.runGeneration}
               onGenerateJapaneseReading={controller.handleGenerateJapaneseReading}
               onPreviewVoice={controller.handleVoicePreviewRestart}
-              onOpenCharacterPicker={() => controller.setCharacterPickerOpen(true)}
-              onOpenVoicePicker={() => controller.setVoicePickerOpen(true)}
-                onOpenScriptPolish={() => setScriptPolishOpen(true)}
-                onOpenDirectorNote={() => controller.setDirectorNoteEditorOpen(true)}
+              onChangeVoice={controller.handleGlobalVoiceChange}
+              onChangeCharacter={controller.handleGlobalCharacterChange}
+              onChangeCharacterLibraryTab={controller.setCharacterPickerTab}
+              onCreateCustomCharacter={controller.openCreateCharacterDesigner}
+              onEditCustomCharacter={controller.openEditCharacterDesigner}
+              onDeleteCustomCharacter={controller.handleDeleteCustomCharacter}
+              scriptEnhancementLimit={controller.globalSettings.scriptEnhancementLimit}
+              scriptEnhancementEnabled={controller.scriptEnhancementEnabled}
+              hasScriptEnhancement={Object.keys(controller.activeEnhancementEntries).length > 0}
+              isEnhancing={controller.isEnhancing}
+              onCueDensityChange={controller.handleScriptEnhancementLimitChange}
+              onEnhanceScript={controller.handleEnhanceActiveLanguage}
+              onGeneratePerformanceGuidelines={controller.handleDirectorNoteDialogDone}
+              onChangePerformanceHintField={controller.handleDirectorNoteFieldChange}
+              onChangePerformanceGuidelines={controller.handleGeneratedPerformanceGuidelinesChange}
+              performanceHint={{
+                where: controller.globalSettings.directorNote.scene,
+                who: controller.globalSettings.directorNote.style,
+                what: controller.globalSettings.directorNote.pacing,
+                how: controller.globalSettings.directorNote.tone,
+                generatedGuidelines: controller.globalSettings.directorNote.generatedPerformanceGuidelines,
+              }}
               showJapaneseReading={controller.coreLanguage === 'ja'}
-              />
+            />
             <DeployVersionFooter align="left" compact />
           </Stack>
         </Container>
@@ -244,60 +270,6 @@ export default function AudioDirectorApp() {
           </DialogContent>
         </Dialog>
 
-        <Dialog open={scriptPolishOpen} onClose={() => setScriptPolishOpen(false)} maxWidth="lg" fullWidth>
-          <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Stack>
-              <Typography variant="h6">Script Polish</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Review and refine the polished script without leaving the main workflow.
-              </Typography>
-            </Stack>
-            <IconButton size="small" onClick={() => setScriptPolishOpen(false)}>
-              <CloseIcon fontSize="small" />
-            </IconButton>
-          </DialogTitle>
-          <DialogContent dividers>
-            <ScriptPolishSection
-              activeEnhancementEntries={controller.activeEnhancementEntries}
-              coreLanguage={controller.coreLanguage}
-              generationError={controller.generationError}
-              getItemSettings={controller.getItemSettings}
-              isEnhancing={controller.isEnhancing}
-              isGenerating={controller.isGenerating}
-              items={controller.items}
-              onChangeEnhancedScript={controller.handleEnhancedScriptChange}
-              onChangePhoneticOverrides={controller.handlePhoneticOverridesChange}
-              onCueDensityChange={controller.handleScriptEnhancementLimitChange}
-              onEnhanceAll={controller.handleEnhanceActiveLanguage}
-              scriptEnhancementEnabled={controller.scriptEnhancementEnabled}
-              scriptEnhancementLimit={controller.globalSettings.scriptEnhancementLimit}
-              eyebrow="Polish dialog"
-              mode="plain"
-            />
-          </DialogContent>
-        </Dialog>
-
-        <CharacterPickerDialog
-          activeTab={controller.characterPickerTab}
-          canManageCustomCharacters={controller.canManageCustomCharacters}
-          customCharacters={controller.customCharacters}
-          customCharactersError={controller.customCharactersError}
-          customCharactersLoading={controller.customCharactersLoading}
-          onClose={() => controller.setCharacterPickerOpen(false)}
-          onCreateCustomCharacter={controller.openCreateCharacterDesigner}
-          onDeleteCustomCharacter={controller.handleDeleteCustomCharacter}
-          onEditCustomCharacter={controller.openEditCharacterDesigner}
-          onSelect={(characterId) => {
-            void controller.handleGlobalCharacterChange(characterId);
-            controller.setCharacterPickerOpen(false);
-          }}
-          onTabChange={controller.setCharacterPickerTab}
-          open={controller.characterPickerOpen}
-          pendingDeleteCharacterId={controller.pendingDeleteCharacterId}
-          presetCharacters={controller.allCharacters.filter((character) => character.source === 'preset')}
-          selectedCharacterId={controller.globalSettings.characterId}
-        />
-
         <CharacterDesignerDialog
           generatedProfile={controller.characterDesignerPreview}
           generateError={controller.characterDesignerError}
@@ -309,34 +281,6 @@ export default function AudioDirectorApp() {
           onGenerate={controller.handleGenerateCharacterProfile}
           onSave={controller.handleSaveCustomCharacter}
           open={controller.characterDesignerOpen}
-        />
-
-        <VoicePickerDialog
-          femaleVoices={controller.femaleVoices}
-          maleVoices={controller.maleVoices}
-          onClose={() => controller.setVoicePickerOpen(false)}
-          onPreview={controller.handleVoicePreview}
-          onSelect={(voiceId) => {
-            controller.handleGlobalVoiceChange(voiceId);
-            controller.setVoicePickerOpen(false);
-          }}
-          open={controller.voicePickerOpen}
-          playingVoiceId={controller.playingVoiceId}
-          recommendedVoiceId={controller.globalRecommendation.recommendedVoiceId}
-          selectedVoiceId={controller.globalSettings.voiceId}
-        />
-
-        <DirectorNoteDialog
-          onClose={() => controller.setDirectorNoteEditorOpen(false)}
-          onDone={() => {
-            void controller.handleDirectorNoteDialogDone();
-          }}
-          onEnvironmentChange={(value) => controller.handleDirectorNoteFieldChange('scene', value)}
-          onGoalChange={(value) => controller.handleDirectorNoteFieldChange('pacing', value)}
-          onTargetAudienceChange={(value) => controller.handleDirectorNoteFieldChange('style', value)}
-          onToneChange={(value) => controller.handleDirectorNoteFieldChange('tone', value)}
-          open={controller.directorNoteEditorOpen}
-          settings={controller.globalSettings}
         />
 
         <ConfigPreviewDialog

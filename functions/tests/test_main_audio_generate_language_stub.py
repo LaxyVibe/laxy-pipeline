@@ -173,6 +173,48 @@ def test_audio_generate_language_uses_deterministic_stub(monkeypatch: pytest.Mon
     assert "こんにちは世界" in payload["srtFiles"][0]["rawSrt"]
 
 
+def test_audio_generate_language_stub_uses_compiled_prompt_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PIPELINE_AUDIO_E2E_STUB", "true")
+    monkeypatch.setattr(
+        functions_main,
+        "_authorise_admin_request",
+        lambda req, require_tenant_scope=True: ({
+            "role": "client-admin",
+            "tenant_id": "tenant-e2e",
+            "actor_id": "u1",
+            "actor_email": "admin@example.com",
+        }, None),
+    )
+    monkeypatch.setattr(
+        functions_main.session_service,
+        "get_session",
+        lambda _sid: {"context": {"tenantId": "tenant-e2e"}},
+    )
+
+    req = FakeRequest(body={
+        "sessionId": "audio-stub-compiled-prompt",
+        "voiceId": "Aoede",
+        "language": "en",
+        "scripts": [
+            {"spotId": "spot_001", "spotNumber": 1, "title": "Spot 1"},
+        ],
+        "directorNote": {
+            "compiledPrompt": "\n".join([
+                "# AUDIO PROFILE: Guide",
+                "## THE SCENE: Museum",
+                "#### TRANSCRIPT",
+                "Transcript sourced from the prompt.",
+            ]),
+        },
+    })
+
+    response = functions_main.audio_generate_language(req)
+
+    assert _extract_status(response) == 200
+    payload = _extract_json(response)
+    assert "Transcript sourced from the prompt" in payload["srtFiles"][0]["rawSrt"]
+
+
 def test_audio_generate_language_stub_still_enforces_session_tenant_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PIPELINE_AUDIO_E2E_STUB", "true")
     monkeypatch.setattr(

@@ -1444,7 +1444,8 @@ class PipelineExecutor:
             spot_number = script.get("spotNumber", 0)
             title = script.get("title", "")
             text = lang_translations.get(spot_id, "") or script.get("scriptText", "")
-            if not text.strip():
+            _, resolved_transcript = self._build_tts_prompt_and_transcript(text, director_note)
+            if not resolved_transcript.strip():
                 continue
 
             try:
@@ -1652,10 +1653,11 @@ class PipelineExecutor:
             or ""
         ).strip()
         if compiled_prompt:
+            prompt_source, compiled_transcript = cls._split_compiled_tts_prompt(compiled_prompt)
             prompt = cls._ensure_tts_script_fidelity_instruction(
-                cls._sanitize_compiled_tts_prompt(compiled_prompt)
+                cls._sanitize_compiled_tts_prompt(prompt_source or compiled_prompt)
             )
-            return prompt, clean_transcript
+            return prompt, compiled_transcript or clean_transcript
 
         scene = cls._first_director_note_value(director_note, "scene", "vocalEnvironment")
         style = cls._first_director_note_value(director_note, "style", "mission", "missionOfSpeech")
@@ -1669,6 +1671,18 @@ class PipelineExecutor:
         if pacing:
             lines.append(f"Pacing: {pacing}")
         return cls._ensure_tts_script_fidelity_instruction("\n".join(lines)), clean_transcript
+
+    @classmethod
+    def _split_compiled_tts_prompt(cls, compiled_prompt: str) -> tuple[str, str]:
+        """Separate the prompt body from the preview transcript section."""
+        lines = str(compiled_prompt or "").splitlines()
+        for index, raw_line in enumerate(lines):
+            if raw_line.strip() != "#### TRANSCRIPT":
+                continue
+            prompt_body = "\n".join(lines[:index]).strip()
+            transcript = "\n".join(lines[index + 1:]).strip()
+            return prompt_body, transcript
+        return str(compiled_prompt or "").strip(), ""
 
     @classmethod
     def _sanitize_compiled_tts_prompt(cls, compiled_prompt: str) -> str:

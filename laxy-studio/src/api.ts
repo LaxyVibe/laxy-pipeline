@@ -432,7 +432,7 @@ export interface AudioGenerateRequest {
     spotId: string;
     spotNumber: number;
     title: string;
-    scriptText: string;
+    scriptText?: string;
   }[];
   voiceId: string;
   languages: string[];
@@ -823,7 +823,7 @@ export async function generateAudio(
 
 export interface AudioGenerateLanguageRequest {
   sessionId: string;
-  scripts: Array<{ spotId: string; spotNumber: number; title: string; scriptText: string }>;
+  scripts: Array<{ spotId: string; spotNumber: number; title: string; scriptText?: string }>;
   voiceId: string;
   language: string;
   historyTarget?: {

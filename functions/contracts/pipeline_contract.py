@@ -38,7 +38,7 @@ class ScriptRequestItem(BaseModel):
     spotId: str = Field(min_length=1)
     spotNumber: int
     title: str
-    scriptText: str
+    scriptText: str | None = None
 
 
 class TranslationTextItem(BaseModel):
