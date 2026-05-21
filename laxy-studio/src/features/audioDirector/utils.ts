@@ -329,8 +329,10 @@ export function preprocessScriptForLanguage(language: string, text: string): {
   const trimmed = text.trim();
   if (language === 'ja') {
     return {
-      processedText: trimmed.replace(/[—–]/g, '、').replace(/\s+/g, ' '),
-      preprocessingNotes: ['Japanese punctuation normalization applied before TTS submission.'],
+      processedText: text
+        .replace(/\r\n/g, '\n')
+        .replace(/[—–]/g, '、'),
+      preprocessingNotes: ['Japanese punctuation normalization applied before TTS submission while preserving line breaks.'],
     };
   }
   if (language.startsWith('zh')) {

@@ -35,12 +35,9 @@ import {
 } from '@mui/material';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
-import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import HeadphonesIcon from '@mui/icons-material/Headphones';
 import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
-import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
-import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
-import { collection, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
+import { collection, deleteField, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { getCustomClaims } from '../admin/auth/authenticator';
 import { bootstrapAudioSession, generateAudioForLanguage, translateLanguage } from '../api';
 import { useAuthStore } from '../authStore';
@@ -52,10 +49,11 @@ import {
   buildAudioTrackDocId,
   mapAudioHistoryVersion,
   mapAudioTrackSummary,
-  type StoredTtsPromptConfig,
   type AudioHistorySelection,
   type AudioHistoryTarget,
   type AudioTrackSummaryRecord,
+  type StoredAudioDirectorConfig,
+  type StoredTtsPromptSnapshot,
 } from '../features/audioDirector/history';
 import { ROUTES } from '../routes';
 import { SUPPORTED_LANGUAGES, langLabel } from '../types/entity';
@@ -117,10 +115,18 @@ type DeleteGuideDialogState = {
   guide: GuidePickerOption | null;
 };
 
+type CopyConfigDialogState = {
+  open: boolean;
+  targetJobId: string | null;
+  sourceJobId: string;
+};
+
 type AudioDirectorLaunchRecord = {
   jobId: string;
   windowRef: Window | null;
 };
+
+type PersistFieldMode = 'ignore' | 'write' | 'delete';
 
 const AUDIO_DIRECTOR_ORIGIN = window.location.origin;
 const SUPPORTED_TTS_JOB_LANGUAGE_CODES = ['en', 'ja', 'ko', 'zh-TW', 'zh-CN', 'fr'] as const;
@@ -197,8 +203,7 @@ function voiceNameForId(voiceId: string): string {
   return AUDIO_MVP_VOICES.find((voice) => voice.id === voiceId)?.name ?? voiceId;
 }
 
-function buildStoredTtsPromptConfig(job: TtsJob): StoredTtsPromptConfig | null {
-  const compiledPrompt = job.promptText.trim();
+function buildStoredAudioDirectorConfig(job: TtsJob): StoredAudioDirectorConfig | null {
   const voiceId = job.voiceId.trim();
   const characterId = job.characterId.trim();
   const characterName = job.characterName.trim();
@@ -209,8 +214,7 @@ function buildStoredTtsPromptConfig(job: TtsJob): StoredTtsPromptConfig | null {
   const generatedPerformanceGuidelines = job.performanceHint.generatedPerformanceGuidelines.trim();
 
   if (
-    !compiledPrompt
-    && !voiceId
+    !voiceId
     && !characterId
     && !characterName
     && !scene
@@ -223,7 +227,6 @@ function buildStoredTtsPromptConfig(job: TtsJob): StoredTtsPromptConfig | null {
   }
 
   return {
-    compiledPrompt,
     voiceId: voiceId || undefined,
     characterId: characterId || undefined,
     characterName: characterName || undefined,
@@ -235,19 +238,23 @@ function buildStoredTtsPromptConfig(job: TtsJob): StoredTtsPromptConfig | null {
   };
 }
 
+function buildStoredTtsPromptSnapshot(job: TtsJob): StoredTtsPromptSnapshot | null {
+  const compiledPrompt = job.promptText.trim();
+  if (!compiledPrompt) return null;
+  return { compiledPrompt };
+}
+
 function compactFirestoreRecord<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
   ) as T;
 }
 
-function applyStoredTtsPromptConfig(job: TtsJob, storedConfig?: StoredTtsPromptConfig): TtsJob {
+function applyStoredAudioDirectorConfig(job: TtsJob, storedConfig?: StoredAudioDirectorConfig): TtsJob {
   if (!storedConfig) return job;
-
   const nextVoiceId = job.voiceId || storedConfig.voiceId || '';
   return {
     ...job,
-    promptText: job.promptText || storedConfig.compiledPrompt || '',
     voiceId: nextVoiceId,
     voiceName: job.voiceName || (nextVoiceId ? voiceNameForId(nextVoiceId) : ''),
     characterId: job.characterId || storedConfig.characterId || '',
@@ -262,6 +269,14 @@ function applyStoredTtsPromptConfig(job: TtsJob, storedConfig?: StoredTtsPromptC
         || storedConfig.generatedPerformanceGuidelines
         || '',
     },
+  };
+}
+
+function applyStoredTtsPromptSnapshot(job: TtsJob, storedSnapshot?: StoredTtsPromptSnapshot): TtsJob {
+  if (!storedSnapshot) return job;
+  return {
+    ...job,
+    promptText: job.promptText || storedSnapshot.compiledPrompt || '',
   };
 }
 
@@ -293,60 +308,20 @@ function buildHistoryTarget(guide: SharedGuideTarget | null, job: TtsJob): Audio
   };
 }
 
-function OutputAudioPreviewButton(props: { audioUrl: string }) {
+function OutputAudioPreviewPlayer(props: { audioUrl: string }) {
   const { audioUrl } = props;
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const listenersAttachedRef = useRef(false);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const trimmedAudioUrl = audioUrl.trim();
 
-  useEffect(() => {
-    audioRef.current?.pause();
-    audioRef.current = null;
-    listenersAttachedRef.current = false;
-    setIsPlaying(false);
-  }, [audioUrl]);
-
-  useEffect(() => () => {
-    audioRef.current?.pause();
-    audioRef.current = null;
-  }, []);
-
-  const handleTogglePlayback = async () => {
-    const trimmedAudioUrl = audioUrl.trim();
-    if (!trimmedAudioUrl) return;
-
-    const audio = audioRef.current ?? new Audio(trimmedAudioUrl);
-    if (!audioRef.current) {
-      audioRef.current = audio;
-    }
-
-    if (!listenersAttachedRef.current) {
-      audio.addEventListener('play', () => setIsPlaying(true));
-      audio.addEventListener('pause', () => setIsPlaying(false));
-      audio.addEventListener('ended', () => setIsPlaying(false));
-      listenersAttachedRef.current = true;
-    }
-
-    if (audio.paused) {
-      await audio.play();
-      return;
-    }
-
-    audio.pause();
-  };
+  if (!trimmedAudioUrl) return null;
 
   return (
-    <Button
-      variant="outlined"
-      size="small"
-      startIcon={isPlaying ? <PauseCircleOutlineIcon /> : <PlayCircleOutlineIcon />}
-      disabled={!audioUrl.trim()}
-      onClick={() => {
-        void handleTogglePlayback();
-      }}
-    >
-      {isPlaying ? 'Pause audio' : 'Play audio'}
-    </Button>
+    <Box
+      component="audio"
+      controls
+      preload="none"
+      src={trimmedAudioUrl}
+      sx={{ width: '100%' }}
+    />
   );
 }
 
@@ -375,6 +350,11 @@ export default function TTSPage() {
   const [deleteGuideConfirmText, setDeleteGuideConfirmText] = useState('');
   const [deleteGuideLoading, setDeleteGuideLoading] = useState(false);
   const [deleteGuideError, setDeleteGuideError] = useState<string | null>(null);
+  const [copyConfigDialog, setCopyConfigDialog] = useState<CopyConfigDialogState>({
+    open: false,
+    targetJobId: null,
+    sourceJobId: '',
+  });
   const [spotManagerTitle, setSpotManagerTitle] = useState('');
   const [spotComposerOpen, setSpotComposerOpen] = useState(false);
   const [spotManagerCreating, setSpotManagerCreating] = useState(false);
@@ -432,38 +412,69 @@ export default function TTSPage() {
       .filter((job) => job.language === 'en')
       .map((job) => [job.spotId, job] as const),
   ), [jobs]);
+  const copyConfigTargetJob = useMemo(
+    () => jobs.find((job) => job.id === copyConfigDialog.targetJobId) ?? null,
+    [copyConfigDialog.targetJobId, jobs],
+  );
+  const copyConfigCandidates = useMemo(
+    () => jobs.filter((job) => (
+      job.id !== copyConfigDialog.targetJobId
+      && Boolean(buildStoredAudioDirectorConfig(job))
+    )),
+    [copyConfigDialog.targetJobId, jobs],
+  );
 
   const updateJob = (jobId: string, updater: (job: TtsJob) => TtsJob) => {
     setJobs((currentJobs) => currentJobs.map((job) => (job.id === jobId ? updater(job) : job)));
   };
 
-  const persistJobPromptConfig = async (job: TtsJob) => {
+  const persistJobStoredState = async (job: TtsJob, options: {
+    audioDirectorConfigMode: PersistFieldMode;
+    ttsPromptSnapshotMode: PersistFieldMode;
+  }) => {
     if (!sharedGuideTarget) return;
-    const config = buildStoredTtsPromptConfig(job);
-    if (!config) return;
+    const audioDirectorConfig = buildStoredAudioDirectorConfig(job);
+    const ttsPromptSnapshot = buildStoredTtsPromptSnapshot(job);
 
-    const { db } = initFirebase();
-    const audioTrackRef = doc(db, 'guides', sharedGuideTarget.guideId, 'audioTracks', buildAudioTrackDocId(job.spotId, job.language));
-    await setDoc(audioTrackRef, compactFirestoreRecord({
+    const payload: Record<string, unknown> = {
       guideId: sharedGuideTarget.guideId,
       tenantId: sharedGuideTarget.tenantId ?? tenantId ?? undefined,
       spotId: job.spotId,
       spotTitle: job.spotTitle,
       lang: job.language,
       updatedAt: Date.now(),
-      ttsPromptConfig: compactFirestoreRecord(config),
-    }), { merge: true });
+      ttsPromptConfig: deleteField(),
+    };
+
+    if (options.audioDirectorConfigMode === 'write') {
+      payload.audioDirectorConfig = audioDirectorConfig ? compactFirestoreRecord(audioDirectorConfig) : deleteField();
+    } else if (options.audioDirectorConfigMode === 'delete') {
+      payload.audioDirectorConfig = deleteField();
+    }
+
+    if (options.ttsPromptSnapshotMode === 'write') {
+      payload.ttsPromptSnapshot = ttsPromptSnapshot ? compactFirestoreRecord(ttsPromptSnapshot) : deleteField();
+    } else if (options.ttsPromptSnapshotMode === 'delete') {
+      payload.ttsPromptSnapshot = deleteField();
+    }
+
+    const { db } = initFirebase();
+    const audioTrackRef = doc(db, 'guides', sharedGuideTarget.guideId, 'audioTracks', buildAudioTrackDocId(job.spotId, job.language));
+    await setDoc(audioTrackRef, compactFirestoreRecord(payload), { merge: true });
   };
 
-  const queuePersistJobPromptConfig = (job: TtsJob) => {
+  const queuePersistJobStoredState = (job: TtsJob, options: {
+    audioDirectorConfigMode: PersistFieldMode;
+    ttsPromptSnapshotMode: PersistFieldMode;
+  }) => {
     const existingTimeoutId = promptPersistTimeoutsRef.current[job.id];
     if (existingTimeoutId) {
       window.clearTimeout(existingTimeoutId);
     }
     promptPersistTimeoutsRef.current[job.id] = window.setTimeout(() => {
       delete promptPersistTimeoutsRef.current[job.id];
-      void persistJobPromptConfig(job).catch((error) => {
-        console.error('Failed to persist TTS prompt config', error);
+      void persistJobStoredState(job, options).catch((error) => {
+        console.error('Failed to persist Audio Director row state', error);
       });
     }, 350);
   };
@@ -695,20 +706,28 @@ export default function TTSPage() {
           const persistedSelection = persistedJobSelections[jobId];
           const persistedSummary = trackSummaries.find((summary) => summary.spotId === spot.spotId && summary.lang === language);
           if (existingJob) {
-            nextJobs.push(applyStoredTtsPromptConfig({
-              ...existingJob,
-              spotTitle: spot.spotTitle,
-              language,
-              outputAudio: existingJob.outputAudio || persistedSelection?.outputAudio || '',
-              selectedHistoryVersion: existingJob.selectedHistoryVersion ?? persistedSelection?.selectedHistoryVersion,
-            }, persistedSummary?.ttsPromptConfig));
+            const hydratedExistingJob = applyStoredTtsPromptSnapshot(
+              applyStoredAudioDirectorConfig({
+                ...existingJob,
+                spotTitle: spot.spotTitle,
+                language,
+                outputAudio: existingJob.outputAudio || persistedSelection?.outputAudio || '',
+                selectedHistoryVersion: existingJob.selectedHistoryVersion ?? persistedSelection?.selectedHistoryVersion,
+              }, persistedSummary?.audioDirectorConfig),
+              persistedSummary?.ttsPromptSnapshot,
+            );
+            nextJobs.push(hydratedExistingJob);
             continue;
           }
-          nextJobs.push(applyStoredTtsPromptConfig({
-            ...createTtsJob(spot.spotId, spot.spotTitle, language),
-            outputAudio: persistedSelection?.outputAudio || '',
-            selectedHistoryVersion: persistedSelection?.selectedHistoryVersion,
-          }, persistedSummary?.ttsPromptConfig));
+          const hydratedJob = applyStoredTtsPromptSnapshot(
+            applyStoredAudioDirectorConfig({
+              ...createTtsJob(spot.spotId, spot.spotTitle, language),
+              outputAudio: persistedSelection?.outputAudio || '',
+              selectedHistoryVersion: persistedSelection?.selectedHistoryVersion,
+            }, persistedSummary?.audioDirectorConfig),
+            persistedSummary?.ttsPromptSnapshot,
+          );
+          nextJobs.push(hydratedJob);
         }
       }
 
@@ -776,7 +795,10 @@ export default function TTSPage() {
           selectedHistoryVersion: undefined,
         };
         updateJob(launchRecord.jobId, () => updatedJob);
-        queuePersistJobPromptConfig(updatedJob);
+        queuePersistJobStoredState(updatedJob, {
+          audioDirectorConfigMode: 'write',
+          ttsPromptSnapshotMode: 'write',
+        });
         setAudioErrorByJob((previous) => ({
           ...previous,
           [launchRecord.jobId]: '',
@@ -883,6 +905,62 @@ export default function TTSPage() {
     setDeleteGuideDialog({ open: false, guide: null });
     setDeleteGuideConfirmText('');
     setDeleteGuideError(null);
+  };
+
+  const handleOpenCopyConfigDialog = (targetJobId: string) => {
+    const candidates = jobs.filter((job) => job.id !== targetJobId && Boolean(buildStoredAudioDirectorConfig(job)));
+    setCopyConfigDialog({
+      open: true,
+      targetJobId,
+      sourceJobId: candidates[0]?.id ?? '',
+    });
+  };
+
+  const handleCloseCopyConfigDialog = () => {
+    setCopyConfigDialog({
+      open: false,
+      targetJobId: null,
+      sourceJobId: '',
+    });
+  };
+
+  const handleApplyCopiedConfig = () => {
+    const targetJobId = copyConfigDialog.targetJobId;
+    if (!targetJobId) {
+      handleCloseCopyConfigDialog();
+      return;
+    }
+    const sourceJob = jobs.find((job) => job.id === copyConfigDialog.sourceJobId);
+    const targetJob = jobs.find((job) => job.id === targetJobId);
+    if (!sourceJob || !targetJob) {
+      handleCloseCopyConfigDialog();
+      return;
+    }
+
+    const copiedJob: TtsJob = {
+      ...targetJob,
+      promptText: '',
+      outputAudio: '',
+      selectedHistoryVersion: undefined,
+      voiceId: sourceJob.voiceId,
+      voiceName: sourceJob.voiceId ? voiceNameForId(sourceJob.voiceId) : '',
+      characterId: sourceJob.characterId,
+      characterName: sourceJob.characterName,
+      performanceHint: {
+        ...sourceJob.performanceHint,
+      },
+    };
+
+    updateJob(targetJobId, () => copiedJob);
+    queuePersistJobStoredState(copiedJob, {
+      audioDirectorConfigMode: 'write',
+      ttsPromptSnapshotMode: 'delete',
+    });
+    setAudioErrorByJob((previous) => ({
+      ...previous,
+      [targetJobId]: '',
+    }));
+    handleCloseCopyConfigDialog();
   };
 
   const handleCreateMinimalGuide = async () => {
@@ -1322,6 +1400,8 @@ export default function TTSPage() {
           latestVersionId: audioFile.versionId,
           latestGeneratedAt: generatedAt,
           hasGeneratedAudio: true,
+          audioDirectorConfig: buildStoredAudioDirectorConfig(job) ?? undefined,
+          ttsPromptSnapshot: buildStoredTtsPromptSnapshot(job) ?? undefined,
         };
         const existingIndex = previous.findIndex((summary) => summary.id === docId);
         if (existingIndex < 0) {
@@ -1545,6 +1625,10 @@ export default function TTSPage() {
                             const savedHistory = jobHasSavedHistory(job);
                             const openDisabled = !job.inputScript.trim() && !savedHistory;
                             const hasOpenWindow = jobHasOpenWindow(job.id);
+                            const hasCopyConfigCandidates = jobs.some((candidate) => (
+                              candidate.id !== job.id
+                              && Boolean(buildStoredAudioDirectorConfig(candidate))
+                            ));
                             const englishSourceJob = englishJobBySpotId.get(job.spotId);
                             const canTranslateFromEnglish = job.language !== 'en' && Boolean(englishSourceJob);
                             const translateDisabled = translationPendingByJob[job.id] || !(englishSourceJob?.inputScript.trim());
@@ -1625,6 +1709,14 @@ export default function TTSPage() {
                                 <TableCell>
                                   <Stack spacing={1}>
                                     <Button
+                                      variant="outlined"
+                                      size="small"
+                                      disabled={!hasCopyConfigCandidates}
+                                      onClick={() => handleOpenCopyConfigDialog(job.id)}
+                                    >
+                                      Copy Config
+                                    </Button>
+                                    <Button
                                       variant="contained"
                                       size="small"
                                       startIcon={<HeadphonesIcon />}
@@ -1640,6 +1732,11 @@ export default function TTSPage() {
                                           ? 'Reopen Audio Director to refine the current prompt and voice.'
                                           : 'Open Audio Director to build the prompt and choose the voice.'}
                                     </Typography>
+                                    {!hasCopyConfigCandidates ? (
+                                      <Typography variant="caption" color="text.secondary">
+                                        Save an Audio Director config in another row first to reuse it here.
+                                      </Typography>
+                                    ) : null}
                                     {job.selectedHistoryVersion?.versionId ? (
                                       <Typography variant="caption" color="text.secondary">
                                         Selected version: {job.selectedHistoryVersion.versionId}
@@ -1665,7 +1762,10 @@ export default function TTSPage() {
                                         ...currentJob,
                                         promptText: nextValue,
                                       }));
-                                      queuePersistJobPromptConfig(nextJob);
+                                      queuePersistJobStoredState(nextJob, {
+                                        audioDirectorConfigMode: 'ignore',
+                                        ttsPromptSnapshotMode: 'write',
+                                      });
                                       setAudioErrorByJob((previous) => ({
                                         ...previous,
                                         [job.id]: '',
@@ -1687,36 +1787,12 @@ export default function TTSPage() {
                                     >
                                       {audioPending ? 'Generating…' : 'Generate Audio'}
                                     </Button>
-                                    <Button
-                                      component="a"
-                                      variant="outlined"
-                                      size="small"
-                                      startIcon={<DownloadOutlinedIcon />}
-                                      href={job.outputAudio || undefined}
-                                      download
-                                      disabled={!job.outputAudio.trim()}
-                                    >
-                                      Download Audio
-                                    </Button>
-                                    <TextField
-                                      fullWidth
-                                      placeholder="Generate audio from this row to fill the audio URL"
-                                      value={job.outputAudio}
-                                      onChange={(event) => {
-                                        const nextValue = event.target.value;
-                                        updateJob(job.id, (currentJob) => ({
-                                          ...currentJob,
-                                          outputAudio: nextValue,
-                                        }));
-                                      }}
-                                      inputProps={{ 'aria-label': `Output Audio ${selectedSpot.spotTitle} ${langLabel(job.language)}` }}
-                                    />
                                     {audioError ? (
                                       <Typography variant="caption" color="error.main">
                                         {audioError}
                                       </Typography>
                                     ) : null}
-                                    <OutputAudioPreviewButton audioUrl={job.outputAudio} />
+                                    <OutputAudioPreviewPlayer audioUrl={job.outputAudio} />
                                   </Stack>
                                 </TableCell>
                               </TableRow>
@@ -1734,6 +1810,66 @@ export default function TTSPage() {
 
         <DeployVersionFooter />
       </Stack>
+
+      <Dialog
+        open={copyConfigDialog.open}
+        onClose={handleCloseCopyConfigDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Copy Audio Director Config</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Typography variant="body2" color="text.secondary">
+              Reuse voice, character, and performance hints from another row. The target row will keep its own script and require a fresh prompt.
+            </Typography>
+            {copyConfigTargetJob ? (
+              <Typography variant="body2">
+                Target: <strong>{copyConfigTargetJob.spotTitle}</strong> · {langLabel(copyConfigTargetJob.language)}
+              </Typography>
+            ) : null}
+            <FormControl fullWidth disabled={copyConfigCandidates.length === 0}>
+              <InputLabel id="copy-config-source-label">Source Row</InputLabel>
+              <Select
+                labelId="copy-config-source-label"
+                value={copyConfigDialog.sourceJobId}
+                label="Source Row"
+                onChange={(event) => {
+                  setCopyConfigDialog((current) => ({
+                    ...current,
+                    sourceJobId: event.target.value,
+                  }));
+                }}
+              >
+                {copyConfigCandidates.map((job) => (
+                  <MenuItem key={job.id} value={job.id}>
+                    {job.spotTitle} · {langLabel(job.language)}
+                    {job.characterName ? ` · ${job.characterName}` : ''}
+                    {job.voiceName ? ` · ${job.voiceName}` : ''}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            {copyConfigCandidates.length === 0 ? (
+              <Alert severity="info">
+                Save an Audio Director config in another row first, then you can reuse it here.
+              </Alert>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseCopyConfigDialog}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleApplyCopiedConfig}
+            disabled={!copyConfigDialog.sourceJobId}
+          >
+            Copy Config
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog
         open={guidePickerOpen}

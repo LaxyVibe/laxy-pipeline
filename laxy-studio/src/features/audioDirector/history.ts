@@ -29,11 +29,11 @@ export type AudioTrackSummaryRecord = {
   latestVersionId?: string;
   latestGeneratedAt: number;
   hasGeneratedAudio?: boolean;
-  ttsPromptConfig?: StoredTtsPromptConfig;
+  audioDirectorConfig?: StoredAudioDirectorConfig;
+  ttsPromptSnapshot?: StoredTtsPromptSnapshot;
 };
 
-export type StoredTtsPromptConfig = {
-  compiledPrompt: string;
+export type StoredAudioDirectorConfig = {
   voiceId?: string;
   characterId?: string;
   characterName?: string;
@@ -43,6 +43,12 @@ export type StoredTtsPromptConfig = {
   tone?: string;
   generatedPerformanceGuidelines?: string;
 };
+
+export type StoredTtsPromptSnapshot = {
+  compiledPrompt: string;
+};
+
+type LegacyStoredTtsPromptConfig = StoredAudioDirectorConfig & StoredTtsPromptSnapshot;
 
 export type AudioHistoryVersionRecord = {
   versionId: string;
@@ -84,10 +90,9 @@ function readNumber(value: unknown): number {
   return 0;
 }
 
-function readStoredTtsPromptConfig(value: unknown): StoredTtsPromptConfig | undefined {
+function readStoredAudioDirectorConfig(value: unknown): StoredAudioDirectorConfig | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const record = value as Record<string, unknown>;
-  const compiledPrompt = readString(record.compiledPrompt);
   const voiceId = readString(record.voiceId);
   const characterId = readString(record.characterId);
   const characterName = readString(record.characterName);
@@ -98,8 +103,7 @@ function readStoredTtsPromptConfig(value: unknown): StoredTtsPromptConfig | unde
   const generatedPerformanceGuidelines = readString(record.generatedPerformanceGuidelines);
 
   if (
-    !compiledPrompt
-    && !voiceId
+    !voiceId
     && !characterId
     && !characterName
     && !scene
@@ -112,7 +116,6 @@ function readStoredTtsPromptConfig(value: unknown): StoredTtsPromptConfig | unde
   }
 
   return {
-    compiledPrompt,
     voiceId: voiceId || undefined,
     characterId: characterId || undefined,
     characterName: characterName || undefined,
@@ -121,6 +124,24 @@ function readStoredTtsPromptConfig(value: unknown): StoredTtsPromptConfig | unde
     pacing: pacing || undefined,
     tone: tone || undefined,
     generatedPerformanceGuidelines: generatedPerformanceGuidelines || undefined,
+  };
+}
+
+function readStoredTtsPromptSnapshot(value: unknown): StoredTtsPromptSnapshot | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const compiledPrompt = readString(record.compiledPrompt);
+  if (!compiledPrompt) return undefined;
+  return { compiledPrompt };
+}
+
+function readLegacyStoredTtsPromptConfig(value: unknown): LegacyStoredTtsPromptConfig | undefined {
+  const snapshot = readStoredTtsPromptSnapshot(value);
+  const config = readStoredAudioDirectorConfig(value);
+  if (!snapshot && !config) return undefined;
+  return {
+    compiledPrompt: snapshot?.compiledPrompt ?? '',
+    ...config,
   };
 }
 
@@ -205,6 +226,7 @@ export function mapAudioTrackSummary(args: {
   const spotId = readString(data.spotId) || docId.split('_')[0] || '';
   const lang = readString(data.lang);
   if (!spotId || !lang) return null;
+  const legacyPromptConfig = readLegacyStoredTtsPromptConfig(data.ttsPromptConfig);
 
   return {
     id: docId,
@@ -219,7 +241,21 @@ export function mapAudioTrackSummary(args: {
       typeof data.hasGeneratedAudio === 'boolean'
         ? data.hasGeneratedAudio
         : Boolean(readString(data.activeVersionId) || readString(data.latestVersionId) || readNumber(data.latestGeneratedAt)),
-    ttsPromptConfig: readStoredTtsPromptConfig(data.ttsPromptConfig),
+    audioDirectorConfig: readStoredAudioDirectorConfig(data.audioDirectorConfig) ?? (legacyPromptConfig ? {
+      voiceId: legacyPromptConfig.voiceId,
+      characterId: legacyPromptConfig.characterId,
+      characterName: legacyPromptConfig.characterName,
+      scene: legacyPromptConfig.scene,
+      style: legacyPromptConfig.style,
+      pacing: legacyPromptConfig.pacing,
+      tone: legacyPromptConfig.tone,
+      generatedPerformanceGuidelines: legacyPromptConfig.generatedPerformanceGuidelines,
+    } : undefined),
+    ttsPromptSnapshot: readStoredTtsPromptSnapshot(data.ttsPromptSnapshot) ?? (
+      legacyPromptConfig?.compiledPrompt
+        ? { compiledPrompt: legacyPromptConfig.compiledPrompt }
+        : undefined
+    ),
   };
 }
 

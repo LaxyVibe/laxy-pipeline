@@ -1216,16 +1216,85 @@ class PipelineExecutor:
             ),
         )
 
-        text = response.text if response.text else ""
+        hiragana = self._extract_hiragana_response_text(response.text if response.text else "")
+        validation_error = self._validate_hiragana_narration_output(
+            source_text=masked_script_content,
+            generated_text=hiragana,
+            tag_placeholders=tag_placeholders,
+        )
+        if validation_error:
+            repair_response = await _retry_generate_content(
+                self._client,
+                timeout_seconds=self._get_step_timeout_seconds("guide_script_enhance"),
+                retry_context={"operation": "generate_japanese_hiragana_repair"},
+                model=model,
+                contents="\n\n".join([
+                    "The previous output violated the Japanese narration conversion rules.",
+                    f"Violation: {validation_error}",
+                    "Re-convert the ORIGINAL SOURCE TEXT below into compliant Hiragana narration.",
+                    "Preserve every placeholder token exactly and keep all line breaks and empty lines unchanged.",
+                    "",
+                    masked_script_content,
+                ]),
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=prompt_text,
+                    temperature=0.1,
+                    response_mime_type="text/plain",
+                ),
+            )
+            hiragana = self._extract_hiragana_response_text(repair_response.text if repair_response.text else "")
+            validation_error = self._validate_hiragana_narration_output(
+                source_text=masked_script_content,
+                generated_text=hiragana,
+                tag_placeholders=tag_placeholders,
+            )
+            if validation_error:
+                raise ValueError(f"Japanese Hiragana conversion did not satisfy narration rules: {validation_error}")
+
+        hiragana = self._restore_audio_tags_from_hiragana(hiragana, tag_placeholders)
+        return {"success": True, "hiraganaText": hiragana}
+
+    @staticmethod
+    def _extract_hiragana_response_text(text: str) -> str:
         hiragana = text.strip()
         if hiragana.startswith("```"):
             hiragana = hiragana.split("\n", 1)[1] if "\n" in hiragana else hiragana[3:]
             if hiragana.endswith("```"):
                 hiragana = hiragana[:-3]
             hiragana = hiragana.strip()
+        return hiragana
 
-        hiragana = self._restore_audio_tags_from_hiragana(hiragana, tag_placeholders)
-        return {"success": True, "hiraganaText": hiragana}
+    @staticmethod
+    def _newline_signature(text: str) -> list[int]:
+        normalized = text.replace("\r\n", "\n")
+        return [len(match.group(0)) for match in re.finditer(r"\n+", normalized)]
+
+    @classmethod
+    def _validate_hiragana_narration_output(
+        cls,
+        *,
+        source_text: str,
+        generated_text: str,
+        tag_placeholders: dict[str, str],
+    ) -> str | None:
+        if cls._newline_signature(source_text) != cls._newline_signature(generated_text):
+            return "The converted text changed the original line breaks or empty-line structure."
+
+        placeholder_stripped = generated_text
+        for placeholder in tag_placeholders:
+            if generated_text.count(placeholder) != 1:
+                return f"Placeholder token {placeholder} was not preserved exactly once."
+            placeholder_stripped = placeholder_stripped.replace(placeholder, "")
+
+        if re.search(r"[0-9０-９]", placeholder_stripped):
+            return "Digits remained in the converted narration text."
+        if re.search(r"[A-Za-zＡ-Ｚａ-ｚ]", placeholder_stripped):
+            return "Latin letters remained in the converted narration text."
+        if re.search(r"[一-龯々〆ヵヶ]", placeholder_stripped):
+            return "Kanji remained in the converted narration text."
+        if re.search(r"[ァ-ヺｦ-ﾟ]", placeholder_stripped):
+            return "Katakana remained in the converted narration text."
+        return None
 
     @staticmethod
     def _mask_audio_tags_for_hiragana(text: str) -> tuple[str, dict[str, str]]:

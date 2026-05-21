@@ -621,6 +621,24 @@ class TestJapaneseHiraganaConversion:
             "⟦AUDIO_TAG_0⟧ ⟦AUDIO_TAG_1⟧ これは... ⟦AUDIO_TAG_2⟧ いくらですか？"
         )
 
+    def test_validate_hiragana_narration_output_rejects_non_hiragana_text(self, executor):
+        error = executor._validate_hiragana_narration_output(
+            source_text="明日、軽やかに風景を描く。",
+            generated_text="あす、カろやかにふうけいをえがく。",
+            tag_placeholders={},
+        )
+
+        assert error == "Katakana remained in the converted narration text."
+
+    def test_validate_hiragana_narration_output_rejects_changed_line_breaks(self, executor):
+        error = executor._validate_hiragana_narration_output(
+            source_text="第一段落\n\n第二段落",
+            generated_text="だいいちだんらく\nだいにだんらく",
+            tag_placeholders={},
+        )
+
+        assert error == "The converted text changed the original line breaks or empty-line structure."
+
 
 # ── LLM step execution tests ─────────────────────────────────────────────
 
