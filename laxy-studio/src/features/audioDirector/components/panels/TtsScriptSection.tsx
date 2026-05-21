@@ -20,12 +20,14 @@ import {
   Chip,
   CircularProgress,
   FormControl,
+  FormControlLabel,
   IconButton,
   InputLabel,
   MenuItem,
   Paper,
   Select,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
@@ -46,7 +48,7 @@ type VoiceTab = 'all' | 'female' | 'male';
 type WizardStep = 'voice' | 'character' | 'script' | 'performance' | 'prompt';
 type CharacterTab = 'preset' | 'custom';
 
-const WIZARD_STEPS: readonly WizardStep[] = ['voice', 'character', 'script', 'performance', 'prompt'] as const;
+const WIZARD_STEPS: readonly WizardStep[] = ['voice', 'character', 'performance', 'script', 'prompt'] as const;
 
 type Props = {
   scriptText: string;
@@ -348,7 +350,7 @@ export default function TtsScriptSection(props: Props) {
   };
 
   const goToStep = (index: number) => {
-    setActiveStepIndex(Math.max(0, Math.min(index, WIZARD_STEPS.length)));
+    setActiveStepIndex(Math.max(0, Math.min(index, WIZARD_STEPS.length - 1)));
   };
 
   const handleNextStep = async () => {
@@ -359,15 +361,15 @@ export default function TtsScriptSection(props: Props) {
     }
     if (activeStep === 'character') {
       if (!characterSelected) return;
+      goToStep(stepIndex('performance'));
+      return;
+    }
+    if (activeStep === 'performance') {
       goToStep(stepIndex('script'));
       return;
     }
     if (activeStep === 'script') {
       if (!scriptText.trim()) return;
-      goToStep(stepIndex('performance'));
-      return;
-    }
-    if (activeStep === 'performance') {
       goToStep(stepIndex('prompt'));
       return;
     }
@@ -474,31 +476,6 @@ export default function TtsScriptSection(props: Props) {
       return (
         <Stack spacing={2}>
           <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems={{ xs: 'stretch', lg: 'center' }}>
-            <FormControl fullWidth sx={{ maxWidth: { lg: 280 } }}>
-              <InputLabel id="tts-script-step-cue-density-label">Performance cue density</InputLabel>
-              <Select
-                labelId="tts-script-step-cue-density-label"
-                label="Performance cue density"
-                value={scriptEnhancementLimit}
-                onChange={(event) => onCueDensityChange(event.target.value as ScriptEnhancementLimit)}
-              >
-                {SCRIPT_ENHANCEMENT_OPTIONS.map((option) => (
-                  <MenuItem key={option.id} value={option.id}>
-                    {option.label}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <Button
-              variant="outlined"
-              startIcon={isEnhancing ? <CircularProgress color="inherit" size={16} /> : <AutoAwesomeIcon />}
-              onClick={() => onEnhanceScript(hasScriptEnhancement)}
-              disabled={!scriptEnhancementEnabled || !scriptText.trim() || isGenerating || isEnhancing}
-            >
-              {isEnhancing ? 'Enhancing…' : hasScriptEnhancement ? 'Re-run enhance script' : 'Run enhance script'}
-            </Button>
-
             <Stack direction="row" spacing={1}>
               <Tooltip title="Undo">
                 <span>
@@ -554,6 +531,58 @@ export default function TtsScriptSection(props: Props) {
               sx={scrollingTextFieldSx}
             />
           </Box>
+
+          <Paper
+            variant="outlined"
+            sx={{
+              p: 2,
+              borderRadius: 3,
+              bgcolor: alpha('#fffaf3', 0.92),
+            }}
+          >
+            <Stack spacing={1.5}>
+              <FormControlLabel
+                control={(
+                  <Switch
+                    checked={scriptEnhancementEnabled}
+                    onChange={(_event, checked) => onCueDensityChange(checked
+                      ? (scriptEnhancementLimit === 'none' ? 'light' : scriptEnhancementLimit)
+                      : 'none')}
+                  />
+                )}
+                label="Enable performance cues"
+              />
+
+              {scriptEnhancementEnabled ? (
+                <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems={{ xs: 'stretch', lg: 'center' }}>
+                  <FormControl fullWidth sx={{ maxWidth: { lg: 280 } }}>
+                    <InputLabel id="tts-script-step-cue-density-label">Cue density</InputLabel>
+                    <Select
+                      labelId="tts-script-step-cue-density-label"
+                      label="Cue density"
+                      value={scriptEnhancementLimit}
+                      onChange={(event) => onCueDensityChange(event.target.value as ScriptEnhancementLimit)}
+                    >
+                      {SCRIPT_ENHANCEMENT_OPTIONS.filter((option) => option.id !== 'none').map((option) => (
+                        <MenuItem key={option.id} value={option.id}>
+                          {option.label}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+
+                  <Button
+                    variant="outlined"
+                    startIcon={isEnhancing ? <CircularProgress color="inherit" size={16} /> : <AutoAwesomeIcon />}
+                    onClick={() => onEnhanceScript(hasScriptEnhancement)}
+                    disabled={!characterSelected || !hasAnyPerformanceHint || !scriptText.trim() || isGenerating || isEnhancing}
+                  >
+                    {isEnhancing ? 'Enhancing…' : hasScriptEnhancement ? 'Re-run enhance script' : 'Run enhance script'}
+                  </Button>
+                </Stack>
+              ) : null}
+            </Stack>
+          </Paper>
 
           {showJapaneseReading ? (
             <Stack spacing={0.75}>
@@ -798,9 +827,9 @@ export default function TtsScriptSection(props: Props) {
                       disabled={
                         isGenerating
                         || isGeneratingPerformanceGuidelines
+                        || (activeStep === 'performance' && isEnhancing)
                         || (activeStep === 'character' && !characterSelected)
                         || (activeStep === 'script' && !scriptText.trim())
-                        || (activeStep === 'script' && isEnhancing)
                         || (activeStep === 'prompt' && generateDisabled)
                       }
                     >

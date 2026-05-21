@@ -1132,6 +1132,8 @@ class PipelineExecutor:
     async def enhance_script(
         self,
         script_content: str,
+        character_identity: str | None = None,
+        performance_hints: str | None = None,
         character_name: str | None = None,
         character_role: str | None = None,
         context_directive: str | None = None,
@@ -1146,28 +1148,29 @@ class PipelineExecutor:
         temperature = TEMPERATURES.get("guide_script_enhance", 0.7)
 
         parts: list[str] = []
-        if character_name:
-            char_desc = character_name
+        resolved_character_identity = (character_identity or "").strip()
+        if not resolved_character_identity and character_name:
+            resolved_character_identity = character_name
             if character_role:
-                char_desc += f" — {character_role}"
-            parts.append(f"Character Identity: {char_desc}")
-        if context_directive:
-            parts.append(f"Contextual Venue/Goal: {context_directive}")
+                resolved_character_identity += f" — {character_role}"
+        if resolved_character_identity:
+            parts.append(f"Character Identity: {resolved_character_identity}")
+
+        resolved_performance_hints = (performance_hints or "").strip()
+        if not resolved_performance_hints and context_directive:
+            resolved_performance_hints = context_directive.strip()
+        if resolved_performance_hints:
+            parts.append(f"Performance Hints: {resolved_performance_hints}")
+
         if cue_density == "light":
             parts.append(
-                "Cue Density Target: Level 1 (Light). Use sparse cues only where they "
-                "materially improve delivery, usually no more than one cue before a sentence or beat."
+                "Cue Density Target: Light. Prefer one tag per sentence when possible and stay restrained."
             )
         elif cue_density == "medium":
             parts.append(
-                "Cue Density Target: Level 2 (Expressive). Use richer emotional and pacing cues "
-                "proactively, including multiple cues when a line benefits, while keeping the script readable."
+                "Cue Density Target: Expressive. Use a richer pass, but never exceed two tags in any sentence."
             )
         parts.append(f"Original Script:\n{script_content}")
-        parts.append(
-            "Enhance the script with natural performance tags. There is no hard "
-            "per-sentence tag cap, but keep the result readable and avoid cue clutter."
-        )
 
         user_message = "\n\n".join(parts)
 

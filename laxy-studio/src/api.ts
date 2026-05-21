@@ -1075,6 +1075,8 @@ export async function generateDetailedPerformanceGuidelines(
 
 export interface EnhanceScriptRequest {
   scriptContent: string;
+  characterIdentity?: string;
+  performanceHints?: string;
   characterName?: string;
   characterRole?: string;
   contextDirective?: string;

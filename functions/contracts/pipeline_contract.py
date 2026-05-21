@@ -115,6 +115,8 @@ class GenerateDetailedPerformanceGuidelinesRequest(BaseModel):
 
 class EnhanceScriptRequest(BaseModel):
     scriptContent: str = Field(min_length=1)
+    characterIdentity: str | None = None
+    performanceHints: str | None = None
     characterName: str | None = None
     characterRole: str | None = None
     contextDirective: str | None = None

@@ -747,6 +747,8 @@ describe('enhanceScript', () => {
     const { enhanceScript } = await import('./api');
     const result = await enhanceScript({
       scriptContent: 'Welcome to the gallery.',
+      characterIdentity: 'John — Museum Manager. Warm, composed, gently theatrical.',
+      performanceHints: 'Where: Quiet marble atrium\nHow: Invite the listener in with warmth and wonder.',
       characterName: 'John',
       cueDensity: 'medium',
     });
@@ -755,6 +757,8 @@ describe('enhanceScript', () => {
     const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
     expect(calledUrl).toMatch(/\/pipeline\/enhance-script|enhance-script-/);
     expect(body.scriptContent).toBe('Welcome to the gallery.');
+    expect(body.characterIdentity).toContain('Museum Manager');
+    expect(body.performanceHints).toContain('Quiet marble atrium');
     expect(body.characterName).toBe('John');
     expect(body.cueDensity).toBe('medium');
     expect(result.enhancedScript).toBe('[short pause] Welcome to the gallery.');

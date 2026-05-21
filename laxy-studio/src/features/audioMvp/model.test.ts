@@ -12,12 +12,12 @@ import {
 describe('validateEnhancedScript', () => {
   it('accepts creative Gemini TTS audio tags when brackets are well formed', () => {
     const validation = validateEnhancedScript(
-      '[clears throat gently] [hushed tone] [measured pace] Now, regarding this particular exhibit...',
+      'Say in a warm and steady voice: [clears throat gently] Now, regarding this particular exhibit... [short pause] It deserves a closer look.',
     );
 
     expect(validation.isValid).toBe(true);
     expect(validation.issues).toEqual([]);
-    expect(validation.totalTags).toBe(3);
+    expect(validation.totalTags).toBe(2);
   });
 
   it('still reports malformed bracket structure', () => {
@@ -28,6 +28,18 @@ describe('validateEnhancedScript', () => {
     const broken = validateEnhancedScript('[whispers Hello');
     expect(broken.isValid).toBe(false);
     expect(broken.issues[0]?.message).toBe('Cue tag is missing a closing bracket.');
+  });
+
+  it('rejects consecutive tags and more than two tags in a sentence', () => {
+    const validation = validateEnhancedScript(
+      'Say in a wistful voice: [sigh] [whisper] The tide returns, [short pause] and it carries every memory back.',
+    );
+
+    expect(validation.isValid).toBe(false);
+    expect(validation.issues.map((issue) => issue.message)).toEqual(expect.arrayContaining([
+      'Cue tags cannot be placed directly next to each other.',
+      'Each sentence can contain at most 2 cue tags.',
+    ]));
   });
 });
 

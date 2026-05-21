@@ -145,6 +145,33 @@ function clearCharacterSelectionForItems(items: AudioPoiDraft[]): AudioPoiDraft[
   ));
 }
 
+function buildEnhancementCharacterIdentity(character: AudioMvpCharacter): string {
+  return [
+    character.name,
+    character.role,
+    character.context,
+    character.coreTimbre,
+    character.personalityDNA,
+    character.linguisticFingerprint,
+    character.accent,
+  ]
+    .map((value) => value?.trim())
+    .filter(Boolean)
+    .join(' | ');
+}
+
+function buildEnhancementPerformanceHints(directorNote: AudioGuideSettings['directorNote']): string {
+  return [
+    directorNote.scene.trim() ? `Where: ${directorNote.scene.trim()}` : '',
+    directorNote.style.trim() ? `Who: ${directorNote.style.trim()}` : '',
+    directorNote.pacing.trim() ? `What: ${directorNote.pacing.trim()}` : '',
+    directorNote.tone.trim() ? `How: ${directorNote.tone.trim()}` : '',
+    directorNote.generatedPerformanceGuidelines.trim()
+      ? `Detailed Performance Guidelines:\n${directorNote.generatedPerformanceGuidelines.trim()}`
+      : '',
+  ].filter(Boolean).join('\n');
+}
+
 export function useAudioDirectorController() {
   const [searchParams, setSearchParams] = useSearchParams();
   const txtInputRef = useRef<HTMLInputElement | null>(null);
@@ -1423,6 +1450,10 @@ export function useAudioDirectorController() {
         if (!character) {
           throw new Error('Select a character before polishing the script.');
         }
+        const performanceHints = buildEnhancementPerformanceHints(settings.directorNote);
+        if (!performanceHints.trim()) {
+          throw new Error('Add performance hints before running script enhancement.');
+        }
         const sourceText = item.scriptText;
         const existing = existingLanguageCache[item.spotId];
         if (!forceRegenerate && existing && existing.sourceText === sourceText) {
@@ -1432,6 +1463,8 @@ export function useAudioDirectorController() {
 
         const result = await enhanceScript({
           scriptContent: sourceText,
+          characterIdentity: buildEnhancementCharacterIdentity(character),
+          performanceHints,
           characterName: character.name,
           characterRole: character.role,
           contextDirective: settings.directorNote.scene || undefined,

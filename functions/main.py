@@ -2295,6 +2295,8 @@ def enhance_script(req: https_fn.Request) -> https_fn.Response:
     Request body:
     {
         "scriptContent": "Welcome to the ancient temple...",
+        "characterIdentity": "Ada — Warm, approachable narrator with a luminous storyteller presence",
+        "performanceHints": "Where: Quiet shrine courtyard\nHow: Reverent, intimate, gently breathy",
         "characterName": "Ada",
         "characterRole": "Warm, approachable narrator",
         "contextDirective": "A peaceful Buddhist temple in Kyoto",
@@ -2344,6 +2346,8 @@ def enhance_script(req: https_fn.Request) -> https_fn.Response:
             result = _run_async(
                 executor.enhance_script(
                     script_content=payload.scriptContent,
+                    character_identity=payload.characterIdentity,
+                    performance_hints=payload.performanceHints,
                     character_name=payload.characterName,
                     character_role=payload.characterRole,
                     context_directive=payload.contextDirective,

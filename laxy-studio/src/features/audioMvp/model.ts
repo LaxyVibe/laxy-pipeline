@@ -122,13 +122,13 @@ export const SCRIPT_ENHANCEMENT_OPTIONS: Array<{
   },
   {
     id: 'light',
-    label: 'Level 1 - Light',
-    summary: 'Add sparse cue tags where they noticeably improve delivery without much clutter.',
+    label: 'Light',
+    summary: 'Add a restrained cue pass with sparse emotional or pause tags.',
   },
   {
     id: 'medium',
-    label: 'Level 2 - Expressive',
-    summary: 'Use a richer cue pass with more active emotion and pause direction while staying readable.',
+    label: 'Expressive',
+    summary: 'Allow a fuller cue pass while keeping each sentence stable and natural.',
   },
 ];
 
@@ -619,6 +619,29 @@ export function validateEnhancedScript(text: string): ScriptEnhancementValidatio
       });
     }
   }
+
+  const consecutiveTagMatch = text.match(/\][,.;:!?…—\s]*\[/);
+  if (consecutiveTagMatch) {
+    const start = consecutiveTagMatch.index ?? 0;
+    issues.push({
+      index: issues.length + 1,
+      message: 'Cue tags cannot be placed directly next to each other.',
+      excerpt: buildValidationExcerpt(text, start, start + consecutiveTagMatch[0].length),
+    });
+  }
+
+  splitIntoSentences(text).forEach((sentence) => {
+    const sentenceTags = sentence.match(/\[[^[\]]+\]/g) ?? [];
+    if (sentenceTags.length <= 2) return;
+
+    const sentenceStart = text.indexOf(sentence);
+    const safeStart = sentenceStart >= 0 ? sentenceStart : 0;
+    issues.push({
+      index: issues.length + 1,
+      message: 'Each sentence can contain at most 2 cue tags.',
+      excerpt: buildValidationExcerpt(text, safeStart, safeStart + sentence.length),
+    });
+  });
 
   return {
     isValid: issues.length === 0,
