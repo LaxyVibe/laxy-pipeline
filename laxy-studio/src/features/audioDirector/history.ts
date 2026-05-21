@@ -29,6 +29,19 @@ export type AudioTrackSummaryRecord = {
   latestVersionId?: string;
   latestGeneratedAt: number;
   hasGeneratedAudio?: boolean;
+  ttsPromptConfig?: StoredTtsPromptConfig;
+};
+
+export type StoredTtsPromptConfig = {
+  compiledPrompt: string;
+  voiceId?: string;
+  characterId?: string;
+  characterName?: string;
+  scene?: string;
+  style?: string;
+  pacing?: string;
+  tone?: string;
+  generatedPerformanceGuidelines?: string;
 };
 
 export type AudioHistoryVersionRecord = {
@@ -69,6 +82,46 @@ function readNumber(value: unknown): number {
     return Number((value as { toMillis: () => number }).toMillis());
   }
   return 0;
+}
+
+function readStoredTtsPromptConfig(value: unknown): StoredTtsPromptConfig | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const compiledPrompt = readString(record.compiledPrompt);
+  const voiceId = readString(record.voiceId);
+  const characterId = readString(record.characterId);
+  const characterName = readString(record.characterName);
+  const scene = readString(record.scene);
+  const style = readString(record.style);
+  const pacing = readString(record.pacing);
+  const tone = readString(record.tone);
+  const generatedPerformanceGuidelines = readString(record.generatedPerformanceGuidelines);
+
+  if (
+    !compiledPrompt
+    && !voiceId
+    && !characterId
+    && !characterName
+    && !scene
+    && !style
+    && !pacing
+    && !tone
+    && !generatedPerformanceGuidelines
+  ) {
+    return undefined;
+  }
+
+  return {
+    compiledPrompt,
+    voiceId: voiceId || undefined,
+    characterId: characterId || undefined,
+    characterName: characterName || undefined,
+    scene: scene || undefined,
+    style: style || undefined,
+    pacing: pacing || undefined,
+    tone: tone || undefined,
+    generatedPerformanceGuidelines: generatedPerformanceGuidelines || undefined,
+  };
 }
 
 export function buildAudioTrackDocId(spotId: string, lang: string): string {
@@ -166,6 +219,7 @@ export function mapAudioTrackSummary(args: {
       typeof data.hasGeneratedAudio === 'boolean'
         ? data.hasGeneratedAudio
         : Boolean(readString(data.activeVersionId) || readString(data.latestVersionId) || readNumber(data.latestGeneratedAt)),
+    ttsPromptConfig: readStoredTtsPromptConfig(data.ttsPromptConfig),
   };
 }
 

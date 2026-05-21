@@ -46,7 +46,6 @@ export default function AudioDirectorApp() {
         launchId,
         compiledPrompt,
         voiceId: controller.selectedVoice.id,
-        voiceName: controller.selectedVoice.name,
         characterId: controller.selectedCharacter?.id ?? '',
         characterName: controller.selectedCharacter?.name ?? '',
         scene: controller.globalSettings.directorNote.scene,

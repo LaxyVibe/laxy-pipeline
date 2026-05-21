@@ -40,7 +40,7 @@ import HeadphonesIcon from '@mui/icons-material/Headphones';
 import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
 import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
-import { collection, doc, getDoc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { getCustomClaims } from '../admin/auth/authenticator';
 import { bootstrapAudioSession, generateAudioForLanguage, translateLanguage } from '../api';
 import { useAuthStore } from '../authStore';
@@ -52,6 +52,7 @@ import {
   buildAudioTrackDocId,
   mapAudioHistoryVersion,
   mapAudioTrackSummary,
+  type StoredTtsPromptConfig,
   type AudioHistorySelection,
   type AudioHistoryTarget,
   type AudioTrackSummaryRecord,
@@ -119,19 +120,6 @@ type DeleteGuideDialogState = {
 type AudioDirectorLaunchRecord = {
   jobId: string;
   windowRef: Window | null;
-};
-
-type AudioDirectorPromptSelection = {
-  compiledPrompt: string;
-  voiceId: string;
-  voiceName: string;
-  characterId: string;
-  characterName: string;
-  scene: string;
-  style: string;
-  pacing: string;
-  tone: string;
-  generatedPerformanceGuidelines: string;
 };
 
 const AUDIO_DIRECTOR_ORIGIN = window.location.origin;
@@ -203,6 +191,78 @@ function promptContainsTranscript(compiledPrompt: string): boolean {
 
 function createTtsAudioSessionId(job: TtsJob): string {
   return `tts-${job.spotId}-${job.language}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function voiceNameForId(voiceId: string): string {
+  return AUDIO_MVP_VOICES.find((voice) => voice.id === voiceId)?.name ?? voiceId;
+}
+
+function buildStoredTtsPromptConfig(job: TtsJob): StoredTtsPromptConfig | null {
+  const compiledPrompt = job.promptText.trim();
+  const voiceId = job.voiceId.trim();
+  const characterId = job.characterId.trim();
+  const characterName = job.characterName.trim();
+  const scene = job.performanceHint.scene.trim();
+  const style = job.performanceHint.style.trim();
+  const pacing = job.performanceHint.pacing.trim();
+  const tone = job.performanceHint.tone.trim();
+  const generatedPerformanceGuidelines = job.performanceHint.generatedPerformanceGuidelines.trim();
+
+  if (
+    !compiledPrompt
+    && !voiceId
+    && !characterId
+    && !characterName
+    && !scene
+    && !style
+    && !pacing
+    && !tone
+    && !generatedPerformanceGuidelines
+  ) {
+    return null;
+  }
+
+  return {
+    compiledPrompt,
+    voiceId: voiceId || undefined,
+    characterId: characterId || undefined,
+    characterName: characterName || undefined,
+    scene: scene || undefined,
+    style: style || undefined,
+    pacing: pacing || undefined,
+    tone: tone || undefined,
+    generatedPerformanceGuidelines: generatedPerformanceGuidelines || undefined,
+  };
+}
+
+function compactFirestoreRecord<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
+  ) as T;
+}
+
+function applyStoredTtsPromptConfig(job: TtsJob, storedConfig?: StoredTtsPromptConfig): TtsJob {
+  if (!storedConfig) return job;
+
+  const nextVoiceId = job.voiceId || storedConfig.voiceId || '';
+  return {
+    ...job,
+    promptText: job.promptText || storedConfig.compiledPrompt || '',
+    voiceId: nextVoiceId,
+    voiceName: job.voiceName || (nextVoiceId ? voiceNameForId(nextVoiceId) : ''),
+    characterId: job.characterId || storedConfig.characterId || '',
+    characterName: job.characterName || storedConfig.characterName || '',
+    performanceHint: {
+      scene: job.performanceHint.scene || storedConfig.scene || '',
+      style: job.performanceHint.style || storedConfig.style || '',
+      pacing: job.performanceHint.pacing || storedConfig.pacing || '',
+      tone: job.performanceHint.tone || storedConfig.tone || '',
+      generatedPerformanceGuidelines:
+        job.performanceHint.generatedPerformanceGuidelines
+        || storedConfig.generatedPerformanceGuidelines
+        || '',
+    },
+  };
 }
 
 function buildDefaultQuickCreateGuideTitle(): string {
@@ -326,6 +386,7 @@ export default function TTSPage() {
   const [audioErrorByJob, setAudioErrorByJob] = useState<Record<string, string>>({});
   const [openAudioDirectorRevision, setOpenAudioDirectorRevision] = useState(0);
   const audioDirectorLaunchesRef = useRef<Record<string, AudioDirectorLaunchRecord>>({});
+  const promptPersistTimeoutsRef = useRef<Record<string, number>>({});
 
   const spotOptions = useMemo<SpotOption[]>(() => {
     const grouped = trackSummaries.reduce<Map<string, SpotOption>>((acc, summary) => {
@@ -376,6 +437,37 @@ export default function TTSPage() {
     setJobs((currentJobs) => currentJobs.map((job) => (job.id === jobId ? updater(job) : job)));
   };
 
+  const persistJobPromptConfig = async (job: TtsJob) => {
+    if (!sharedGuideTarget) return;
+    const config = buildStoredTtsPromptConfig(job);
+    if (!config) return;
+
+    const { db } = initFirebase();
+    const audioTrackRef = doc(db, 'guides', sharedGuideTarget.guideId, 'audioTracks', buildAudioTrackDocId(job.spotId, job.language));
+    await setDoc(audioTrackRef, compactFirestoreRecord({
+      guideId: sharedGuideTarget.guideId,
+      tenantId: sharedGuideTarget.tenantId ?? tenantId ?? undefined,
+      spotId: job.spotId,
+      spotTitle: job.spotTitle,
+      lang: job.language,
+      updatedAt: Date.now(),
+      ttsPromptConfig: compactFirestoreRecord(config),
+    }), { merge: true });
+  };
+
+  const queuePersistJobPromptConfig = (job: TtsJob) => {
+    const existingTimeoutId = promptPersistTimeoutsRef.current[job.id];
+    if (existingTimeoutId) {
+      window.clearTimeout(existingTimeoutId);
+    }
+    promptPersistTimeoutsRef.current[job.id] = window.setTimeout(() => {
+      delete promptPersistTimeoutsRef.current[job.id];
+      void persistJobPromptConfig(job).catch((error) => {
+        console.error('Failed to persist TTS prompt config', error);
+      });
+    }, 350);
+  };
+
   const bumpOpenAudioDirectorRevision = () => {
     setOpenAudioDirectorRevision((current) => current + 1);
   };
@@ -404,6 +496,13 @@ export default function TTSPage() {
       bumpOpenAudioDirectorRevision();
     }
   };
+
+  useEffect(() => () => {
+    Object.values(promptPersistTimeoutsRef.current).forEach((timeoutId) => {
+      window.clearTimeout(timeoutId);
+    });
+    promptPersistTimeoutsRef.current = {};
+  }, []);
 
   const sendScriptToAudioDirector = (targetWindow: Window | null, job: TtsJob, launchId: string) => {
     if (!targetWindow || targetWindow.closed) return;
@@ -450,6 +549,10 @@ export default function TTSPage() {
     setTranslationErrorByJob({});
     setAudioPendingByJob({});
     setAudioErrorByJob({});
+    Object.values(promptPersistTimeoutsRef.current).forEach((timeoutId) => {
+      window.clearTimeout(timeoutId);
+    });
+    promptPersistTimeoutsRef.current = {};
   }, [sharedGuideTarget?.guideId]);
 
   useEffect(() => {
@@ -590,27 +693,28 @@ export default function TTSPage() {
           const jobId = createJobId(spot.spotId, language);
           const existingJob = currentMap.get(jobId);
           const persistedSelection = persistedJobSelections[jobId];
+          const persistedSummary = trackSummaries.find((summary) => summary.spotId === spot.spotId && summary.lang === language);
           if (existingJob) {
-            nextJobs.push({
+            nextJobs.push(applyStoredTtsPromptConfig({
               ...existingJob,
               spotTitle: spot.spotTitle,
               language,
               outputAudio: existingJob.outputAudio || persistedSelection?.outputAudio || '',
               selectedHistoryVersion: existingJob.selectedHistoryVersion ?? persistedSelection?.selectedHistoryVersion,
-            });
+            }, persistedSummary?.ttsPromptConfig));
             continue;
           }
-          nextJobs.push({
+          nextJobs.push(applyStoredTtsPromptConfig({
             ...createTtsJob(spot.spotId, spot.spotTitle, language),
             outputAudio: persistedSelection?.outputAudio || '',
             selectedHistoryVersion: persistedSelection?.selectedHistoryVersion,
-          });
+          }, persistedSummary?.ttsPromptConfig));
         }
       }
 
       return nextJobs;
     });
-  }, [persistedJobSelections, spotOptions]);
+  }, [persistedJobSelections, spotOptions, trackSummaries]);
 
   useEffect(() => {
     if (!spotOptions.length) {
@@ -649,27 +753,30 @@ export default function TTSPage() {
 
       if (event.data?.type === 'laxy:prompt-selected') {
         const voiceId = typeof event.data.voiceId === 'string' ? event.data.voiceId : '';
-        const fallbackVoiceName = AUDIO_MVP_VOICES.find((voice) => voice.id === voiceId)?.name ?? voiceId;
-        updateJob(launchRecord.jobId, (job) => ({
-          ...job,
-          promptText: typeof event.data.compiledPrompt === 'string' ? event.data.compiledPrompt : job.promptText,
+        const existingJob = jobs.find((job) => job.id === launchRecord.jobId);
+        if (!existingJob) return;
+        const updatedJob: TtsJob = {
+          ...existingJob,
+          promptText: typeof event.data.compiledPrompt === 'string' ? event.data.compiledPrompt : existingJob.promptText,
           voiceId,
-          voiceName: typeof event.data.voiceName === 'string' ? event.data.voiceName : (job.voiceName || fallbackVoiceName),
-          characterId: typeof event.data.characterId === 'string' ? event.data.characterId : job.characterId,
-          characterName: typeof event.data.characterName === 'string' ? event.data.characterName : job.characterName,
+          voiceName: voiceNameForId(voiceId),
+          characterId: typeof event.data.characterId === 'string' ? event.data.characterId : existingJob.characterId,
+          characterName: typeof event.data.characterName === 'string' ? event.data.characterName : existingJob.characterName,
           performanceHint: {
-            scene: typeof event.data.scene === 'string' ? event.data.scene : job.performanceHint.scene,
-            style: typeof event.data.style === 'string' ? event.data.style : job.performanceHint.style,
-            pacing: typeof event.data.pacing === 'string' ? event.data.pacing : job.performanceHint.pacing,
-            tone: typeof event.data.tone === 'string' ? event.data.tone : job.performanceHint.tone,
+            scene: typeof event.data.scene === 'string' ? event.data.scene : existingJob.performanceHint.scene,
+            style: typeof event.data.style === 'string' ? event.data.style : existingJob.performanceHint.style,
+            pacing: typeof event.data.pacing === 'string' ? event.data.pacing : existingJob.performanceHint.pacing,
+            tone: typeof event.data.tone === 'string' ? event.data.tone : existingJob.performanceHint.tone,
             generatedPerformanceGuidelines:
               typeof event.data.generatedPerformanceGuidelines === 'string'
                 ? event.data.generatedPerformanceGuidelines
-                : job.performanceHint.generatedPerformanceGuidelines,
+                : existingJob.performanceHint.generatedPerformanceGuidelines,
           },
           outputAudio: '',
           selectedHistoryVersion: undefined,
-        }));
+        };
+        updateJob(launchRecord.jobId, () => updatedJob);
+        queuePersistJobPromptConfig(updatedJob);
         setAudioErrorByJob((previous) => ({
           ...previous,
           [launchRecord.jobId]: '',
@@ -687,7 +794,7 @@ export default function TTSPage() {
       window.clearInterval(intervalId);
       window.removeEventListener('message', handleMessage);
     };
-  }, [jobs]);
+  }, [jobs, sharedGuideTarget, tenantId]);
 
   const loadGuides = async () => {
     if (!user) {
@@ -1550,10 +1657,15 @@ export default function TTSPage() {
                                     value={job.promptText}
                                     onChange={(event) => {
                                       const nextValue = event.target.value;
+                                      const nextJob = {
+                                        ...job,
+                                        promptText: nextValue,
+                                      };
                                       updateJob(job.id, (currentJob) => ({
                                         ...currentJob,
                                         promptText: nextValue,
                                       }));
+                                      queuePersistJobPromptConfig(nextJob);
                                       setAudioErrorByJob((previous) => ({
                                         ...previous,
                                         [job.id]: '',
