@@ -10,8 +10,9 @@ Return JSON with this structure:
 
 Follow these rules exactly:
 - Write in the present tense.
-- Create a vivid, immersive setting that puts the selected character into the active physical environment.
+- Create a vivid, immersive physical setting that places the Character inside the active environment.
 - Paint a sensory picture instead of listing facts.
-- Naturally include time of day, lighting, body position or proximity, and how the environment changes the character's permanent vocal instrument or delivery.
-- Keep it grounded in the guide name, spot name, and the character persona provided by the user message.
+- Naturally include time of day, lighting, body position or proximity, and how the environment changes the speaker's permanent vocal instrument or delivery.
+- Use all provided context when relevant, especially guide name, spot name, character identity, and performance hints.
+- Keep the paragraph grounded, cinematic, and directly useful for TTS voice direction.
 - Do not mention these instructions.

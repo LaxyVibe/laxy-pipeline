@@ -53,6 +53,7 @@ import {
   type AudioHistoryTarget,
   type AudioTrackSummaryRecord,
   type StoredAudioDirectorConfig,
+  type StoredTtsInputSnapshot,
   type StoredTtsPromptSnapshot,
 } from '../features/audioDirector/history';
 import { ROUTES } from '../routes';
@@ -136,6 +137,9 @@ const SUPPORTED_TTS_JOB_LANGUAGE_CODES = ['en', 'ja', 'ko', 'zh-TW', 'zh-CN', 'f
 const SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET = new Set<string>(SUPPORTED_TTS_JOB_LANGUAGE_CODES);
 const SUPPORTED_TTS_JOB_LANGUAGES = SUPPORTED_LANGUAGES.filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language.code));
 const LANGUAGE_ORDER = new Map<string, number>(SUPPORTED_TTS_JOB_LANGUAGE_CODES.map((code, index) => [code, index]));
+const AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS = 40;
+const AUDIO_GENERATION_RECOVERY_INTERVAL_MS = 3000;
+const AUDIO_GENERATION_RECOVERY_FRESHNESS_GRACE_MS = 10000;
 
 function readTimestampMs(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -234,6 +238,36 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function isRecoveredVersionFresh(args: {
+  requestStartedAt: number;
+  summaryGeneratedAt: number;
+  versionGeneratedAt: number;
+  previousVersionId?: string;
+  candidateVersionId: string;
+}): boolean {
+  const {
+    requestStartedAt,
+    summaryGeneratedAt,
+    versionGeneratedAt,
+    previousVersionId,
+    candidateVersionId,
+  } = args;
+
+  if (previousVersionId && candidateVersionId !== previousVersionId) {
+    return true;
+  }
+
+  const freshnessCutoff = requestStartedAt - AUDIO_GENERATION_RECOVERY_FRESHNESS_GRACE_MS;
+  if (versionGeneratedAt > 0 && versionGeneratedAt >= freshnessCutoff) {
+    return true;
+  }
+  if (summaryGeneratedAt > 0 && summaryGeneratedAt >= freshnessCutoff) {
+    return true;
+  }
+
+  return false;
+}
+
 function createTtsAudioSessionId(job: TtsJob): string {
   return `tts-${job.spotId}-${job.language}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -286,6 +320,12 @@ function buildStoredTtsPromptSnapshot(job: TtsJob): StoredTtsPromptSnapshot | nu
   return { compiledPrompt };
 }
 
+function buildStoredTtsInputSnapshot(job: TtsJob): StoredTtsInputSnapshot | null {
+  const inputScript = job.inputScript.trim();
+  if (!inputScript) return null;
+  return { inputScript };
+}
+
 function compactFirestoreRecord<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
@@ -323,6 +363,14 @@ function applyStoredTtsPromptSnapshot(job: TtsJob, storedSnapshot?: StoredTtsPro
   return {
     ...job,
     promptText: job.promptText || storedSnapshot.compiledPrompt || '',
+  };
+}
+
+function applyStoredTtsInputSnapshot(job: TtsJob, storedSnapshot?: StoredTtsInputSnapshot): TtsJob {
+  if (!storedSnapshot) return job;
+  return {
+    ...job,
+    inputScript: job.inputScript || storedSnapshot.inputScript || '',
   };
 }
 
@@ -490,10 +538,12 @@ export default function TTSPage() {
 
   const persistJobStoredState = async (job: TtsJob, options: {
     audioDirectorConfigMode: PersistFieldMode;
+    ttsInputSnapshotMode: PersistFieldMode;
     ttsPromptSnapshotMode: PersistFieldMode;
   }) => {
     if (!sharedGuideTarget) return;
     const audioDirectorConfig = buildStoredAudioDirectorConfig(job);
+    const ttsInputSnapshot = buildStoredTtsInputSnapshot(job);
     const ttsPromptSnapshot = buildStoredTtsPromptSnapshot(job);
 
     const payload: Record<string, unknown> = {
@@ -512,6 +562,12 @@ export default function TTSPage() {
       payload.audioDirectorConfig = deleteField();
     }
 
+    if (options.ttsInputSnapshotMode === 'write') {
+      payload.ttsInputSnapshot = ttsInputSnapshot ? compactFirestoreRecord(ttsInputSnapshot) : deleteField();
+    } else if (options.ttsInputSnapshotMode === 'delete') {
+      payload.ttsInputSnapshot = deleteField();
+    }
+
     if (options.ttsPromptSnapshotMode === 'write') {
       payload.ttsPromptSnapshot = ttsPromptSnapshot ? compactFirestoreRecord(ttsPromptSnapshot) : deleteField();
     } else if (options.ttsPromptSnapshotMode === 'delete') {
@@ -525,6 +581,7 @@ export default function TTSPage() {
 
   const queuePersistJobStoredState = (job: TtsJob, options: {
     audioDirectorConfigMode: PersistFieldMode;
+    ttsInputSnapshotMode: PersistFieldMode;
     ttsPromptSnapshotMode: PersistFieldMode;
   }) => {
     const existingTimeoutId = promptPersistTimeoutsRef.current[job.id];
@@ -769,24 +826,30 @@ export default function TTSPage() {
           const persistedSummary = trackSummaries.find((summary) => summary.spotId === spot.spotId && summary.lang === language);
           if (existingJob) {
             const hydratedExistingJob = applyStoredTtsPromptSnapshot(
-              applyStoredAudioDirectorConfig({
-                ...existingJob,
-                spotTitle: spot.spotTitle,
-                language,
-                outputAudio: existingJob.outputAudio || persistedSelection?.outputAudio || '',
-                selectedHistoryVersion: existingJob.selectedHistoryVersion ?? persistedSelection?.selectedHistoryVersion,
-              }, persistedSummary?.audioDirectorConfig),
+              applyStoredTtsInputSnapshot(
+                applyStoredAudioDirectorConfig({
+                  ...existingJob,
+                  spotTitle: spot.spotTitle,
+                  language,
+                  outputAudio: existingJob.outputAudio || persistedSelection?.outputAudio || '',
+                  selectedHistoryVersion: existingJob.selectedHistoryVersion ?? persistedSelection?.selectedHistoryVersion,
+                }, persistedSummary?.audioDirectorConfig),
+                persistedSummary?.ttsInputSnapshot,
+              ),
               persistedSummary?.ttsPromptSnapshot,
             );
             nextJobs.push(hydratedExistingJob);
             continue;
           }
           const hydratedJob = applyStoredTtsPromptSnapshot(
-            applyStoredAudioDirectorConfig({
-              ...createTtsJob(spot.spotId, spot.spotTitle, language),
-              outputAudio: persistedSelection?.outputAudio || '',
-              selectedHistoryVersion: persistedSelection?.selectedHistoryVersion,
-            }, persistedSummary?.audioDirectorConfig),
+            applyStoredTtsInputSnapshot(
+              applyStoredAudioDirectorConfig({
+                ...createTtsJob(spot.spotId, spot.spotTitle, language),
+                outputAudio: persistedSelection?.outputAudio || '',
+                selectedHistoryVersion: persistedSelection?.selectedHistoryVersion,
+              }, persistedSummary?.audioDirectorConfig),
+              persistedSummary?.ttsInputSnapshot,
+            ),
             persistedSummary?.ttsPromptSnapshot,
           );
           nextJobs.push(hydratedJob);
@@ -863,6 +926,7 @@ export default function TTSPage() {
         updateJob(launchRecord.jobId, () => updatedJob);
         queuePersistJobStoredState(updatedJob, {
           audioDirectorConfigMode: 'write',
+          ttsInputSnapshotMode: 'write',
           ttsPromptSnapshotMode: 'write',
         });
         setAudioErrorByJob((previous) => ({
@@ -1031,6 +1095,7 @@ export default function TTSPage() {
     updateJob(targetJobId, () => copiedJob);
     queuePersistJobStoredState(copiedJob, {
       audioDirectorConfigMode: 'write',
+      ttsInputSnapshotMode: 'write',
       ttsPromptSnapshotMode: 'delete',
     });
     setAudioErrorByJob((previous) => ({
@@ -1490,6 +1555,7 @@ export default function TTSPage() {
           hasGeneratedAudio: true,
           audioDirectorConfig: buildStoredAudioDirectorConfig(job) ?? undefined,
           ttsPromptSnapshot: buildStoredTtsPromptSnapshot(job) ?? undefined,
+          ttsInputSnapshot: buildStoredTtsInputSnapshot(job) ?? undefined,
         };
         const existingIndex = previous.findIndex((summary) => summary.id === docId);
         if (existingIndex < 0) {
@@ -1512,12 +1578,14 @@ export default function TTSPage() {
         const { db } = initFirebase();
         const trackDocId = buildAudioTrackDocId(job.spotId, job.language);
 
-        for (let attempt = 0; attempt < 12; attempt += 1) {
+        for (let attempt = 0; attempt < AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
           const summaryDoc = await getDoc(
             doc(db, 'guides', historyTarget.guideId, 'audioTracks', trackDocId),
           );
           if (!summaryDoc.exists()) {
-            await sleep(2000);
+            if (attempt < AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS - 1) {
+              await sleep(AUDIO_GENERATION_RECOVERY_INTERVAL_MS);
+            }
             continue;
           }
 
@@ -1528,11 +1596,9 @@ export default function TTSPage() {
           });
           const versionId = summary?.activeVersionId || summary?.latestVersionId;
           if (!summary || !versionId) {
-            await sleep(2000);
-            continue;
-          }
-          if (previousVersionId && versionId === previousVersionId) {
-            await sleep(2000);
+            if (attempt < AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS - 1) {
+              await sleep(AUDIO_GENERATION_RECOVERY_INTERVAL_MS);
+            }
             continue;
           }
 
@@ -1540,7 +1606,9 @@ export default function TTSPage() {
             doc(db, 'guides', historyTarget.guideId, 'audioTracks', trackDocId, 'versions', versionId),
           );
           if (!versionDoc.exists()) {
-            await sleep(2000);
+            if (attempt < AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS - 1) {
+              await sleep(AUDIO_GENERATION_RECOVERY_INTERVAL_MS);
+            }
             continue;
           }
 
@@ -1558,11 +1626,21 @@ export default function TTSPage() {
             data: versionDoc.data() as Record<string, unknown>,
           });
           if (!versionRecord?.audioUrl) {
-            await sleep(2000);
+            if (attempt < AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS - 1) {
+              await sleep(AUDIO_GENERATION_RECOVERY_INTERVAL_MS);
+            }
             continue;
           }
-          if (versionRecord.generatedAt > 0 && versionRecord.generatedAt + 5000 < requestStartedAt) {
-            await sleep(2000);
+          if (!isRecoveredVersionFresh({
+            requestStartedAt,
+            summaryGeneratedAt: summary.latestGeneratedAt,
+            versionGeneratedAt: versionRecord.generatedAt,
+            previousVersionId,
+            candidateVersionId: versionRecord.versionId,
+          })) {
+            if (attempt < AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS - 1) {
+              await sleep(AUDIO_GENERATION_RECOVERY_INTERVAL_MS);
+            }
             continue;
           }
 
@@ -1854,6 +1932,14 @@ export default function TTSPage() {
                                           ...currentJob,
                                           inputScript: nextValue,
                                         }));
+                                        queuePersistJobStoredState({
+                                          ...job,
+                                          inputScript: nextValue,
+                                        }, {
+                                          audioDirectorConfigMode: 'ignore',
+                                          ttsInputSnapshotMode: 'write',
+                                          ttsPromptSnapshotMode: 'ignore',
+                                        });
                                         setTranslationErrorByJob((previous) => ({
                                           ...previous,
                                           [job.id]: '',
@@ -1948,6 +2034,7 @@ export default function TTSPage() {
                                       }));
                                       queuePersistJobStoredState(nextJob, {
                                         audioDirectorConfigMode: 'ignore',
+                                        ttsInputSnapshotMode: 'ignore',
                                         ttsPromptSnapshotMode: 'write',
                                       });
                                       setAudioErrorByJob((previous) => ({

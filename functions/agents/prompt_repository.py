@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 PROMPT_LIBRARY_PATH = "_platform/system/promptLibrary"
 DEFAULT_CACHE_TTL_SECONDS = 60.0
+PROMPT_ALIASES = {
+    "audio_director_generate_character": ("generate_character",),
+    "audio_director_generate_detailed_scene_paragraph": ("generate_detailed_scene_paragraph",),
+    "audio_director_generate_detailed_performance_guidelines": ("generate_detailed_performance_guidelines",),
+    "audio_director_enhance_script": ("guide_script_enhance",),
+    "audio_director_ja_hiragana_narration": ("ja_hiragana_narration",),
+}
 
 
 def _read_positive_float_env(name: str, default: float) -> float:
@@ -79,9 +86,10 @@ class PromptRepository:
         if cached and cached.expires_at >= now:
             return cached.content
 
-        content = self._load_firestore_prompt(step_id, version=pinned_version)
+        candidate_step_ids = (step_id, *PROMPT_ALIASES.get(step_id, ()))
+        content = self._load_firestore_prompt(candidate_step_ids, version=pinned_version)
         if content is None:
-            content = self._load_file_prompt(step_id)
+            content = self._load_file_prompt(candidate_step_ids)
 
         self._cache[cache_key] = _CachedPrompt(
             content=content,
@@ -108,11 +116,14 @@ class PromptRepository:
             logger.warning("Non-positive version pin %s=%s; ignoring", env_key, raw)
         return None
 
-    def _load_file_prompt(self, step_id: str) -> str:
-        path = self._prompts_dir / f"{step_id}.txt"
-        return path.read_text(encoding="utf-8").strip()
+    def _load_file_prompt(self, step_ids: tuple[str, ...]) -> str:
+        for step_id in step_ids:
+            path = self._prompts_dir / f"{step_id}.txt"
+            if path.exists():
+                return path.read_text(encoding="utf-8").strip()
+        raise FileNotFoundError(f"No prompt file found for step ids: {', '.join(step_ids)}")
 
-    def _load_firestore_prompt(self, step_id: str, *, version: int | None) -> str | None:
+    def _load_firestore_prompt(self, step_ids: tuple[str, ...], *, version: int | None) -> str | None:
         if not _read_bool_env("PROMPT_FIRESTORE_ENABLED", True):
             return None
 
@@ -121,12 +132,14 @@ class PromptRepository:
             return None
 
         try:
-            candidates = self._read_firestore_candidates(client, step_id)
+            candidates: list[dict[str, Any]] = []
+            for step_id in step_ids:
+                candidates.extend(self._read_firestore_candidates(client, step_id))
         except Exception as exc:
-            logger.warning("Failed loading Firestore prompts for %s: %s", step_id, exc)
+            logger.warning("Failed loading Firestore prompts for %s: %s", ", ".join(step_ids), exc)
             return None
 
-        selected = self._select_candidate(candidates, step_id=step_id, version=version)
+        selected = self._select_candidate(candidates, step_id=step_ids[0], version=version)
         if not selected:
             return None
 
@@ -331,3 +344,15 @@ def get_prompt_repository() -> PromptRepository:
 
 def load_prompt(name: str, *, version: int | None = None) -> str:
     return get_prompt_repository().get_prompt(name, version=version)
+
+
+def render_prompt_template(prompt_name: str, **values: Any) -> str:
+    template = load_prompt(prompt_name)
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", str(value))
+    unresolved = re.findall(r"{{\s*([A-Za-z0-9_]+)\s*}}", rendered)
+    if unresolved:
+        missing = ", ".join(sorted(set(unresolved)))
+        raise KeyError(f"Unresolved prompt template placeholders in {prompt_name}: {missing}")
+    return rendered.strip()

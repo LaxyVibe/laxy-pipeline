@@ -30,6 +30,7 @@ export type AudioTrackSummaryRecord = {
   latestGeneratedAt: number;
   hasGeneratedAudio?: boolean;
   audioDirectorConfig?: StoredAudioDirectorConfig;
+  ttsInputSnapshot?: StoredTtsInputSnapshot;
   ttsPromptSnapshot?: StoredTtsPromptSnapshot;
 };
 
@@ -47,6 +48,10 @@ export type StoredAudioDirectorConfig = {
 
 export type StoredTtsPromptSnapshot = {
   compiledPrompt: string;
+};
+
+export type StoredTtsInputSnapshot = {
+  inputScript: string;
 };
 
 type LegacyStoredTtsPromptConfig = StoredAudioDirectorConfig & StoredTtsPromptSnapshot;
@@ -137,6 +142,14 @@ function readStoredTtsPromptSnapshot(value: unknown): StoredTtsPromptSnapshot | 
   const compiledPrompt = readString(record.compiledPrompt);
   if (!compiledPrompt) return undefined;
   return { compiledPrompt };
+}
+
+function readStoredTtsInputSnapshot(value: unknown): StoredTtsInputSnapshot | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const inputScript = readString(record.inputScript);
+  if (!inputScript) return undefined;
+  return { inputScript };
 }
 
 function readLegacyStoredTtsPromptConfig(value: unknown): LegacyStoredTtsPromptConfig | undefined {
@@ -256,6 +269,7 @@ export function mapAudioTrackSummary(args: {
       tone: legacyPromptConfig.tone,
       generatedPerformanceGuidelines: legacyPromptConfig.generatedPerformanceGuidelines,
     } : undefined),
+    ttsInputSnapshot: readStoredTtsInputSnapshot(data.ttsInputSnapshot),
     ttsPromptSnapshot: readStoredTtsPromptSnapshot(data.ttsPromptSnapshot) ?? (
       legacyPromptConfig?.compiledPrompt
         ? { compiledPrompt: legacyPromptConfig.compiledPrompt }

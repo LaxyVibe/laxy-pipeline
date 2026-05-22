@@ -1,0 +1,8 @@
+The previous output violated the Japanese narration conversion rules.
+
+Violation: {{validation_error}}
+
+Re-convert the ORIGINAL SOURCE TEXT below into compliant Hiragana narration.
+Preserve every placeholder token exactly and keep all line breaks and empty lines unchanged.
+
+{{source_text}}

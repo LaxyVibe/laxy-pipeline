@@ -1,0 +1,3 @@
+Create the detailed performance guidelines for the TTS prompt based on this context.
+
+{{context_lines}}

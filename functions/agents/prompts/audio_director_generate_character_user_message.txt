@@ -1,0 +1,7 @@
+Admin input:
+Name: {{name}}
+Gender: {{gender}}
+Role: {{role}}
+Context: {{context}}
+
+Generate the character profile as a single JSON object.

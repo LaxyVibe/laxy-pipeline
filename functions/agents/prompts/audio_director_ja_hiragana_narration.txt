@@ -23,7 +23,7 @@ CRITICAL EXECUTION RULES:
 3. RESOLVING AMBIGUITY (The "Formal" Rule):
    - Example 1: "軽やか"
      - Colloquial: "かるやか" (Avoid this)
-     - Formal/Correct: "かろやか" (SELECT THIS - it is the standard for descriptive narration)
+     - Formal/Correct: "かろやか" (SELECT THIS)
    - Example 2: "描く" (in art/scenery context)
      - Colloquial: "かく"
      - Formal/Correct: "えがく" (SELECT THIS)

@@ -44,7 +44,7 @@ from firebase_admin import storage as fb_storage
 from . import audio_alignment
 from . import session as session_service
 from . import tools
-from .prompt_repository import load_prompt
+from .prompt_repository import load_prompt, render_prompt_template
 
 logger = logging.getLogger(__name__)
 
@@ -261,8 +261,8 @@ TEMPERATURES = {
     "s6_translation": 0.5,
     "s7_voice_recommend": 0.5,
     "s8_director_note": 0.6,
-    "guide_script_enhance": 0.7,
-    "generate_character": 0.8,
+    "audio_director_enhance_script": 0.7,
+    "audio_director_generate_character": 0.8,
 }
 
 TRANSLATION_LANGUAGE_LABELS = {
@@ -1000,7 +1000,7 @@ class PipelineExecutor:
         how: str | None = None,
     ) -> dict[str, Any]:
         """Generate the detailed scene paragraph for the TTS prompt."""
-        prompt_text = load_prompt("generate_detailed_scene_paragraph")
+        prompt_text = load_prompt("audio_director_generate_detailed_scene_paragraph")
         model = MODELS["flash"]
         temperature = 0.7
 
@@ -1024,9 +1024,9 @@ class PipelineExecutor:
         if how:
             parts.append(f"How hint: {how}")
 
-        user_message = (
-            "Create the detailed scene paragraph for the TTS prompt based on this context.\n\n"
-            + "\n".join(parts)
+        user_message = render_prompt_template(
+            "audio_director_generate_detailed_scene_paragraph_user_message",
+            context_lines="\n".join(parts),
         )
 
         response = await _retry_generate_content(
@@ -1080,7 +1080,7 @@ class PipelineExecutor:
         character_static_instruction: str | None = None,
     ) -> dict[str, Any]:
         """Generate structured Placeholder 2 performance guidelines."""
-        prompt_text = load_prompt("generate_detailed_performance_guidelines")
+        prompt_text = load_prompt("audio_director_generate_detailed_performance_guidelines")
         model = MODELS["flash"]
         temperature = 0.6
 
@@ -1098,9 +1098,9 @@ class PipelineExecutor:
         if character_static_instruction:
             parts.append(f"Character static instruction: {character_static_instruction}")
 
-        user_message = (
-            "Create the detailed performance guidelines for the TTS prompt based on this context.\n\n"
-            + "\n".join(parts)
+        user_message = render_prompt_template(
+            "audio_director_generate_detailed_performance_guidelines_user_message",
+            context_lines="\n".join(parts),
         )
 
         response = await _retry_generate_content(
@@ -1158,9 +1158,9 @@ class PipelineExecutor:
         if cue_density == "none":
             return {"success": True, "enhancedScript": script_content.strip()}
 
-        prompt_text = load_prompt("guide_script_enhance")
+        prompt_text = load_prompt("audio_director_enhance_script")
         model = MODELS["flash"]
-        temperature = TEMPERATURES.get("guide_script_enhance", 0.7)
+        temperature = TEMPERATURES.get("audio_director_enhance_script", 0.7)
 
         parts: list[str] = []
         resolved_character_identity = (character_identity or "").strip()
@@ -1187,11 +1187,14 @@ class PipelineExecutor:
             )
         parts.append(f"Original Script:\n{script_content}")
 
-        user_message = "\n\n".join(parts)
+        user_message = render_prompt_template(
+            "audio_director_enhance_script_user_message",
+            context_blocks="\n\n".join(parts),
+        )
 
         response = await _retry_generate_content(
             self._client,
-            timeout_seconds=self._get_step_timeout_seconds("guide_script_enhance"),
+            timeout_seconds=self._get_step_timeout_seconds("audio_director_enhance_script"),
             retry_context={"operation": "enhance_script"},
             model=model,
             contents=user_message,
@@ -1217,14 +1220,14 @@ class PipelineExecutor:
         script_content: str,
     ) -> dict[str, Any]:
         """Convert Japanese narration text into all-Hiragana reading text."""
-        prompt_text = load_prompt("ja_hiragana_narration")
+        prompt_text = load_prompt("audio_director_ja_hiragana_narration")
         model = MODELS["flash"]
         narration_source_text = self._strip_tts_style_prefix_for_hiragana(script_content)
         masked_script_content, tag_placeholders = self._mask_audio_tags_for_hiragana(narration_source_text)
 
         response = await _retry_generate_content(
             self._client,
-            timeout_seconds=self._get_step_timeout_seconds("guide_script_enhance"),
+            timeout_seconds=self._get_step_timeout_seconds("audio_director_enhance_script"),
             retry_context={"operation": "generate_japanese_hiragana"},
             model=model,
             contents=masked_script_content,
@@ -1248,17 +1251,14 @@ class PipelineExecutor:
         if validation_error:
             repair_response = await _retry_generate_content(
                 self._client,
-                timeout_seconds=self._get_step_timeout_seconds("guide_script_enhance"),
+                timeout_seconds=self._get_step_timeout_seconds("audio_director_enhance_script"),
                 retry_context={"operation": "generate_japanese_hiragana_repair"},
                 model=model,
-                contents="\n\n".join([
-                    "The previous output violated the Japanese narration conversion rules.",
-                    f"Violation: {validation_error}",
-                    "Re-convert the ORIGINAL SOURCE TEXT below into compliant Hiragana narration.",
-                    "Preserve every placeholder token exactly and keep all line breaks and empty lines unchanged.",
-                    "",
-                    masked_script_content,
-                ]),
+                contents=render_prompt_template(
+                    "audio_director_ja_hiragana_repair_user_message",
+                    validation_error=validation_error,
+                    source_text=masked_script_content,
+                ),
                 config=genai.types.GenerateContentConfig(
                     system_instruction=prompt_text,
                     temperature=0.1,
@@ -1372,26 +1372,25 @@ class PipelineExecutor:
         context: str,
     ) -> dict[str, Any]:
         """Generate a full character profile from structured Character Designer input."""
-        prompt_text = load_prompt("generate_character")
+        prompt_text = load_prompt("audio_director_generate_character")
         model = MODELS["flash"]
-        temperature = TEMPERATURES.get("generate_character", 0.8)
+        temperature = TEMPERATURES.get("audio_director_generate_character", 0.8)
 
         normalized_name = name.strip()
         normalized_gender = gender.strip()
         normalized_role = role.strip()
         normalized_context = context.strip()
-        user_message = (
-            "Admin input:\n"
-            f"Name: {normalized_name}\n"
-            f"Gender: {normalized_gender}\n"
-            f"Role: {normalized_role}\n"
-            f"Context: {normalized_context}\n\n"
-            "Generate the character profile as a single JSON object."
+        user_message = render_prompt_template(
+            "audio_director_generate_character_user_message",
+            name=normalized_name,
+            gender=normalized_gender,
+            role=normalized_role,
+            context=normalized_context,
         )
 
         response = await _retry_generate_content(
             self._client,
-            timeout_seconds=self._get_step_timeout_seconds("generate_character"),
+            timeout_seconds=self._get_step_timeout_seconds("audio_director_generate_character"),
             retry_context={"operation": "generate_character"},
             model=model,
             contents=user_message,
