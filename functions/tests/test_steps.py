@@ -429,6 +429,8 @@ class TestTtsAudioOutputPreparation:
     async def test_generate_aligned_srt_entries_falls_back_without_alignment_audio(self, executor):
         with patch("agents.pipeline_agent.tools.srt_generate_for_text", return_value=[{"index": 1}]) as mock_srt:
             result = await executor._generate_aligned_srt_entries(
+                session_id="session-1",
+                spot_id="spot-1",
                 text="hello world",
                 audio_data=None,
                 language="en",

@@ -206,10 +206,11 @@ export default function TtsScriptSection(props: Props) {
   const lastGuidelinesTextRef = useRef(performanceHint.generatedGuidelines);
 
   const editorHeight = { xs: 320, md: 360, xl: 400 };
-  const primaryEditorHeight = showJapaneseReading
-    ? { xs: 180, md: 205, xl: 230 }
-    : editorHeight;
+  const primaryEditorHeight = editorHeight;
   const readingEditorHeight = { xs: 110, md: 125, xl: 140 };
+  const promptEditorHeight = showJapaneseReading
+    ? { xs: 250, md: 290, xl: 330 }
+    : { xs: 420, md: 'calc(100vh - 340px)', xl: 'calc(100vh - 340px)' };
   const activeStep = WIZARD_STEPS[activeStepIndex] ?? null;
   const activeCharacters = characterLibraryTab === 'preset' ? presetCharacters : customCharacters;
   const visibleVoiceGroups = useMemo(() => {
@@ -503,21 +504,6 @@ export default function TtsScriptSection(props: Props) {
                 </span>
               </Tooltip>
             </Stack>
-
-            {showJapaneseReading ? (
-              <Tooltip title={isGeneratingJapaneseReading ? 'Generating Hiragana reading…' : 'Generate Hiragana reading'}>
-                <span>
-                  <Button
-                    variant="outlined"
-                    startIcon={isGeneratingJapaneseReading ? <CircularProgress color="inherit" size={16} /> : <TranslateOutlinedIcon />}
-                    onClick={onGenerateJapaneseReading}
-                    disabled={!scriptText.trim() || isGeneratingJapaneseReading || !onGenerateJapaneseReading}
-                  >
-                    Hiragana reading
-                  </Button>
-                </span>
-              </Tooltip>
-            ) : null}
           </Stack>
 
           <Box sx={{ height: primaryEditorHeight, minHeight: primaryEditorHeight, display: 'flex' }}>
@@ -583,40 +569,6 @@ export default function TtsScriptSection(props: Props) {
               ) : null}
             </Stack>
           </Paper>
-
-          {showJapaneseReading ? (
-            <Stack spacing={0.75}>
-              <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
-                <Typography variant="caption" color="text.secondary" sx={{ letterSpacing: '0.08em' }}>
-                  Japanese narration reading
-                </Typography>
-                <Chip
-                  size="small"
-                  color={japaneseReadingStale ? 'warning' : japaneseReadingText.trim() ? 'primary' : 'default'}
-                  variant="outlined"
-                  label={
-                    japaneseReadingStale
-                      ? 'Needs refresh'
-                      : japaneseReadingText.trim()
-                        ? 'Ready for TTS'
-                        : 'Not generated yet'
-                  }
-                />
-              </Stack>
-
-              <Box sx={{ height: readingEditorHeight, minHeight: readingEditorHeight, display: 'flex' }}>
-                <TextField
-                  multiline
-                  minRows={1}
-                  fullWidth
-                  value={japaneseReadingText}
-                  onChange={(event) => onChangeJapaneseReading?.(event.target.value)}
-                  placeholder="Generate Hiragana reading, then adjust pronunciation here if needed."
-                  sx={scrollingTextFieldSx}
-                />
-              </Box>
-            </Stack>
-          ) : null}
         </Stack>
       );
     }
@@ -695,10 +647,64 @@ export default function TtsScriptSection(props: Props) {
 
     return (
       <Stack spacing={2}>
+        {showJapaneseReading ? (
+          <Stack spacing={0.75}>
+            <Stack
+              direction={{ xs: 'column', lg: 'row' }}
+              spacing={1}
+              alignItems={{ xs: 'stretch', lg: 'center' }}
+              justifyContent="space-between"
+            >
+              <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+                <Typography variant="caption" color="text.secondary" sx={{ letterSpacing: '0.08em' }}>
+                  Japanese narration reading
+                </Typography>
+                <Chip
+                  size="small"
+                  color={japaneseReadingStale ? 'warning' : japaneseReadingText.trim() ? 'primary' : 'default'}
+                  variant="outlined"
+                  label={
+                    japaneseReadingStale
+                      ? 'Needs refresh'
+                      : japaneseReadingText.trim()
+                        ? 'Ready for TTS'
+                        : 'Not generated yet'
+                  }
+                />
+              </Stack>
+
+              <Tooltip title={isGeneratingJapaneseReading ? 'Generating Hiragana reading…' : 'Generate Hiragana reading'}>
+                <span>
+                  <Button
+                    variant="outlined"
+                    startIcon={isGeneratingJapaneseReading ? <CircularProgress color="inherit" size={16} /> : <TranslateOutlinedIcon />}
+                    onClick={onGenerateJapaneseReading}
+                    disabled={!scriptText.trim() || isGeneratingJapaneseReading || !onGenerateJapaneseReading}
+                  >
+                    Hiragana reading
+                  </Button>
+                </span>
+              </Tooltip>
+            </Stack>
+
+            <Box sx={{ height: readingEditorHeight, minHeight: readingEditorHeight, display: 'flex' }}>
+              <TextField
+                multiline
+                minRows={1}
+                fullWidth
+                value={japaneseReadingText}
+                onChange={(event) => onChangeJapaneseReading?.(event.target.value)}
+                placeholder="Generate Hiragana reading, then adjust pronunciation here if needed."
+                sx={scrollingTextFieldSx}
+              />
+            </Box>
+          </Stack>
+        ) : null}
+
         <Box
           sx={{
-            height: { xs: 420, md: 'calc(100vh - 340px)' },
-            minHeight: { xs: 420, md: 520 },
+            height: promptEditorHeight,
+            minHeight: promptEditorHeight,
             display: 'flex',
           }}
         >

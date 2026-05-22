@@ -39,7 +39,7 @@ import HeadphonesIcon from '@mui/icons-material/Headphones';
 import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
 import { collection, deleteField, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { getCustomClaims } from '../admin/auth/authenticator';
-import { bootstrapAudioSession, generateAudioForLanguage, translateLanguage } from '../api';
+import { ApiRequestError, bootstrapAudioSession, generateAudioForLanguage, translateLanguage } from '../api';
 import { useAuthStore } from '../authStore';
 import DeployVersionFooter from '../components/DeployVersionFooter';
 import { initFirebase } from '../firebase';
@@ -224,6 +224,12 @@ function syncPromptTranscript(compiledPrompt: string, transcript: string): strin
   if (!promptContainsTranscript(trimmedPrompt)) return trimmedPrompt;
 
   return trimmedPrompt.replace(/\n#### TRANSCRIPT[\s\S]*$/, `\n#### TRANSCRIPT\n${trimmedTranscript}`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function createTtsAudioSessionId(job: TtsJob): string {
@@ -1393,6 +1399,8 @@ export default function TTSPage() {
     }
 
     const sessionId = createTtsAudioSessionId(job);
+    const requestStartedAt = Date.now();
+    const previousVersionId = job.selectedHistoryVersion?.versionId;
     setAudioPendingByJob((previous) => ({
       ...previous,
       [jobId]: true,
@@ -1481,11 +1489,107 @@ export default function TTSPage() {
         return next;
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setAudioErrorByJob((previous) => ({
-        ...previous,
-        [jobId]: message,
-      }));
+      const shouldAttemptRecovery = (
+        (error instanceof ApiRequestError && (error.status === 502 || error.status === 504 || error.retryable))
+        || error instanceof TypeError
+      );
+
+      const recoverFromPersistedAudio = async (): Promise<boolean> => {
+        const { db } = initFirebase();
+        const trackDocId = buildAudioTrackDocId(job.spotId, job.language);
+
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          const summaryDoc = await getDoc(
+            doc(db, 'guides', historyTarget.guideId, 'audioTracks', trackDocId),
+          );
+          if (!summaryDoc.exists()) {
+            await sleep(2000);
+            continue;
+          }
+
+          const summary = mapAudioTrackSummary({
+            guideId: historyTarget.guideId,
+            docId: summaryDoc.id,
+            data: summaryDoc.data() as Record<string, unknown>,
+          });
+          const versionId = summary?.activeVersionId || summary?.latestVersionId;
+          if (!summary || !versionId) {
+            await sleep(2000);
+            continue;
+          }
+          if (previousVersionId && versionId === previousVersionId) {
+            await sleep(2000);
+            continue;
+          }
+
+          const versionDoc = await getDoc(
+            doc(db, 'guides', historyTarget.guideId, 'audioTracks', trackDocId, 'versions', versionId),
+          );
+          if (!versionDoc.exists()) {
+            await sleep(2000);
+            continue;
+          }
+
+          const versionRecord = mapAudioHistoryVersion({
+            guideId: historyTarget.guideId,
+            target: {
+              guideId: historyTarget.guideId,
+              spotId: historyTarget.spotId,
+              spotTitle: historyTarget.spotTitle,
+              lang: historyTarget.lang,
+              tenantId: historyTarget.tenantId,
+            },
+            summary,
+            docId: versionDoc.id,
+            data: versionDoc.data() as Record<string, unknown>,
+          });
+          if (!versionRecord?.audioUrl) {
+            await sleep(2000);
+            continue;
+          }
+          if (versionRecord.generatedAt > 0 && versionRecord.generatedAt + 5000 < requestStartedAt) {
+            await sleep(2000);
+            continue;
+          }
+
+          updateJob(jobId, (currentJob) => ({
+            ...currentJob,
+            outputAudio: versionRecord.audioUrl,
+            selectedHistoryVersion: {
+              versionId: versionRecord.versionId,
+              storagePath: versionRecord.storagePath,
+              guideId: versionRecord.guideId,
+              spotId: versionRecord.spotId,
+              lang: versionRecord.lang,
+            },
+          }));
+          setTrackSummaries((previous) => {
+            const existingIndex = previous.findIndex((entry) => entry.id === trackDocId);
+            if (existingIndex < 0) {
+              return [summary, ...previous];
+            }
+            const next = [...previous];
+            next[existingIndex] = summary;
+            return next;
+          });
+          return true;
+        }
+
+        return false;
+      };
+
+      if (shouldAttemptRecovery && await recoverFromPersistedAudio()) {
+        setAudioErrorByJob((previous) => ({
+          ...previous,
+          [jobId]: '',
+        }));
+      } else {
+        const message = error instanceof Error ? error.message : String(error);
+        setAudioErrorByJob((previous) => ({
+          ...previous,
+          [jobId]: message,
+        }));
+      }
     } finally {
       setAudioPendingByJob((previous) => ({
         ...previous,

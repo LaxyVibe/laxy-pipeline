@@ -105,6 +105,8 @@ STEP_TIMEOUT_SECONDS = {
 }
 
 ALIGNMENT_TIMEOUT_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_TIMEOUT_SECONDS", 30.0)
+ALIGNMENT_LONG_RUNNING_TIMEOUT_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_LONG_RUNNING_TIMEOUT_SECONDS", 600.0)
+ALIGNMENT_SYNC_MAX_DURATION_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_SYNC_MAX_DURATION_SECONDS", 55.0)
 ALIGNMENT_MIN_CUE_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_MIN_CUE_SECONDS", 1.0)
 ALIGNMENT_MAX_CUE_SECONDS = _read_timeout_env("PIPELINE_AUDIO_ALIGNMENT_MAX_CUE_SECONDS", 4.0)
 ALIGNMENT_MAX_CJK_CHARS = _read_positive_int_env("PIPELINE_AUDIO_ALIGNMENT_MAX_CJK_CHARS", 12)
@@ -113,6 +115,7 @@ ALIGNMENT_AI_SEGMENTATION_ENABLED = _read_bool_env("PIPELINE_AUDIO_ALIGNMENT_AI_
 RECOVERABLE_ALIGNMENT_ERROR_MARKERS = (
     "speech-to-text returned no word timestamps",
     "no character timings could be expanded",
+    "sync input too long",
 )
 
 FAILURE_HOTSPOT_THRESHOLD = _read_positive_int_env("PIPELINE_FAILURE_HOTSPOT_THRESHOLD", 3)
@@ -1515,15 +1518,15 @@ class PipelineExecutor:
             spot_id = script.get("spotId", f"spot_{script.get('spotNumber', 0):03d}")
             spot_number = script.get("spotNumber", 0)
             title = script.get("title", "")
-            text = lang_translations.get(spot_id, "") or script.get("scriptText", "")
-            _, resolved_transcript = self._build_tts_prompt_and_transcript(text, director_note)
+            source_text = lang_translations.get(spot_id, "") or script.get("scriptText") or ""
+            _, resolved_transcript = self._build_tts_prompt_and_transcript(source_text, director_note)
             if not resolved_transcript.strip():
                 continue
 
             try:
                 output_audio_data, output_mime_type, output_extension, alignment_audio_data, duration_ms = (
                     await self._synthesize_tts_audio(
-                    text=text,
+                    text=resolved_transcript,
                     director_note=director_note,
                     voice_id=voice_id,
                     language=language,
@@ -1562,7 +1565,7 @@ class PipelineExecutor:
                         spot_id=spot_id,
                         spot_number=spot_number,
                         title=title,
-                        script_text=text,
+                        script_text=resolved_transcript,
                         language=language,
                         audio_url=audio_url,
                         storage_path=storage_path,
@@ -1583,7 +1586,9 @@ class PipelineExecutor:
                 })
 
                 srt_entries = await self._generate_aligned_srt_entries(
-                    text=text,
+                    session_id=session_id,
+                    spot_id=spot_id,
+                    text=resolved_transcript,
                     audio_data=alignment_audio_data,
                     language=language,
                     duration_ms=duration_ms,
@@ -1910,6 +1915,8 @@ class PipelineExecutor:
     async def _generate_aligned_srt_entries(
         self,
         *,
+        session_id: str,
+        spot_id: str,
         text: str,
         audio_data: bytes | None,
         language: str,
@@ -1947,10 +1954,12 @@ class PipelineExecutor:
                     )
 
         try:
-            word_timestamps = await asyncio.to_thread(
-                audio_alignment.transcribe_audio_word_timestamps,
-                audio_data,
-                language,
+            word_timestamps = await self._transcribe_alignment_audio(
+                session_id=session_id,
+                spot_id=spot_id,
+                language=language,
+                audio_data=audio_data,
+                duration_sec=duration_sec,
                 timeout_seconds=timeout_seconds,
             )
             return await asyncio.to_thread(
@@ -1976,6 +1985,52 @@ class PipelineExecutor:
                 if fallback:
                     return fallback
             raise
+
+    async def _transcribe_alignment_audio(
+        self,
+        *,
+        session_id: str,
+        spot_id: str,
+        language: str,
+        audio_data: bytes,
+        duration_sec: float,
+        timeout_seconds: float,
+    ) -> list[audio_alignment.WordTiming]:
+        if duration_sec <= ALIGNMENT_SYNC_MAX_DURATION_SECONDS:
+            return await asyncio.to_thread(
+                audio_alignment.transcribe_audio_word_timestamps,
+                audio_data,
+                language,
+                timeout_seconds=timeout_seconds,
+            )
+
+        bucket = fb_storage.bucket()
+        temp_path = f"audio-alignment-temp/{session_id}/{language}/{spot_id}-{uuid4()}.wav"
+        blob = bucket.blob(temp_path)
+        gcs_uri = f"gs://{bucket.name}/{temp_path}"
+        long_running_timeout_seconds = max(timeout_seconds, ALIGNMENT_LONG_RUNNING_TIMEOUT_SECONDS)
+
+        logger.info(
+            "Using long-running Speech-to-Text alignment for %s/%s (duration %.2fs) via %s",
+            language,
+            spot_id,
+            duration_sec,
+            gcs_uri,
+        )
+
+        try:
+            blob.upload_from_string(audio_data, content_type="audio/wav")
+            return await asyncio.to_thread(
+                audio_alignment.transcribe_audio_word_timestamps_from_gcs_uri,
+                gcs_uri,
+                language,
+                timeout_seconds=long_running_timeout_seconds,
+            )
+        finally:
+            try:
+                blob.delete()
+            except Exception:
+                logger.warning("Failed to delete temporary alignment blob %s", gcs_uri, exc_info=True)
 
     async def _synthesize_tts_audio(
         self,

@@ -1085,6 +1085,8 @@ class TestAiSegmentation:
                 side_effect=audio_alignment.AlignmentError("Speech-to-Text returned no word timestamps"),
             ):
                 entries = await executor._generate_aligned_srt_entries(
+                    session_id="session-1",
+                    spot_id="spot-1",
                     text="Hello world. This is a preview.",
                     audio_data=b"wav",
                     language="en",
@@ -1093,3 +1095,71 @@ class TestAiSegmentation:
 
         assert len(entries) >= 1
         assert all("startTime" in entry and "endTime" in entry for entry in entries)
+
+    @pytest.mark.asyncio
+    async def test_transcribe_alignment_audio_uses_long_running_stt_for_long_clips(self, executor):
+        mock_bucket = MagicMock()
+        mock_blob = MagicMock()
+        mock_bucket.name = "test-bucket"
+        mock_bucket.blob.return_value = mock_blob
+
+        with patch("agents.pipeline_agent.fb_storage.bucket", return_value=mock_bucket):
+            with patch(
+                "agents.pipeline_agent.audio_alignment.transcribe_audio_word_timestamps_from_gcs_uri",
+                return_value=[{"word": "hello", "startSeconds": 0.0, "endSeconds": 1.0}],
+            ) as mock_long_running:
+                result = await executor._transcribe_alignment_audio(
+                    session_id="session-1",
+                    spot_id="spot-1",
+                    language="ja",
+                    audio_data=b"wav-data",
+                    duration_sec=75.0,
+                    timeout_seconds=30.0,
+                )
+
+        assert result == [{"word": "hello", "startSeconds": 0.0, "endSeconds": 1.0}]
+        mock_blob.upload_from_string.assert_called_once_with(b"wav-data", content_type="audio/wav")
+        mock_blob.delete.assert_called_once()
+        mock_long_running.assert_called_once()
+        gcs_uri = mock_long_running.call_args.args[0]
+        assert gcs_uri.startswith("gs://test-bucket/audio-alignment-temp/session-1/ja/spot-1-")
+
+
+class TestAudioGenerateLanguageTranscriptSource:
+    @pytest.mark.asyncio
+    async def test_generate_audio_for_language_uses_compiled_prompt_transcript_when_script_text_missing(self, executor):
+        mock_bucket = MagicMock()
+        mock_blob = MagicMock()
+        mock_bucket.blob.return_value = mock_blob
+        mock_blob.public_url = "https://example.com/audio.mp3"
+
+        compiled_prompt = "\n".join([
+            "## THE SCENE",
+            "Temple courtyard",
+            "",
+            "#### TRANSCRIPT",
+            "こんにちは せかい",
+        ])
+
+        with patch("agents.pipeline_agent.fb_storage.bucket", return_value=mock_bucket):
+            with patch.object(
+                executor,
+                "_synthesize_tts_audio",
+                new=AsyncMock(return_value=(b"audio", "audio/mpeg", "mp3", b"wav", 2300)),
+            ) as mock_tts:
+                with patch.object(
+                    executor,
+                    "_generate_aligned_srt_entries",
+                    new=AsyncMock(return_value=[{"index": 1, "text": "こんにちは", "startTime": "00:00:00,000", "endTime": "00:00:02,300"}]),
+                ) as mock_srt:
+                    result = await executor.generate_audio_for_language(
+                        session_id="audio-session-1",
+                        scripts=[{"spotId": "spot-1", "spotNumber": 1, "title": "Spot 1", "scriptText": None}],
+                        voice_id="Kore",
+                        language="ja",
+                        director_note={"compiledPrompt": compiled_prompt},
+                    )
+
+        assert result["audioFiles"][0]["audioUrl"] == "https://example.com/audio.mp3"
+        assert mock_tts.await_args.kwargs["text"] == "こんにちは せかい"
+        assert mock_srt.await_args.kwargs["text"] == "こんにちは せかい"

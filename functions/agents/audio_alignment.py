@@ -130,6 +130,44 @@ def transcribe_audio_word_timestamps(
     except Exception as exc:  # pragma: no cover - network/API failures are integration-tested
         raise AlignmentError(f"Speech-to-Text request failed: {exc}") from exc
 
+    return _extract_word_timestamps(response)
+
+
+def transcribe_audio_word_timestamps_from_gcs_uri(
+    gcs_uri: str,
+    language: str,
+    *,
+    timeout_seconds: float = 600.0,
+) -> list[WordTiming]:
+    """Run long-running speech recognition against a gs:// URI and return word-level timestamps."""
+    try:
+        from google.cloud import speech  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - import availability is env-dependent
+        raise AlignmentError(
+            "Speech-to-Text dependency is missing; install google-cloud-speech"
+        ) from exc
+
+    client = speech.SpeechClient()
+    config = speech.RecognitionConfig(
+        language_code=_map_language_code(language),
+        enable_word_time_offsets=True,
+        enable_automatic_punctuation=True,
+        model="latest_long",
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=24000,
+    )
+    audio = speech.RecognitionAudio(uri=gcs_uri)
+
+    try:
+        operation = client.long_running_recognize(config=config, audio=audio)
+        response = operation.result(timeout=timeout_seconds)
+    except Exception as exc:  # pragma: no cover - network/API failures are integration-tested
+        raise AlignmentError(f"Long-running Speech-to-Text request failed: {exc}") from exc
+
+    return _extract_word_timestamps(response)
+
+
+def _extract_word_timestamps(response: Any) -> list[WordTiming]:
     words: list[WordTiming] = []
     for result in getattr(response, "results", []):
         alternatives = getattr(result, "alternatives", [])
