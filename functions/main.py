@@ -2119,7 +2119,11 @@ def generate_detailed_scene_paragraph(req: https_fn.Request) -> https_fn.Respons
         "characterName": "John",
         "characterRole": "Museum Manager",
         "characterContext": "Formal and confident narrator",
-        "characterStaticInstruction": "You are John..."
+        "characterStaticInstruction": "You are John...",
+        "where": "Quiet shrine courtyard",
+        "who": "Pilgrims and first-time visitors",
+        "what": "Gently orient them to the sacred atmosphere",
+        "how": "Warm, respectful, and intimate"
     }
 
     Response:
@@ -2170,6 +2174,10 @@ def generate_detailed_scene_paragraph(req: https_fn.Request) -> https_fn.Respons
                     character_role=payload.characterRole,
                     character_context=payload.characterContext,
                     character_static_instruction=payload.characterStaticInstruction,
+                    where=payload.where,
+                    who=payload.who,
+                    what=payload.what,
+                    how=payload.how,
                 )
             )
             _write_audit_log(

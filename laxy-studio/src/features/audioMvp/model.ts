@@ -41,6 +41,7 @@ export interface AudioMvpCharacter {
 
 export interface DirectorNoteDraft {
   scene: string;
+  detailedSceneParagraph: string;
   style: string;
   pacing: string;
   tone: string;
@@ -295,6 +296,7 @@ export function createDefaultDirectorNote(
 ): DirectorNoteDraft {
   return {
     scene: '',
+    detailedSceneParagraph: '',
     style: '',
     pacing: '',
     tone: '',
@@ -319,6 +321,7 @@ export function clearGeneratedPerformanceGuidelines(
 ): DirectorNoteDraft {
   return {
     ...directorNote,
+    detailedSceneParagraph: '',
     generatedPerformanceGuidelines: '',
   };
 }
@@ -382,6 +385,10 @@ export function normalizeDirectorNoteDraft(
 
   return {
     scene: stringValue(value.scene) ?? stringValue(value.vocalEnvironment) ?? fallback.scene,
+    detailedSceneParagraph:
+      stringValue(value.detailedSceneParagraph)
+      ?? stringValue(value.sceneParagraph)
+      ?? fallback.detailedSceneParagraph,
     style: stringValue(value.style)
       ?? stringValue(value.mission)
       ?? stringValue(value.missionOfSpeech)
@@ -724,12 +731,14 @@ export function resolveCompiledPrompt(args: {
 
   const resolvedPoiName = poiName?.trim() || 'POI Name';
   const resolvedProjectTitle = projectTitle?.trim() || 'Project Title';
+  const detailedSceneParagraph = directorNote.detailedSceneParagraph.trim();
   const detailedPerformanceGuidelines = directorNote.generatedPerformanceGuidelines.trim();
 
   return [
     `# AUDIO PROFILE: ${character.name}`,
     `## "[${character.role}/${resolvedPoiName}]"`,
     `## THE SCENE: ${resolvedProjectTitle}`,
+    detailedSceneParagraph,
     detailedPerformanceGuidelines ? '## DETAILED PERFORMANCE GUIDELINES' : '',
     detailedPerformanceGuidelines,
     '### SAMPLE CONTEXT',

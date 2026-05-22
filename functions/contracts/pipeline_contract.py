@@ -100,6 +100,10 @@ class GenerateDetailedSceneParagraphRequest(BaseModel):
     characterRole: str | None = None
     characterContext: str | None = None
     characterStaticInstruction: str | None = None
+    where: str | None = None
+    who: str | None = None
+    what: str | None = None
+    how: str | None = None
 
 
 class GenerateDetailedPerformanceGuidelinesRequest(BaseModel):

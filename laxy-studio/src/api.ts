@@ -984,6 +984,10 @@ export interface GenerateDetailedSceneParagraphRequest {
   characterRole?: string;
   characterContext?: string;
   characterStaticInstruction?: string;
+  where?: string;
+  who?: string;
+  what?: string;
+  how?: string;
 }
 
 export interface GenerateDetailedSceneParagraphResponse {

@@ -47,6 +47,7 @@ describe('clearCompiledPromptCustomization', () => {
   it('keeps scene style and pacing while clearing stale compiled prompt override', () => {
     const result = clearCompiledPromptCustomization({
       scene: 'Quiet gallery',
+      detailedSceneParagraph: 'Late sun washes the marble in gold.',
       style: 'Adult visitors',
       pacing: 'Leave them feeling reflective',
       tone: 'Soft British accent',
@@ -57,6 +58,7 @@ describe('clearCompiledPromptCustomization', () => {
 
     expect(result).toEqual({
       scene: 'Quiet gallery',
+      detailedSceneParagraph: 'Late sun washes the marble in gold.',
       style: 'Adult visitors',
       pacing: 'Leave them feeling reflective',
       tone: 'Soft British accent',
@@ -71,6 +73,7 @@ describe('clearGeneratedPerformanceGuidelines', () => {
   it('clears generated placeholder 2 guidance while keeping raw where/who/what/how input', () => {
     const result = clearGeneratedPerformanceGuidelines({
       scene: 'Quiet gallery',
+      detailedSceneParagraph: 'Late sun washes the marble in gold.',
       style: 'Adult visitors',
       pacing: 'Leave them feeling reflective',
       tone: 'Soft British accent',
@@ -81,6 +84,7 @@ describe('clearGeneratedPerformanceGuidelines', () => {
 
     expect(result).toEqual({
       scene: 'Quiet gallery',
+      detailedSceneParagraph: '',
       style: 'Adult visitors',
       pacing: 'Leave them feeling reflective',
       tone: 'Soft British accent',
@@ -94,6 +98,11 @@ describe('clearGeneratedPerformanceGuidelines', () => {
 describe('resolveCompiledPrompt', () => {
   it('uses generated detailed performance guidelines and omits placeholder 1', () => {
     const settings = createDefaultSettings(PRESET_AUDIO_CHARACTERS[0]);
+    settings.directorNote.detailedSceneParagraph = [
+      'Late afternoon light slips across the gallery floor as the character stands beside the exhibit, speaking just close enough to draw visitors in.',
+      'The hushed room softens every consonant, encouraging a measured, respectful drop in volume.',
+      'Footsteps echo lightly in the distance, so the delivery stays intimate but clear.',
+    ].join(' ');
     settings.directorNote.generatedPerformanceGuidelines = [
       'Style: The "Reverent Guide". You must hear the deep respect in the tone; the voice stays composed and inwardly focused.',
       'Pace: Speaks with a calm, unhurried cadence. Insert deliberate 1-second pauses after major historical facts to let the weight sink in.',
@@ -111,6 +120,7 @@ describe('resolveCompiledPrompt', () => {
     expect(prompt).toContain('# AUDIO PROFILE: John');
     expect(prompt).toContain('## "[Museum Manager/Main Hall]"');
     expect(prompt).toContain('## THE SCENE: Grand Museum Tour');
+    expect(prompt).toContain('Late afternoon light slips across the gallery floor');
     expect(prompt).not.toContain('Placeholder 1');
     expect(prompt).toContain('## DETAILED PERFORMANCE GUIDELINES');
     expect(prompt).toContain('Style: The "Reverent Guide".');

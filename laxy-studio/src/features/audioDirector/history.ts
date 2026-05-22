@@ -38,6 +38,7 @@ export type StoredAudioDirectorConfig = {
   characterId?: string;
   characterName?: string;
   scene?: string;
+  detailedSceneParagraph?: string;
   style?: string;
   pacing?: string;
   tone?: string;
@@ -97,6 +98,7 @@ function readStoredAudioDirectorConfig(value: unknown): StoredAudioDirectorConfi
   const characterId = readString(record.characterId);
   const characterName = readString(record.characterName);
   const scene = readString(record.scene);
+  const detailedSceneParagraph = readString(record.detailedSceneParagraph);
   const style = readString(record.style);
   const pacing = readString(record.pacing);
   const tone = readString(record.tone);
@@ -107,6 +109,7 @@ function readStoredAudioDirectorConfig(value: unknown): StoredAudioDirectorConfi
     && !characterId
     && !characterName
     && !scene
+    && !detailedSceneParagraph
     && !style
     && !pacing
     && !tone
@@ -120,6 +123,7 @@ function readStoredAudioDirectorConfig(value: unknown): StoredAudioDirectorConfi
     characterId: characterId || undefined,
     characterName: characterName || undefined,
     scene: scene || undefined,
+    detailedSceneParagraph: detailedSceneParagraph || undefined,
     style: style || undefined,
     pacing: pacing || undefined,
     tone: tone || undefined,
@@ -246,6 +250,7 @@ export function mapAudioTrackSummary(args: {
       characterId: legacyPromptConfig.characterId,
       characterName: legacyPromptConfig.characterName,
       scene: legacyPromptConfig.scene,
+      detailedSceneParagraph: legacyPromptConfig.detailedSceneParagraph,
       style: legacyPromptConfig.style,
       pacing: legacyPromptConfig.pacing,
       tone: legacyPromptConfig.tone,

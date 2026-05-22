@@ -148,6 +148,10 @@ def test_generate_detailed_scene_paragraph_calls_executor(monkeypatch: pytest.Mo
             character_role: str | None = None,
             character_context: str | None = None,
             character_static_instruction: str | None = None,
+            where: str | None = None,
+            who: str | None = None,
+            what: str | None = None,
+            how: str | None = None,
         ) -> dict[str, Any]:
             assert guide_name == "Grand Museum Tour"
             assert spot_name == "Main Hall"
@@ -155,6 +159,10 @@ def test_generate_detailed_scene_paragraph_calls_executor(monkeypatch: pytest.Mo
             assert character_role == "Museum Manager"
             assert character_context == "Formal and confident narrator."
             assert character_static_instruction == "You are John, a calm narrator."
+            assert where == "A quiet main hall near the central exhibit."
+            assert who == "Families and first-time visitors."
+            assert what == "Introduce the hall and help them settle in."
+            assert how == "Warm, intimate, and respectful."
             return {
                 "success": True,
                 "detailedSceneParagraph": (
@@ -174,6 +182,10 @@ def test_generate_detailed_scene_paragraph_calls_executor(monkeypatch: pytest.Mo
         "characterRole": "Museum Manager",
         "characterContext": "Formal and confident narrator.",
         "characterStaticInstruction": "You are John, a calm narrator.",
+        "where": "A quiet main hall near the central exhibit.",
+        "who": "Families and first-time visitors.",
+        "what": "Introduce the hall and help them settle in.",
+        "how": "Warm, intimate, and respectful.",
     }))
 
     assert _extract_status(response) == 200

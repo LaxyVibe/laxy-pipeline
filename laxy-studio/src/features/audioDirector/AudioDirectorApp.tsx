@@ -52,6 +52,7 @@ export default function AudioDirectorApp() {
         style: controller.globalSettings.directorNote.style,
         pacing: controller.globalSettings.directorNote.pacing,
         tone: controller.globalSettings.directorNote.tone,
+        detailedSceneParagraph: controller.globalSettings.directorNote.detailedSceneParagraph,
         generatedPerformanceGuidelines: controller.globalSettings.directorNote.generatedPerformanceGuidelines,
       },
       window.location.origin,

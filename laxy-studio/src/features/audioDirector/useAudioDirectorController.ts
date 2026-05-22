@@ -16,6 +16,7 @@ import {
 } from 'firebase/firestore';
 import {
   bootstrapAudioSession,
+  generateDetailedSceneParagraph,
   enhanceScript,
   generateDetailedPerformanceGuidelines,
   generateAudioForLanguage,
@@ -163,6 +164,9 @@ function buildEnhancementCharacterIdentity(character: AudioMvpCharacter): string
 function buildEnhancementPerformanceHints(directorNote: AudioGuideSettings['directorNote']): string {
   return [
     directorNote.scene.trim() ? `Where: ${directorNote.scene.trim()}` : '',
+    directorNote.detailedSceneParagraph.trim()
+      ? `Detailed Scene Paragraph:\n${directorNote.detailedSceneParagraph.trim()}`
+      : '',
     directorNote.style.trim() ? `Who: ${directorNote.style.trim()}` : '',
     directorNote.pacing.trim() ? `What: ${directorNote.pacing.trim()}` : '',
     directorNote.tone.trim() ? `How: ${directorNote.tone.trim()}` : '',
@@ -188,6 +192,7 @@ export function useAudioDirectorController() {
     style?: string;
     pacing?: string;
     tone?: string;
+    detailedSceneParagraph?: string;
     generatedPerformanceGuidelines?: string;
   } | null>(null);
   const isEmbedded = window.self !== window.top;
@@ -379,6 +384,7 @@ export function useAudioDirectorController() {
     style?: string;
     pacing?: string;
     tone?: string;
+    detailedSceneParagraph?: string;
     generatedPerformanceGuidelines?: string;
   }) => {
     const normalizedPayload = {
@@ -391,6 +397,7 @@ export function useAudioDirectorController() {
       style: payload.style?.trim() || '',
       pacing: payload.pacing?.trim() || '',
       tone: payload.tone?.trim() || '',
+      detailedSceneParagraph: payload.detailedSceneParagraph?.trim() || '',
       generatedPerformanceGuidelines: payload.generatedPerformanceGuidelines?.trim() || '',
     };
     const previousPayload = lastEmbeddedPayloadRef.current;
@@ -405,6 +412,7 @@ export function useAudioDirectorController() {
       && (previousPayload.style ?? '') === normalizedPayload.style
       && (previousPayload.pacing ?? '') === normalizedPayload.pacing
       && (previousPayload.tone ?? '') === normalizedPayload.tone
+      && (previousPayload.detailedSceneParagraph ?? '') === normalizedPayload.detailedSceneParagraph
       && (previousPayload.generatedPerformanceGuidelines ?? '') === normalizedPayload.generatedPerformanceGuidelines
     ) {
       return;
@@ -424,6 +432,7 @@ export function useAudioDirectorController() {
         style: normalizedPayload.style,
         pacing: normalizedPayload.pacing,
         tone: normalizedPayload.tone,
+        detailedSceneParagraph: normalizedPayload.detailedSceneParagraph,
         generatedPerformanceGuidelines: normalizedPayload.generatedPerformanceGuidelines,
         compiledPromptOverride: normalizedPayload.compiledPrompt,
         isPromptCustomized: Boolean(normalizedPayload.compiledPrompt),
@@ -692,6 +701,10 @@ export function useAudioDirectorController() {
           style: typeof event.data.style === 'string' ? event.data.style : '',
           pacing: typeof event.data.pacing === 'string' ? event.data.pacing : '',
           tone: typeof event.data.tone === 'string' ? event.data.tone : '',
+          detailedSceneParagraph:
+            typeof event.data.detailedSceneParagraph === 'string'
+              ? event.data.detailedSceneParagraph
+              : '',
           generatedPerformanceGuidelines:
             typeof event.data.generatedPerformanceGuidelines === 'string'
               ? event.data.generatedPerformanceGuidelines
@@ -1305,31 +1318,46 @@ export function useAudioDirectorController() {
       return true;
     }
 
-    const busyOperationId = beginBusyOperation('Generating detailed performance guidelines…');
+    const busyOperationId = beginBusyOperation('Generating scene paragraph and performance guidelines…');
     setGenerationError(null);
     try {
-      const result = await generateDetailedPerformanceGuidelines({
-        where,
-        who,
-        what,
-        how,
-        characterName: selected.name,
-        characterRole: selected.role,
-        characterContext: selected.context || selected.personalityDNA || undefined,
-        characterStaticInstruction: selected.staticInstruction || undefined,
-      });
+      const [sceneResult, guidelineResult] = await Promise.all([
+        generateDetailedSceneParagraph({
+          guideName: effectiveGuideTitle || 'Project Title',
+          spotName: effectiveSpotTitle || items[0]?.title || 'POI Name',
+          characterName: selected.name,
+          characterRole: selected.role,
+          characterContext: selected.context || selected.personalityDNA || undefined,
+          characterStaticInstruction: selected.staticInstruction || undefined,
+          where: where || undefined,
+          who: who || undefined,
+          what: what || undefined,
+          how: how || undefined,
+        }),
+        generateDetailedPerformanceGuidelines({
+          where,
+          who,
+          what,
+          how,
+          characterName: selected.name,
+          characterRole: selected.role,
+          characterContext: selected.context || selected.personalityDNA || undefined,
+          characterStaticInstruction: selected.staticInstruction || undefined,
+        }),
+      ]);
 
       setGlobalSettings((previous) => ({
         ...previous,
         directorNote: {
           ...clearCompiledPromptCustomization(previous.directorNote),
-          generatedPerformanceGuidelines: result.detailedPerformanceGuidelines.trim(),
+          detailedSceneParagraph: sceneResult.detailedSceneParagraph.trim(),
+          generatedPerformanceGuidelines: guidelineResult.detailedPerformanceGuidelines.trim(),
         },
       }));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setGenerationError(`Detailed performance guidelines generation failed: ${message}`);
+      setGenerationError(`Scene paragraph and performance guidelines generation failed: ${message}`);
       return false;
     } finally {
       endBusyOperation(busyOperationId);

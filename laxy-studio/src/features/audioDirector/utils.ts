@@ -150,6 +150,7 @@ function normalizeAudioDirectorDraft(
     scriptEnhancementLimit: 'none',
     directorNote: {
       scene: '',
+      detailedSceneParagraph: '',
       style: '',
       pacing: '',
       tone: '',

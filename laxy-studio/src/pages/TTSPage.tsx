@@ -81,6 +81,7 @@ type TtsJob = {
   characterName: string;
   performanceHint: {
     scene: string;
+    detailedSceneParagraph: string;
     style: string;
     pacing: string;
     tone: string;
@@ -204,6 +205,7 @@ function createTtsJob(spotId: string, spotTitle: string, language: string): TtsJ
     characterName: '',
     performanceHint: {
       scene: '',
+      detailedSceneParagraph: '',
       style: '',
       pacing: '',
       tone: '',
@@ -245,6 +247,7 @@ function buildStoredAudioDirectorConfig(job: TtsJob): StoredAudioDirectorConfig 
   const characterId = job.characterId.trim();
   const characterName = job.characterName.trim();
   const scene = job.performanceHint.scene.trim();
+  const detailedSceneParagraph = job.performanceHint.detailedSceneParagraph.trim();
   const style = job.performanceHint.style.trim();
   const pacing = job.performanceHint.pacing.trim();
   const tone = job.performanceHint.tone.trim();
@@ -255,6 +258,7 @@ function buildStoredAudioDirectorConfig(job: TtsJob): StoredAudioDirectorConfig 
     && !characterId
     && !characterName
     && !scene
+    && !detailedSceneParagraph
     && !style
     && !pacing
     && !tone
@@ -268,6 +272,7 @@ function buildStoredAudioDirectorConfig(job: TtsJob): StoredAudioDirectorConfig 
     characterId: characterId || undefined,
     characterName: characterName || undefined,
     scene: scene || undefined,
+    detailedSceneParagraph: detailedSceneParagraph || undefined,
     style: style || undefined,
     pacing: pacing || undefined,
     tone: tone || undefined,
@@ -298,6 +303,10 @@ function applyStoredAudioDirectorConfig(job: TtsJob, storedConfig?: StoredAudioD
     characterName: job.characterName || storedConfig.characterName || '',
     performanceHint: {
       scene: job.performanceHint.scene || storedConfig.scene || '',
+      detailedSceneParagraph:
+        job.performanceHint.detailedSceneParagraph
+        || storedConfig.detailedSceneParagraph
+        || '',
       style: job.performanceHint.style || storedConfig.style || '',
       pacing: job.performanceHint.pacing || storedConfig.pacing || '',
       tone: job.performanceHint.tone || storedConfig.tone || '',
@@ -579,6 +588,7 @@ export default function TTSPage() {
         voiceId: job.voiceId,
         characterId: job.characterId,
         scene: job.performanceHint.scene,
+        detailedSceneParagraph: job.performanceHint.detailedSceneParagraph,
         style: job.performanceHint.style,
         pacing: job.performanceHint.pacing,
         tone: job.performanceHint.tone,
@@ -835,6 +845,10 @@ export default function TTSPage() {
           characterName: typeof event.data.characterName === 'string' ? event.data.characterName : existingJob.characterName,
           performanceHint: {
             scene: typeof event.data.scene === 'string' ? event.data.scene : existingJob.performanceHint.scene,
+            detailedSceneParagraph:
+              typeof event.data.detailedSceneParagraph === 'string'
+                ? event.data.detailedSceneParagraph
+                : existingJob.performanceHint.detailedSceneParagraph,
             style: typeof event.data.style === 'string' ? event.data.style : existingJob.performanceHint.style,
             pacing: typeof event.data.pacing === 'string' ? event.data.pacing : existingJob.performanceHint.pacing,
             tone: typeof event.data.tone === 'string' ? event.data.tone : existingJob.performanceHint.tone,

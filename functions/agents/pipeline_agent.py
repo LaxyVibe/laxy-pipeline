@@ -994,6 +994,10 @@ class PipelineExecutor:
         character_role: str | None = None,
         character_context: str | None = None,
         character_static_instruction: str | None = None,
+        where: str | None = None,
+        who: str | None = None,
+        what: str | None = None,
+        how: str | None = None,
     ) -> dict[str, Any]:
         """Generate the detailed scene paragraph for the TTS prompt."""
         prompt_text = load_prompt("generate_detailed_scene_paragraph")
@@ -1011,6 +1015,14 @@ class PipelineExecutor:
             parts.append(f"Character context: {character_context}")
         if character_static_instruction:
             parts.append(f"Character static instruction: {character_static_instruction}")
+        if where:
+            parts.append(f"Where hint: {where}")
+        if who:
+            parts.append(f"Who hint: {who}")
+        if what:
+            parts.append(f"What hint: {what}")
+        if how:
+            parts.append(f"How hint: {how}")
 
         user_message = (
             "Create the detailed scene paragraph for the TTS prompt based on this context.\n\n"

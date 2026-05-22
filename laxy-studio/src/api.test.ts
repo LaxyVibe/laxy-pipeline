@@ -628,6 +628,10 @@ describe('generateDetailedSceneParagraph', () => {
       characterRole: 'Museum Manager',
       characterContext: 'Formal and confident narrator.',
       characterStaticInstruction: 'You are John, a calm narrator.',
+      where: 'A quiet main hall near the central exhibit.',
+      who: 'Families and first-time visitors.',
+      what: 'Introduce the hall and help them settle in.',
+      how: 'Warm, intimate, and respectful.',
     });
 
     const calledUrl = String((global.fetch as any).mock.calls[0][0]);
@@ -640,6 +644,10 @@ describe('generateDetailedSceneParagraph', () => {
       characterRole: 'Museum Manager',
       characterContext: 'Formal and confident narrator.',
       characterStaticInstruction: 'You are John, a calm narrator.',
+      where: 'A quiet main hall near the central exhibit.',
+      who: 'Families and first-time visitors.',
+      what: 'Introduce the hall and help them settle in.',
+      how: 'Warm, intimate, and respectful.',
     });
     expect(result.detailedSceneParagraph).toContain('Late afternoon light');
   });
