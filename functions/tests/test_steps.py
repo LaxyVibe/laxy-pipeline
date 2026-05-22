@@ -589,6 +589,21 @@ class TestTtsPromptBuilder:
 
 
 class TestJapaneseHiraganaConversion:
+    def test_strip_tts_style_prefix_for_hiragana(self, executor):
+        stripped = executor._strip_tts_style_prefix_for_hiragana(
+            "Say in a deep, resonant, respectful, and profoundly knowledgeable voice: 八幡さまです。"
+        )
+
+        assert stripped == "八幡さまです。"
+
+    def test_normalize_hiragana_generated_text_collapses_soft_wraps_for_single_line_source(self, executor):
+        normalized = executor._normalize_hiragana_generated_text(
+            source_text="はちまんさまです。これはたいせつです。",
+            generated_text="はちまんさまです。\nこれはたいせつです。",
+        )
+
+        assert normalized == "はちまんさまです。 これはたいせつです。"
+
     def test_mask_and_restore_audio_tags_for_hiragana(self, executor):
         masked, tag_placeholders = executor._mask_audio_tags_for_hiragana(
             "[gasp] [amazed] これは... [short pause] いくらですか？"
@@ -621,6 +636,26 @@ class TestJapaneseHiraganaConversion:
         }
         assert mock_retry.await_args.kwargs["contents"] == (
             "⟦AUDIO_TAG_0⟧ ⟦AUDIO_TAG_1⟧ これは... ⟦AUDIO_TAG_2⟧ いくらですか？"
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_japanese_hiragana_handles_enhanced_script_prefix_and_soft_wraps(self, executor):
+        response = _make_genai_response("はちまんさまは、\nふるくからおおくのひとびとにしたしまれてきました。")
+
+        with patch("agents.pipeline_agent.load_prompt", return_value="prompt"), patch(
+            "agents.pipeline_agent._retry_generate_content",
+            new=AsyncMock(return_value=response),
+        ) as mock_retry:
+            result = await executor.generate_japanese_hiragana(
+                "Say in a deep, resonant voice: 八幡さまは、古くから多くの人々に親しまれてきました。"
+            )
+
+        assert result == {
+            "success": True,
+            "hiraganaText": "はちまんさまは、 ふるくからおおくのひとびとにしたしまれてきました。",
+        }
+        assert mock_retry.await_args.kwargs["contents"] == (
+            "八幡さまは、古くから多くの人々に親しまれてきました。"
         )
 
     def test_validate_hiragana_narration_output_rejects_non_hiragana_text(self, executor):

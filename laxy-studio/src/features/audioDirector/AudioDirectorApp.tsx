@@ -120,9 +120,11 @@ export default function AudioDirectorApp() {
               onEnhanceScript={controller.handleEnhanceActiveLanguage}
               onGeneratePerformanceGuidelines={controller.handleDirectorNoteDialogDone}
               onChangePerformanceHintField={controller.handleDirectorNoteFieldChange}
+              onChangeSceneParagraph={controller.handleDetailedSceneParagraphChange}
               onChangePerformanceGuidelines={controller.handleGeneratedPerformanceGuidelinesChange}
               performanceHint={{
                 where: controller.globalSettings.directorNote.scene,
+                detailedSceneParagraph: controller.globalSettings.directorNote.detailedSceneParagraph,
                 who: controller.globalSettings.directorNote.style,
                 what: controller.globalSettings.directorNote.pacing,
                 how: controller.globalSettings.directorNote.tone,

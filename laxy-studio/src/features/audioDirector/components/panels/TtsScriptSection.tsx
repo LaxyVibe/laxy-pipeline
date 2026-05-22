@@ -97,9 +97,11 @@ type Props = {
   onEnhanceScript: (forceRegenerate?: boolean) => void;
   onGeneratePerformanceGuidelines: () => Promise<boolean>;
   onChangePerformanceHintField: (field: 'scene' | 'style' | 'pacing' | 'tone', value: string) => void;
+  onChangeSceneParagraph: (value: string) => void;
   onChangePerformanceGuidelines: (value: string) => void;
   performanceHint: {
     where: string;
+    detailedSceneParagraph: string;
     who: string;
     what: string;
     how: string;
@@ -186,6 +188,7 @@ export default function TtsScriptSection(props: Props) {
     onEnhanceScript,
     onGeneratePerformanceGuidelines,
     onChangePerformanceHintField,
+    onChangeSceneParagraph,
     onChangePerformanceGuidelines,
     performanceHint,
     showJapaneseReading = false,
@@ -632,6 +635,15 @@ export default function TtsScriptSection(props: Props) {
               </Tooltip>
             </Stack>
           </Stack>
+
+          <TextField
+            label="Detailed scene paragraph"
+            multiline
+            minRows={6}
+            fullWidth
+            value={performanceHint.detailedSceneParagraph}
+            onChange={(event) => onChangeSceneParagraph(event.target.value)}
+          />
 
           <TextField
             label="Detailed performance guideline"

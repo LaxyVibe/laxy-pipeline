@@ -1374,6 +1374,16 @@ export function useAudioDirectorController() {
     }));
   };
 
+  const handleDetailedSceneParagraphChange = (value: string) => {
+    setGlobalSettings((previous) => ({
+      ...previous,
+      directorNote: {
+        ...clearCompiledPromptCustomization(previous.directorNote),
+        detailedSceneParagraph: value,
+      },
+    }));
+  };
+
   const handleCompiledPromptChange = (value: string) => {
     setGlobalSettings((previous) => ({
       ...previous,
@@ -1961,6 +1971,7 @@ export function useAudioDirectorController() {
     handleCompiledPromptChange,
     handleCurrentScriptTextChange,
     handleDeleteCustomCharacter,
+    handleDetailedSceneParagraphChange,
     handleDirectorNoteFieldChange,
     handleDirectorNoteDialogDone,
     handleGeneratedPerformanceGuidelinesChange,

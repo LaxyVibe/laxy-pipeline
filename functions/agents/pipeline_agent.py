@@ -1219,7 +1219,8 @@ class PipelineExecutor:
         """Convert Japanese narration text into all-Hiragana reading text."""
         prompt_text = load_prompt("ja_hiragana_narration")
         model = MODELS["flash"]
-        masked_script_content, tag_placeholders = self._mask_audio_tags_for_hiragana(script_content)
+        narration_source_text = self._strip_tts_style_prefix_for_hiragana(script_content)
+        masked_script_content, tag_placeholders = self._mask_audio_tags_for_hiragana(narration_source_text)
 
         response = await _retry_generate_content(
             self._client,
@@ -1235,6 +1236,10 @@ class PipelineExecutor:
         )
 
         hiragana = self._extract_hiragana_response_text(response.text if response.text else "")
+        hiragana = self._normalize_hiragana_generated_text(
+            source_text=masked_script_content,
+            generated_text=hiragana,
+        )
         validation_error = self._validate_hiragana_narration_output(
             source_text=masked_script_content,
             generated_text=hiragana,
@@ -1261,6 +1266,10 @@ class PipelineExecutor:
                 ),
             )
             hiragana = self._extract_hiragana_response_text(repair_response.text if repair_response.text else "")
+            hiragana = self._normalize_hiragana_generated_text(
+                source_text=masked_script_content,
+                generated_text=hiragana,
+            )
             validation_error = self._validate_hiragana_narration_output(
                 source_text=masked_script_content,
                 generated_text=hiragana,
@@ -1281,6 +1290,24 @@ class PipelineExecutor:
                 hiragana = hiragana[:-3]
             hiragana = hiragana.strip()
         return hiragana
+
+    @staticmethod
+    def _strip_tts_style_prefix_for_hiragana(text: str) -> str:
+        """Drop the Gemini enhancement style prefix before Japanese reading conversion."""
+        return re.sub(
+            r"^\s*Say in a .*? voice:\s*",
+            "",
+            text,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    @staticmethod
+    def _normalize_hiragana_generated_text(*, source_text: str, generated_text: str) -> str:
+        """Collapse model-added soft wraps for single-line source text without changing real paragraphs."""
+        if "\n" not in source_text and "\n" in generated_text:
+            return re.sub(r"[ \t]*\n+[ \t]*", " ", generated_text).strip()
+        return generated_text
 
     @staticmethod
     def _newline_signature(text: str) -> list[int]:
