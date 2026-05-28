@@ -768,12 +768,16 @@ def _build_audio_generate_language_stub_response(payload: AudioGenerateLanguageR
         history_metadata: dict[str, Any] = {}
         if payload.historyTarget is not None:
             generated_at_ms = int(time.time() * 1000)
+            guide_title = _non_empty(payload.historyTarget.guideTitle) or payload.historyTarget.guideId
+            spot_title = _non_empty(payload.historyTarget.spotTitle) or script.title or payload.historyTarget.spotId
+            timestamp = datetime.utcfromtimestamp(generated_at_ms / 1000).strftime("%Y%m%d-%H%M%S")
+            filename = f"{guide_title} - {spot_title} - {timestamp}.mp3"
             history_metadata = {
                 "guideId": payload.historyTarget.guideId,
                 "spotId": payload.historyTarget.spotId,
                 "lang": payload.historyTarget.lang,
                 "versionId": f"stub-version-{generated_at_ms:x}",
-                "storagePath": f"audio/{payload.sessionId}/{payload.language}/{payload.historyTarget.spotId}.wav",
+                "storagePath": f"audio/{payload.sessionId}/{payload.language}/{filename}",
                 "generatedAtMs": generated_at_ms,
                 "isActiveVersion": True,
                 "isLatestVersion": True,

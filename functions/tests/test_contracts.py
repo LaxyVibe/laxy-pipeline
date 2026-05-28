@@ -164,6 +164,7 @@ def test_audio_generate_language_request_accepts_history_target() -> None:
         }],
         "historyTarget": {
             "guideId": "guide-1",
+            "guideTitle": "Shrine Tour",
             "spotId": "spot-1",
             "spotTitle": "Entrance",
             "lang": "en",
@@ -171,6 +172,7 @@ def test_audio_generate_language_request_accepts_history_target() -> None:
     })
     assert payload.historyTarget is not None
     assert payload.historyTarget.guideId == "guide-1"
+    assert payload.historyTarget.guideTitle == "Shrine Tour"
 
 
 def test_audio_generate_language_request_accepts_missing_script_text() -> None:

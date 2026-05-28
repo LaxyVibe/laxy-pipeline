@@ -1571,7 +1571,16 @@ class PipelineExecutor:
                     )
                 )
 
-                storage_path = f"audio/{session_id}/{language}/{spot_id}.{output_extension}"
+                generated_at_ms = int(time.time() * 1000)
+                storage_path = self._build_audio_storage_path(
+                    session_id=session_id,
+                    language=language,
+                    spot_id=spot_id,
+                    output_extension=output_extension,
+                    generated_at_ms=generated_at_ms,
+                    history_target=history_target,
+                    title=title,
+                )
                 download_token = str(uuid4())
                 blob = bucket.blob(storage_path)
                 blob.metadata = {"firebaseStorageDownloadTokens": download_token}
@@ -1949,6 +1958,39 @@ class PipelineExecutor:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return ""
+
+    @staticmethod
+    def _sanitize_audio_filename_part(value: str | None, fallback: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            normalized = fallback
+        normalized = re.sub(r"[\x00-\x1f\x7f]+", "", normalized)
+        normalized = normalized.replace("/", "-").replace("\\", "-").replace(":", "-")
+        normalized = re.sub(r"\s+", " ", normalized).strip(" .")
+        normalized = re.sub(r"\.+$", "", normalized).strip()
+        return normalized or fallback
+
+    @classmethod
+    def _build_audio_storage_path(
+        cls,
+        *,
+        session_id: str,
+        language: str,
+        spot_id: str,
+        output_extension: str,
+        generated_at_ms: int,
+        history_target: dict[str, Any] | None,
+        title: str,
+    ) -> str:
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(generated_at_ms / 1000))
+        guide_part = cls._sanitize_audio_filename_part(
+            history_target.get("guideTitle") if history_target else None,
+            "Guide",
+        )
+        spot_source = history_target.get("spotTitle") if history_target else None
+        spot_part = cls._sanitize_audio_filename_part(spot_source, title.strip() or spot_id)
+        filename = f"{guide_part} - {spot_part} - {timestamp}.{output_extension}"
+        return f"audio/{session_id}/{language}/{filename}"
 
     async def _generate_aligned_srt_entries(
         self,

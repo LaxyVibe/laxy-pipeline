@@ -829,6 +829,7 @@ export interface AudioGenerateLanguageRequest {
   historyTarget?: {
     tenantId?: string;
     guideId: string;
+    guideTitle?: string;
     spotId: string;
     spotTitle?: string;
     lang: string;

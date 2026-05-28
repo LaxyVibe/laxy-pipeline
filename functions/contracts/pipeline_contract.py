@@ -49,6 +49,7 @@ class TranslationTextItem(BaseModel):
 class AudioHistoryTarget(BaseModel):
     tenantId: str | None = None
     guideId: str = Field(min_length=1)
+    guideTitle: str | None = None
     spotId: str = Field(min_length=1)
     spotTitle: str | None = None
     lang: str = Field(min_length=1)

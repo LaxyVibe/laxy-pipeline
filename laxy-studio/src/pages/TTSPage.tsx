@@ -1512,6 +1512,7 @@ export default function TTSPage() {
         historyTarget: {
           tenantId: historyTarget.tenantId,
           guideId: historyTarget.guideId,
+          guideTitle: historyTarget.guideTitle,
           spotId: historyTarget.spotId,
           spotTitle: historyTarget.spotTitle,
           lang: historyTarget.lang,

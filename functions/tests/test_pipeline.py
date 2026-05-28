@@ -1163,3 +1163,39 @@ class TestAudioGenerateLanguageTranscriptSource:
         assert result["audioFiles"][0]["audioUrl"] == "https://example.com/audio.mp3"
         assert mock_tts.await_args.kwargs["text"] == "こんにちは せかい"
         assert mock_srt.await_args.kwargs["text"] == "こんにちは せかい"
+
+    @pytest.mark.asyncio
+    async def test_generate_audio_for_language_uses_guide_and_spot_titles_in_storage_filename(self, executor):
+        mock_bucket = MagicMock()
+        mock_blob = MagicMock()
+        mock_bucket.blob.return_value = mock_blob
+        mock_blob.public_url = "https://example.com/audio.mp3"
+
+        with patch("agents.pipeline_agent.fb_storage.bucket", return_value=mock_bucket):
+            with patch.object(
+                executor,
+                "_synthesize_tts_audio",
+                new=AsyncMock(return_value=(b"audio", "audio/mpeg", "mp3", b"wav", 2300)),
+            ):
+                with patch.object(
+                    executor,
+                    "_generate_aligned_srt_entries",
+                    new=AsyncMock(return_value=[{"index": 1, "text": "Hello", "startTime": "00:00:00,000", "endTime": "00:00:02,300"}]),
+                ):
+                    await executor.generate_audio_for_language(
+                        session_id="audio-session-1",
+                        scripts=[{"spotId": "spot-1", "spotNumber": 1, "title": "Main Hall", "scriptText": "Hello world"}],
+                        voice_id="Kore",
+                        language="en",
+                        history_target={
+                            "guideId": "guide-1",
+                            "guideTitle": "Temple Walk",
+                            "spotId": "spot-1",
+                            "spotTitle": "Main Hall",
+                            "lang": "en",
+                        },
+                    )
+
+        storage_path = mock_bucket.blob.call_args.args[0]
+        assert storage_path.startswith("audio/audio-session-1/en/Temple Walk - Main Hall - ")
+        assert storage_path.endswith(".mp3")
