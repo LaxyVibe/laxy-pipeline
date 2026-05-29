@@ -21,6 +21,7 @@ import {
   InputLabel,
   MenuItem,
   Paper,
+  LinearProgress,
   Select,
   Stack,
   Tab,
@@ -35,9 +36,10 @@ import {
 } from '@mui/material';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import HeadphonesIcon from '@mui/icons-material/Headphones';
 import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
-import { collection, deleteField, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
+import { collection, deleteField, doc, getDoc, getDocs, orderBy, query, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { getCustomClaims } from '../admin/auth/authenticator';
 import { ApiRequestError, bootstrapAudioSession, generateAudioForLanguage, translateLanguage } from '../api';
 import { useAuthStore } from '../authStore';
@@ -50,12 +52,18 @@ import {
   mapAudioHistoryVersion,
   mapAudioTrackSummary,
   type AudioHistorySelection,
+  type AudioHistoryVersionRecord,
   type AudioHistoryTarget,
   type AudioTrackSummaryRecord,
   type StoredAudioDirectorConfig,
   type StoredTtsInputSnapshot,
   type StoredTtsPromptSnapshot,
 } from '../features/audioDirector/history';
+import {
+  buildTtsJobHistoryRecords,
+  resolveTtsHistorySelectedRecordId,
+  withoutJobHistoryCacheEntry,
+} from './ttsHistory';
 import { ROUTES } from '../routes';
 import { SUPPORTED_LANGUAGES, langLabel } from '../types/entity';
 
@@ -130,6 +138,12 @@ type AudioDirectorLaunchRecord = {
   windowRef: Window | null;
 };
 
+type HistoryDialogState = {
+  open: boolean;
+  jobId: string | null;
+  selectedRecordId: string | null;
+};
+
 type PersistFieldMode = 'ignore' | 'write' | 'delete';
 
 const AUDIO_DIRECTOR_ORIGIN = window.location.origin;
@@ -137,6 +151,7 @@ const SUPPORTED_TTS_JOB_LANGUAGE_CODES = ['en', 'ja', 'ko', 'zh-TW', 'zh-CN', 'f
 const SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET = new Set<string>(SUPPORTED_TTS_JOB_LANGUAGE_CODES);
 const SUPPORTED_TTS_JOB_LANGUAGES = SUPPORTED_LANGUAGES.filter((language) => SUPPORTED_TTS_JOB_LANGUAGE_CODE_SET.has(language.code));
 const LANGUAGE_ORDER = new Map<string, number>(SUPPORTED_TTS_JOB_LANGUAGE_CODES.map((code, index) => [code, index]));
+const AUDIO_PLAYBACK_SPEED_OPTIONS = [1, 1.25, 1.5, 2] as const;
 const AUDIO_GENERATION_RECOVERY_MAX_ATTEMPTS = 40;
 const AUDIO_GENERATION_RECOVERY_INTERVAL_MS = 3000;
 const AUDIO_GENERATION_RECOVERY_FRESHNESS_GRACE_MS = 10000;
@@ -405,17 +420,51 @@ function buildHistoryTarget(guide: SharedGuideTarget | null, job: TtsJob): Audio
 function OutputAudioPreviewPlayer(props: { audioUrl: string }) {
   const { audioUrl } = props;
   const trimmedAudioUrl = audioUrl.trim();
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playbackRate, setPlaybackRate] = useState<number>(1);
 
   if (!trimmedAudioUrl) return null;
 
+  const applyPlaybackRate = (nextPlaybackRate: number) => {
+    if (!audioRef.current) return;
+    audioRef.current.playbackRate = nextPlaybackRate;
+    audioRef.current.defaultPlaybackRate = nextPlaybackRate;
+  };
+
   return (
-    <Box
-      component="audio"
-      controls
-      preload="none"
-      src={trimmedAudioUrl}
-      sx={{ width: '100%' }}
-    />
+    <Stack spacing={1}>
+      <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+        <Typography variant="caption" color="text.secondary">
+          Playback Speed
+        </Typography>
+        <FormControl size="small" sx={{ minWidth: 112 }}>
+          <Select
+            value={String(playbackRate)}
+            inputProps={{ 'aria-label': 'Playback speed' }}
+            onChange={(event) => {
+              const nextPlaybackRate = Number(event.target.value);
+              setPlaybackRate(nextPlaybackRate);
+              applyPlaybackRate(nextPlaybackRate);
+            }}
+          >
+            {AUDIO_PLAYBACK_SPEED_OPTIONS.map((speed) => (
+              <MenuItem key={speed} value={String(speed)}>
+                {speed}x
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      </Stack>
+      <audio
+        key={trimmedAudioUrl}
+        ref={audioRef}
+        controls
+        preload="none"
+        src={trimmedAudioUrl}
+        style={{ width: '100%' }}
+        onLoadedMetadata={() => applyPlaybackRate(playbackRate)}
+      />
+    </Stack>
   );
 }
 
@@ -459,6 +508,14 @@ export default function TTSPage() {
   const [translationErrorByJob, setTranslationErrorByJob] = useState<Record<string, string>>({});
   const [audioPendingByJob, setAudioPendingByJob] = useState<Record<string, boolean>>({});
   const [audioErrorByJob, setAudioErrorByJob] = useState<Record<string, string>>({});
+  const [historyDialog, setHistoryDialog] = useState<HistoryDialogState>({
+    open: false,
+    jobId: null,
+    selectedRecordId: null,
+  });
+  const [historyRecordsByJobId, setHistoryRecordsByJobId] = useState<Record<string, AudioHistoryVersionRecord[]>>({});
+  const [historyLoadingByJobId, setHistoryLoadingByJobId] = useState<Record<string, boolean>>({});
+  const [historyErrorByJobId, setHistoryErrorByJobId] = useState<Record<string, string>>({});
   const [openAudioDirectorRevision, setOpenAudioDirectorRevision] = useState(0);
   const audioDirectorLaunchesRef = useRef<Record<string, AudioDirectorLaunchRecord>>({});
   const promptPersistTimeoutsRef = useRef<Record<string, number>>({});
@@ -531,9 +588,32 @@ export default function TTSPage() {
     )),
     [copyConfigDialog.targetJobId, jobs],
   );
+  const historyDialogJob = useMemo(
+    () => jobs.find((job) => job.id === historyDialog.jobId) ?? null,
+    [historyDialog.jobId, jobs],
+  );
+  const historyDialogRecords = historyDialog.jobId
+    ? (historyRecordsByJobId[historyDialog.jobId] ?? [])
+    : [];
+  const historyDialogSelectedRecord = historyDialogRecords.find((record) => record.versionId === historyDialog.selectedRecordId)
+    ?? historyDialogRecords[0]
+    ?? null;
+  const historyDialogLoading = historyDialog.jobId ? historyLoadingByJobId[historyDialog.jobId] === true : false;
+  const historyDialogError = historyDialog.jobId ? historyErrorByJobId[historyDialog.jobId] ?? '' : '';
 
   const updateJob = (jobId: string, updater: (job: TtsJob) => TtsJob) => {
     setJobs((currentJobs) => currentJobs.map((job) => (job.id === jobId ? updater(job) : job)));
+  };
+
+  const invalidateJobHistoryCache = (jobId: string) => {
+    setHistoryRecordsByJobId((current) => withoutJobHistoryCacheEntry(current, jobId));
+    setHistoryLoadingByJobId((current) => withoutJobHistoryCacheEntry(current, jobId));
+    setHistoryErrorByJobId((current) => withoutJobHistoryCacheEntry(current, jobId));
+    setHistoryDialog((current) => (
+      current.jobId === jobId
+        ? { ...current, selectedRecordId: null }
+        : current
+    ));
   };
 
   const persistJobStoredState = async (job: TtsJob, options: {
@@ -679,6 +759,10 @@ export default function TTSPage() {
     setTranslationErrorByJob({});
     setAudioPendingByJob({});
     setAudioErrorByJob({});
+    setHistoryDialog({ open: false, jobId: null, selectedRecordId: null });
+    setHistoryRecordsByJobId({});
+    setHistoryLoadingByJobId({});
+    setHistoryErrorByJobId({});
     Object.values(promptPersistTimeoutsRef.current).forEach((timeoutId) => {
       window.clearTimeout(timeoutId);
     });
@@ -875,6 +959,25 @@ export default function TTSPage() {
   }, [authLoading, guidePickerOpen, sharedGuideTarget, tenantId, user]);
 
   useEffect(() => {
+    if (!historyDialog.open || !historyDialog.jobId) return;
+    const nextSelectedRecordId = resolveTtsHistorySelectedRecordId(
+      historyDialogRecords,
+      historyDialog.selectedRecordId,
+    );
+    if (nextSelectedRecordId === historyDialog.selectedRecordId) return;
+    setHistoryDialog((current) => (
+      current.open && current.jobId === historyDialog.jobId
+        ? { ...current, selectedRecordId: nextSelectedRecordId }
+        : current
+    ));
+  }, [
+    historyDialog.jobId,
+    historyDialog.open,
+    historyDialog.selectedRecordId,
+    historyDialogRecords,
+  ]);
+
+  useEffect(() => {
     cleanupClosedAudioDirectorLaunches();
 
     const handleMessage = (event: MessageEvent) => {
@@ -1063,6 +1166,98 @@ export default function TTSPage() {
       targetJobId: null,
       sourceJobId: '',
     });
+  };
+
+  const closeHistoryDialog = () => {
+    setHistoryDialog({
+      open: false,
+      jobId: null,
+      selectedRecordId: null,
+    });
+  };
+
+  const loadJobHistoryRecords = async (jobId: string, options?: { force?: boolean }) => {
+    const force = options?.force === true;
+    const job = jobs.find((entry) => entry.id === jobId);
+    const historyTarget = job ? buildHistoryTarget(sharedGuideTarget, job) : null;
+    if (!job || !sharedGuideTarget || !historyTarget) return;
+    if (!force && historyRecordsByJobId[jobId]) return;
+
+    setHistoryLoadingByJobId((current) => ({
+      ...current,
+      [jobId]: true,
+    }));
+    setHistoryErrorByJobId((current) => ({
+      ...current,
+      [jobId]: '',
+    }));
+
+    try {
+      const { db } = initFirebase();
+      const trackDocId = buildAudioTrackDocId(job.spotId, job.language);
+      const trackDocRef = doc(db, 'guides', sharedGuideTarget.guideId, 'audioTracks', trackDocId);
+      const summaryDoc = await getDoc(trackDocRef);
+      const summaryFromStore = trackSummaries.find((entry) => entry.id === trackDocId) ?? null;
+      const summary = summaryDoc.exists()
+        ? mapAudioTrackSummary({
+          guideId: sharedGuideTarget.guideId,
+          docId: summaryDoc.id,
+          data: summaryDoc.data() as Record<string, unknown>,
+        }) ?? summaryFromStore
+        : summaryFromStore;
+
+      const versionsSnapshot = await getDocs(query(
+        collection(db, 'guides', sharedGuideTarget.guideId, 'audioTracks', trackDocId, 'versions'),
+        orderBy('createdAt', 'desc'),
+      ));
+
+      const records = buildTtsJobHistoryRecords({
+        guideId: sharedGuideTarget.guideId,
+        target: {
+          ...historyTarget,
+          spotTitle: summary?.spotTitle ?? historyTarget.spotTitle,
+        },
+        summary,
+        versions: versionsSnapshot.docs.map((versionDoc) => ({
+          docId: versionDoc.id,
+          data: versionDoc.data() as Record<string, unknown>,
+        })),
+      });
+
+      setHistoryRecordsByJobId((current) => ({
+        ...current,
+        [jobId]: records,
+      }));
+      setHistoryDialog((current) => (
+        current.jobId === jobId
+          ? {
+            ...current,
+            selectedRecordId: resolveTtsHistorySelectedRecordId(records, current.selectedRecordId),
+          }
+          : current
+      ));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setHistoryErrorByJobId((current) => ({
+        ...current,
+        [jobId]: `Unable to load saved history: ${message}`,
+      }));
+    } finally {
+      setHistoryLoadingByJobId((current) => ({
+        ...current,
+        [jobId]: false,
+      }));
+    }
+  };
+
+  const handleOpenHistoryDialog = (jobId: string) => {
+    const cachedRecords = historyRecordsByJobId[jobId] ?? [];
+    setHistoryDialog({
+      open: true,
+      jobId,
+      selectedRecordId: resolveTtsHistorySelectedRecordId(cachedRecords, null),
+    });
+    void loadJobHistoryRecords(jobId);
   };
 
   const handleApplyCopiedConfig = () => {
@@ -1569,6 +1764,7 @@ export default function TTSPage() {
         };
         return next;
       });
+      invalidateJobHistoryCache(jobId);
     } catch (error) {
       const shouldAttemptRecovery = (
         (error instanceof ApiRequestError && (error.status === 502 || error.status === 504 || error.retryable))
@@ -1665,6 +1861,7 @@ export default function TTSPage() {
             next[existingIndex] = summary;
             return next;
           });
+          invalidateJobHistoryCache(jobId);
           return true;
         }
 
@@ -2059,11 +2256,22 @@ export default function TTSPage() {
                                     >
                                       {audioPending ? 'Generating…' : 'Generate Audio'}
                                     </Button>
+                                    <Button
+                                      variant="outlined"
+                                      size="small"
+                                      startIcon={<HistoryOutlinedIcon />}
+                                      onClick={() => handleOpenHistoryDialog(job.id)}
+                                    >
+                                      History
+                                    </Button>
                                     {audioError ? (
                                       <Typography variant="caption" color="error.main">
                                         {audioError}
                                       </Typography>
                                     ) : null}
+                                    <Typography variant="caption" color="text.secondary">
+                                      Browse saved versions for this output without changing the current row.
+                                    </Typography>
                                     <OutputAudioPreviewPlayer audioUrl={job.outputAudio} />
                                   </Stack>
                                 </TableCell>
@@ -2082,6 +2290,238 @@ export default function TTSPage() {
 
         <DeployVersionFooter />
       </Stack>
+
+      <Dialog
+        open={historyDialog.open}
+        onClose={closeHistoryDialog}
+        maxWidth="lg"
+        fullWidth
+      >
+        <DialogTitle>Saved Audio History</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            {historyDialogJob ? (
+              <Stack spacing={0.5}>
+                <Typography variant="body2" color="text.secondary">
+                  Browse saved versions for <strong>{historyDialogJob.spotTitle}</strong> in {langLabel(historyDialogJob.language)}.
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Browsing history here is read-only and will not change the current row output.
+                </Typography>
+              </Stack>
+            ) : null}
+
+            {historyDialogLoading ? <LinearProgress /> : null}
+            {historyDialogError ? <Alert severity="error">{historyDialogError}</Alert> : null}
+
+            {!historyDialogLoading && !historyDialogError && historyDialogRecords.length === 0 ? (
+              <Alert severity="info">
+                No saved audio history exists for this spot-language row yet.
+              </Alert>
+            ) : null}
+
+            {historyDialogRecords.length > 0 ? (
+              <Stack
+                direction={{ xs: 'column', md: 'row' }}
+                spacing={2}
+                alignItems="stretch"
+                sx={{ minHeight: { md: 520 } }}
+              >
+                <Paper
+                  elevation={0}
+                  sx={{
+                    width: { xs: '100%', md: 300 },
+                    flexShrink: 0,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 3,
+                    overflow: 'hidden',
+                    bgcolor: 'background.paper',
+                  }}
+                >
+                  <Box sx={{ px: 2, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
+                    <Typography variant="subtitle2" fontWeight={700}>
+                      Versions
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Select a saved generation to inspect its details.
+                    </Typography>
+                  </Box>
+                  <Stack spacing={0} sx={{ maxHeight: { xs: 320, md: 560 }, overflowY: 'auto' }}>
+                    {historyDialogRecords.map((record) => {
+                      const isSelected = record.versionId === historyDialogSelectedRecord?.versionId;
+                      return (
+                        <Box
+                          key={record.versionId}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => {
+                            setHistoryDialog((current) => ({
+                              ...current,
+                              selectedRecordId: record.versionId,
+                            }));
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter' && event.key !== ' ') return;
+                            event.preventDefault();
+                            setHistoryDialog((current) => ({
+                              ...current,
+                              selectedRecordId: record.versionId,
+                            }));
+                          }}
+                          sx={{
+                            px: 2,
+                            py: 1.5,
+                            cursor: 'pointer',
+                            borderBottom: '1px solid',
+                            borderColor: 'divider',
+                            bgcolor: isSelected ? 'action.selected' : 'transparent',
+                            outline: 'none',
+                            '&:hover': {
+                              bgcolor: isSelected ? 'action.selected' : 'action.hover',
+                            },
+                            '&:last-of-type': {
+                              borderBottom: 'none',
+                            },
+                          }}
+                        >
+                          <Stack spacing={1}>
+                            <Stack direction="row" justifyContent="space-between" spacing={1} alignItems="flex-start">
+                              <Typography variant="body2" fontWeight={isSelected ? 700 : 600}>
+                                {record.versionId}
+                              </Typography>
+                              {isSelected ? <Chip size="small" variant="outlined" label="Viewing" /> : null}
+                            </Stack>
+                            <Typography variant="caption" color="text.secondary">
+                              {record.generatedAt ? new Date(record.generatedAt).toLocaleString() : 'Unknown'}
+                            </Typography>
+                            <Stack direction="row" spacing={0.75} sx={{ flexWrap: 'wrap' }}>
+                              {record.isActiveVersion ? <Chip size="small" color="success" label="Active" /> : null}
+                              {record.isLatestVersion ? <Chip size="small" label="Latest" /> : null}
+                            </Stack>
+                            <Typography variant="caption" color="text.secondary">
+                              {record.voiceId || 'Unknown voice'}
+                              {record.model ? ` · ${record.model}` : ''}
+                            </Typography>
+                          </Stack>
+                        </Box>
+                      );
+                    })}
+                  </Stack>
+                </Paper>
+
+                <Paper
+                  elevation={0}
+                  sx={{
+                    flex: 1,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 3,
+                    p: 2.5,
+                    minWidth: 0,
+                  }}
+                >
+                  {historyDialogSelectedRecord ? (
+                    <Stack spacing={2}>
+                      <Stack
+                        direction={{ xs: 'column', sm: 'row' }}
+                        spacing={1.5}
+                        justifyContent="space-between"
+                        alignItems={{ xs: 'flex-start', sm: 'center' }}
+                      >
+                        <Box>
+                          <Typography variant="overline" color="text.secondary">
+                            Preview
+                          </Typography>
+                          <Typography variant="h6" fontWeight={700}>
+                            {historyDialogSelectedRecord.versionId}
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            {historyDialogSelectedRecord.generatedAt
+                              ? new Date(historyDialogSelectedRecord.generatedAt).toLocaleString()
+                              : 'Unknown generated time'}
+                          </Typography>
+                        </Box>
+                        <Button
+                          component="a"
+                          href={historyDialogSelectedRecord.audioUrl}
+                          download
+                          target="_blank"
+                          rel="noreferrer"
+                          size="small"
+                          startIcon={<DownloadOutlinedIcon />}
+                        >
+                          Download Audio
+                        </Button>
+                      </Stack>
+
+                      <Stack direction="row" spacing={0.75} sx={{ flexWrap: 'wrap' }}>
+                        {historyDialogSelectedRecord.isActiveVersion ? <Chip size="small" color="success" label="Active version" /> : null}
+                        {historyDialogSelectedRecord.isLatestVersion ? <Chip size="small" label="Latest version" /> : null}
+                        {historyDialogSelectedRecord.voiceId ? <Chip size="small" variant="outlined" label={`Voice: ${historyDialogSelectedRecord.voiceId}`} /> : null}
+                        {historyDialogSelectedRecord.model ? <Chip size="small" variant="outlined" label={`Model: ${historyDialogSelectedRecord.model}`} /> : null}
+                      </Stack>
+
+                      <Paper
+                        elevation={0}
+                        sx={{
+                          p: 2,
+                          borderRadius: 3,
+                          border: '1px solid',
+                          borderColor: 'divider',
+                          bgcolor: 'background.default',
+                        }}
+                      >
+                        <Stack spacing={1.25}>
+                          <Typography variant="subtitle2" fontWeight={700}>
+                            Audio Preview
+                          </Typography>
+                          <OutputAudioPreviewPlayer audioUrl={historyDialogSelectedRecord.audioUrl} />
+                        </Stack>
+                      </Paper>
+
+                      <Paper
+                        elevation={0}
+                        sx={{
+                          p: 2,
+                          borderRadius: 3,
+                          border: '1px solid',
+                          borderColor: 'divider',
+                          bgcolor: 'background.default',
+                          minHeight: 220,
+                        }}
+                      >
+                        <Stack spacing={1}>
+                          <Typography variant="subtitle2" fontWeight={700}>
+                            Script Snapshot
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Saved transcript content for this generated version.
+                          </Typography>
+                          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                            {historyDialogSelectedRecord.scriptText || 'No saved script snapshot was found for this version.'}
+                          </Typography>
+                        </Stack>
+                      </Paper>
+                    </Stack>
+                  ) : (
+                    <Stack justifyContent="center" alignItems="center" sx={{ minHeight: 320 }}>
+                      <Typography variant="body2" color="text.secondary">
+                        Select a version from the left to preview it here.
+                      </Typography>
+                    </Stack>
+                  )}
+                </Paper>
+              </Stack>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeHistoryDialog}>
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog
         open={copyConfigDialog.open}
