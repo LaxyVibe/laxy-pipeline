@@ -17,7 +17,8 @@ function assertRequiredFirebaseEnv(mode: string, env: Record<string, string>) {
   if (missing.length > 0) {
     throw new Error(
       `Missing required Firebase env vars for laxy-studio: ${missing.join(', ')}. `
-      + 'Populate laxy-studio/.env.local or export the VITE_FIREBASE_* variables before building.',
+      + 'Populate laxy-studio/.env.<mode>.local (for example .env.dev.local or .env.sit.local) '
+      + 'or export the VITE_FIREBASE_* variables before building.',
     )
   }
 }
@@ -27,6 +28,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   assertRequiredFirebaseEnv(mode, env)
   const deployVersion = env.VITE_DEPLOY_VERSION || new Date().toISOString()
+  const deployEnvironment = env.VITE_DEPLOY_ENV || mode
 
   const GCP_PROJECT = env.VITE_GCP_PROJECT || 'laxy-pipeline-dev'
   const GCP_REGION  = env.VITE_GCP_REGION  || 'us-central1'
@@ -34,6 +36,7 @@ export default defineConfig(({ mode }) => {
   return {
     define: {
       __APP_BUILD_VERSION__: JSON.stringify(deployVersion),
+      __APP_BUILD_ENVIRONMENT__: JSON.stringify(deployEnvironment),
     },
     plugins: [react()],
     test: {

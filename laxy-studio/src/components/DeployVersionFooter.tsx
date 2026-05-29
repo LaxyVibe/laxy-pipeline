@@ -1,5 +1,10 @@
 import { Box, Typography } from '@mui/material';
-import { appBuildVersion, formatBuildVersion } from '../buildInfo';
+import {
+  appBuildEnvironment,
+  appBuildVersion,
+  formatBuildEnvironment,
+  formatBuildVersion,
+} from '../buildInfo';
 
 type Props = {
   align?: 'left' | 'center' | 'right';
@@ -7,7 +12,8 @@ type Props = {
 };
 
 export default function DeployVersionFooter({ align = 'right', compact = false }: Props) {
-  const label = formatBuildVersion(appBuildVersion);
+  const environmentLabel = formatBuildEnvironment(appBuildEnvironment);
+  const versionLabel = formatBuildVersion(appBuildVersion);
 
   return (
     <Box
@@ -31,7 +37,7 @@ export default function DeployVersionFooter({ align = 'right', compact = false }
           letterSpacing: '0.02em',
         }}
       >
-        Deploy version: {label}
+        Deploy: {environmentLabel} · {versionLabel}
       </Typography>
     </Box>
   );

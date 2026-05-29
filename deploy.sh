@@ -13,6 +13,7 @@ set -euo pipefail
 
 PROJECT_ID="${GCP_PROJECT:-laxy-studio-dev}"
 REGION="${GCP_REGION:-us-central1}"
+FRONTEND_MODE="${FRONTEND_MODE:-dev}"
 SA="${PROJECT_ID}@appspot.gserviceaccount.com"
 
 RED='\033[0;31m'
@@ -86,9 +87,16 @@ deploy_hosting() {
   npm run test
   popd > /dev/null
 
-  log "Building frontend..."
   pushd laxy-studio > /dev/null
-  npm run build
+  local frontend_env_file=".env.${FRONTEND_MODE}.local"
+  if [[ ! -f "$frontend_env_file" ]]; then
+    err "Missing frontend env file: laxy-studio/$frontend_env_file"
+    err "Create laxy-studio/.env.dev.local or laxy-studio/.env.sit.local and rerun."
+    exit 1
+  fi
+
+  log "Building frontend with mode '$FRONTEND_MODE' using $frontend_env_file..."
+  npm run build -- --mode "$FRONTEND_MODE"
   popd > /dev/null
 
   log "Deploying hosting to $PROJECT_ID..."
